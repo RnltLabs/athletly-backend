@@ -1,13 +1,13 @@
 """Plan Evaluator: LLM-based scoring of generated training plans.
 
-Priority 4 — Audit finding #5 ("Kein Evaluator-Optimizer Loop"):
+Priority 4 -- Audit finding #5 ("Kein Evaluator-Optimizer Loop"):
     v1.0 generates plans in a single shot with no feedback. Every LLM call
     is fire-and-forget. The evaluator-optimizer pattern (Anthropic's "Building
-    Effective Agents") adds a feedback loop: generate → evaluate → accept or
+    Effective Agents") adds a feedback loop: generate -> evaluate -> accept or
     regenerate with evaluation feedback.
 
     This module implements the evaluator half. The cognitive loop in
-    state_machine.py orchestrates the generate → evaluate cycle by selecting
+    state_machine.py orchestrates the generate -> evaluate cycle by selecting
     the evaluate_plan action after generate_plan.
 
 Evaluation criteria (scored 0-100):
@@ -22,10 +22,8 @@ Evaluation criteria (scored 0-100):
 import json
 from dataclasses import dataclass, field
 
-from google import genai
-
 from src.agent.json_utils import extract_json
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 
 
 # Threshold for accepting a plan without regeneration
@@ -52,7 +50,7 @@ class PlanEvaluation:
 EVALUATION_SYSTEM_PROMPT = """\
 You are evaluating a training plan for an athlete (any sport). Score each criterion 0-100.
 
-Be STRICT — a perfect plan is rare. Common issues to penalize:
+Be STRICT -- a perfect plan is rare. Common issues to penalize:
 - Sessions without specific pace/HR/power targets (generic "easy run" with no zones)
 - Sport distribution that doesn't match athlete preferences
 - Too many hard sessions back-to-back without recovery
@@ -115,24 +113,15 @@ def evaluate_plan(
     Returns:
         PlanEvaluation with score, criteria, issues, and suggestions.
     """
-    client = get_client()
     prompt = _build_evaluation_prompt(plan, profile, beliefs, assessment)
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=prompt)],
-            ),
-        ],
-        config=genai.types.GenerateContentConfig(
-            system_instruction=EVALUATION_SYSTEM_PROMPT,
-            temperature=0.2,
-        ),
+    response = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt=EVALUATION_SYSTEM_PROMPT,
+        temperature=0.2,
     )
 
-    text = response.text.strip()
+    text = response.choices[0].message.content.strip()
     result = extract_json(text)
 
     return PlanEvaluation(

@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from src.agent.json_utils import extract_json
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 
 log = logging.getLogger(__name__)
 
@@ -69,29 +69,18 @@ def infer_goal_type(goal: dict, use_llm: bool = True) -> str:
 def _infer_goal_type_llm(goal: dict) -> str | None:
     """Infer goal type using LLM. Returns None on failure."""
     try:
-        from google import genai
-
-        client = get_client()
         prompt = GOAL_TYPE_PROMPT.format(
             event=goal.get("event", "none"),
             target_time=goal.get("target_time", "none"),
             target_date=goal.get("target_date", "none"),
         )
 
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[
-                genai.types.Content(
-                    role="user",
-                    parts=[genai.types.Part(text=prompt)],
-                ),
-            ],
-            config=genai.types.GenerateContentConfig(
-                temperature=0.1,
-            ),
+        response = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
         )
 
-        result = extract_json(response.text.strip())
+        result = extract_json(response.choices[0].message.content.strip())
         goal_type = result.get("goal_type", "")
         if goal_type in GOAL_TYPES:
             return goal_type
@@ -399,8 +388,6 @@ def _detect_triggers_llm(
 ) -> list[dict] | None:
     """Detect triggers using LLM evaluation. Returns None on failure."""
     try:
-        from google import genai
-
         compliance_info = "no plan" if not weekly_compliance else (
             f"rate={weekly_compliance.get('compliance_rate', '?')}, "
             f"matched={weekly_compliance.get('matched_count', '?')}/{weekly_compliance.get('planned_count', '?')}"
@@ -413,21 +400,12 @@ def _detect_triggers_llm(
             compliance_info=compliance_info,
         )
 
-        client = get_client()
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[
-                genai.types.Content(
-                    role="user",
-                    parts=[genai.types.Part(text=prompt)],
-                ),
-            ],
-            config=genai.types.GenerateContentConfig(
-                temperature=0.2,
-            ),
+        response = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
         )
 
-        result = extract_json(response.text.strip())
+        result = extract_json(response.choices[0].message.content.strip())
         raw_triggers = result.get("triggers", [])
 
         # Convert to standard trigger format
@@ -568,22 +546,16 @@ def compose_startup_greeting(
 
     # Try LLM call
     try:
-        from src.agent.llm import get_client
         from src.agent.prompts import GREETING_SYSTEM_PROMPT
         from src.agent.json_utils import extract_json
-        from google import genai
 
-        client = get_client()
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=user_message,
-            config=genai.types.GenerateContentConfig(
-                system_instruction=GREETING_SYSTEM_PROMPT,
-                temperature=0.7,
-            ),
+        response = chat_completion(
+            messages=[{"role": "user", "content": user_message}],
+            system_prompt=GREETING_SYSTEM_PROMPT,
+            temperature=0.7,
         )
 
-        result = extract_json(response.text)
+        result = extract_json(response.choices[0].message.content)
         greeting = result.get("greeting", "")
         if greeting and len(greeting) > 10:
             return greeting

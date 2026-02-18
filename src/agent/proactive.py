@@ -201,9 +201,8 @@ def _detect_high_fatigue(activities: list[dict], episodes: list[dict]) -> bool:
 def _detect_fatigue_llm(recent_activities: list[dict]) -> bool | None:
     """Evaluate fatigue using LLM. Returns None on failure."""
     try:
-        from google import genai
         from src.agent.json_utils import extract_json
-        from src.agent.llm import MODEL, get_client
+        from src.agent.llm import chat_completion
 
         # Build a concise activity summary
         summaries = []
@@ -224,19 +223,12 @@ def _detect_fatigue_llm(recent_activities: list[dict]) -> bool | None:
             '{"fatigued": true|false, "reasoning": "1 sentence"}'
         )
 
-        client = get_client()
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[
-                genai.types.Content(
-                    role="user",
-                    parts=[genai.types.Part(text=prompt)],
-                ),
-            ],
-            config=genai.types.GenerateContentConfig(temperature=0.1),
+        response = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
         )
 
-        result = extract_json(response.text.strip())
+        result = extract_json(response.choices[0].message.content.strip())
         return result.get("fatigued", False)
     except Exception:
         return None

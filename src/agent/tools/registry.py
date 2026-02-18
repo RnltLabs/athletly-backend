@@ -1,7 +1,7 @@
 """Tool Registry -- manages all tools available to the agent.
 
 Equivalent to Claude Code's tool system. Each tool is:
-1. A Gemini FunctionDeclaration (schema for the model)
+1. An OpenAI-compatible function definition (schema for the model via LiteLLM)
 2. A Python callable (implementation)
 
 Tools can be:
@@ -11,8 +11,6 @@ Tools can be:
 
 from dataclasses import dataclass, field
 from typing import Any, Callable
-
-from google import genai
 
 
 @dataclass
@@ -42,17 +40,26 @@ class ToolRegistry:
             tool.source = "mcp"
             self._tools[tool.name] = tool
 
-    def get_declarations(self) -> list[genai.types.FunctionDeclaration]:
-        """Get Gemini FunctionDeclaration objects for all registered tools."""
-        declarations = []
+    def get_openai_tools(self) -> list[dict]:
+        """Get tool declarations in OpenAI/LiteLLM format.
+
+        Returns a list of dicts suitable for the ``tools`` parameter of
+        ``litellm.completion()`` / ``openai.chat.completions.create()``.
+        """
+        result = []
         for tool in self._tools.values():
-            decl = genai.types.FunctionDeclaration(
-                name=tool.name,
-                description=tool.description,
-                parameters=_schema_to_genai(tool.parameters) if tool.parameters else None,
-            )
-            declarations.append(decl)
-        return declarations
+            entry: dict = {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                },
+            }
+            if tool.parameters:
+                # Strip nullable (not part of JSON Schema proper) before sending
+                entry["function"]["parameters"] = _clean_parameters(tool.parameters)
+            result.append(entry)
+        return result
 
     def execute(self, name: str, args: dict) -> dict:
         """Execute a tool by name with given arguments."""
@@ -74,46 +81,25 @@ class ToolRegistry:
         ]
 
 
-def _schema_to_genai(schema: dict) -> genai.types.Schema:
-    """Convert a JSON Schema dict to Gemini Schema object.
+def _clean_parameters(schema: dict) -> dict:
+    """Clean a JSON Schema dict for OpenAI tool format.
 
-    Handles nested objects, arrays, and primitive types.
+    Removes non-standard keys like ``nullable`` that some tool definitions
+    carry (Gemini extension) and recursively cleans nested schemas.
     """
-    type_map = {
-        "string": genai.types.Type.STRING,
-        "integer": genai.types.Type.INTEGER,
-        "number": genai.types.Type.NUMBER,
-        "boolean": genai.types.Type.BOOLEAN,
-        "array": genai.types.Type.ARRAY,
-        "object": genai.types.Type.OBJECT,
-    }
-
-    schema_type = type_map.get(schema.get("type", "string"), genai.types.Type.STRING)
-
-    kwargs = {"type": schema_type}
-
-    if "description" in schema:
-        kwargs["description"] = schema["description"]
-
-    if "enum" in schema:
-        kwargs["enum"] = schema["enum"]
-
-    if "properties" in schema:
-        kwargs["properties"] = {
-            k: _schema_to_genai(v)
-            for k, v in schema["properties"].items()
-        }
-
-    if "required" in schema:
-        kwargs["required"] = schema["required"]
-
-    if "items" in schema:
-        kwargs["items"] = _schema_to_genai(schema["items"])
-
-    if schema.get("nullable"):
-        kwargs["nullable"] = True
-
-    return genai.types.Schema(**kwargs)
+    cleaned: dict = {}
+    for key, value in schema.items():
+        if key == "nullable":
+            continue  # Not standard JSON Schema; skip
+        if key == "properties" and isinstance(value, dict):
+            cleaned["properties"] = {
+                k: _clean_parameters(v) for k, v in value.items()
+            }
+        elif key == "items" and isinstance(value, dict):
+            cleaned["items"] = _clean_parameters(value)
+        else:
+            cleaned[key] = value
+    return cleaned
 
 
 def get_default_tools(user_model) -> ToolRegistry:

@@ -1,6 +1,9 @@
 # Environment
 .env
 
+# Supabase local state (contains project ref, pooler URL)
+supabase/.temp/
+
 # Python
 __pycache__/
 *.py[cod]

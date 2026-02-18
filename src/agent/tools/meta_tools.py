@@ -5,8 +5,7 @@ get_session_context provides conversation metadata.
 """
 
 import json
-from google import genai
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 from src.agent.json_utils import extract_json
 from src.agent.tools.registry import Tool, ToolRegistry
 
@@ -45,23 +44,16 @@ def register_meta_tools(registry: ToolRegistry, user_model):
         context_str = json.dumps(context or {}, ensure_ascii=False, indent=2)
         prompt = f"TASK: {task}\n\nCONTEXT:\n{context_str}"
 
-        client = get_client()
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=prompt)],
-            )],
-            config=genai.types.GenerateContentConfig(
-                system_instruction=specialist_prompts[type],
-                temperature=0.3,
-            ),
+        response = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt=specialist_prompts[type],
+            temperature=0.3,
         )
 
         try:
-            result = extract_json(response.text.strip())
+            result = extract_json(response.choices[0].message.content.strip())
         except (ValueError, Exception):
-            result = {"raw_response": response.text.strip()[:2000]}
+            result = {"raw_response": response.choices[0].message.content.strip()[:2000]}
 
         return {"specialist": type, "result": result}
 

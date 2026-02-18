@@ -9,15 +9,15 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from google import genai
-
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 from src.agent.json_utils import extract_json
 from src.agent.tools.registry import Tool, ToolRegistry
+from src.config import get_settings
 
 
 def register_planning_tools(registry: ToolRegistry, user_model):
     """Register all planning tools."""
+    _settings = get_settings()
 
     def create_training_plan(
         focus: str = None,
@@ -26,13 +26,23 @@ def register_planning_tools(registry: ToolRegistry, user_model):
     ) -> dict:
         """Generate a training plan using the coach persona."""
         from src.agent.prompts import COACH_SYSTEM_PROMPT, build_plan_prompt
-        from src.tools.activity_store import list_activities
-        from src.memory.episodes import list_episodes, retrieve_relevant_episodes
 
         profile = user_model.project_profile()
         beliefs = user_model.get_active_beliefs(min_confidence=0.6)
-        activities = list_activities()
-        episodes = list_episodes(limit=10)
+
+        if _settings.use_supabase:
+            from src.db import list_activities as db_list_activities
+            from src.db import list_episodes as db_list_episodes
+            uid = _settings.agenticsports_user_id
+            activities = db_list_activities(uid, limit=50)
+            episodes = db_list_episodes(uid, limit=10)
+        else:
+            from src.tools.activity_store import list_activities
+            from src.memory.episodes import list_episodes
+            activities = list_activities()
+            episodes = list_episodes(limit=10)
+
+        from src.memory.episodes import retrieve_relevant_episodes
         relevant_eps = retrieve_relevant_episodes(
             {"goal": profile.get("goal", {}), "sports": profile.get("sports", [])},
             episodes,
@@ -51,20 +61,13 @@ def register_planning_tools(registry: ToolRegistry, user_model):
         if sport_distribution:
             base_prompt += f"\n\nREQUESTED SPORT DISTRIBUTION: {json.dumps(sport_distribution)}"
 
-        client = get_client()
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=base_prompt)],
-            )],
-            config=genai.types.GenerateContentConfig(
-                system_instruction=COACH_SYSTEM_PROMPT,
-                temperature=0.7,
-            ),
+        response = chat_completion(
+            messages=[{"role": "user", "content": base_prompt}],
+            system_prompt=COACH_SYSTEM_PROMPT,
+            temperature=0.7,
         )
 
-        plan = extract_json(response.text.strip())
+        plan = extract_json(response.choices[0].message.content.strip())
         plan["_generated_at"] = datetime.now().isoformat()
         return plan
 
@@ -141,13 +144,24 @@ def register_planning_tools(registry: ToolRegistry, user_model):
     ))
 
     def save_plan(plan: dict) -> dict:
-        """Save a training plan to disk."""
-        plans_dir = Path("data/plans")
-        plans_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        path = plans_dir / f"plan_{timestamp}.json"
-        path.write_text(json.dumps(plan, indent=2))
-        return {"saved": True, "path": str(path)}
+        """Save a training plan."""
+        if _settings.use_supabase:
+            from src.db import store_plan
+            evaluation = plan.pop("_evaluation", None)
+            score = evaluation.get("score") if evaluation else None
+            feedback = evaluation.get("feedback") if evaluation else None
+            row = store_plan(
+                _settings.agenticsports_user_id, plan,
+                evaluation_score=score, evaluation_feedback=feedback,
+            )
+            return {"saved": True, "id": row["id"]}
+        else:
+            plans_dir = Path("data/plans")
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            path = plans_dir / f"plan_{timestamp}.json"
+            path.write_text(json.dumps(plan, indent=2))
+            return {"saved": True, "path": str(path)}
 
     registry.register(Tool(
         name="save_plan",

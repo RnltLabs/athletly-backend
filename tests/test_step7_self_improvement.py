@@ -13,7 +13,7 @@ from src.memory.episodes import extract_meta_beliefs, META_REFLECTION_PROMPT
 from src.memory.user_model import UserModel
 
 
-# ── Fixtures ─────────────────────────────────────────────────────
+# -- Fixtures -----------------------------------------------------------------
 
 
 @pytest.fixture
@@ -31,7 +31,7 @@ def sample_episode():
         ],
         "lessons": [
             "Emphasize easy pace targets more strongly in the plan",
-            "Thursday sessions missed 3 weeks in a row — schedule conflict",
+            "Thursday sessions missed 3 weeks in a row -- schedule conflict",
         ],
         "patterns_detected": [
             "Athlete runs easy sessions 15-20 seconds/km too fast",
@@ -45,24 +45,27 @@ def sample_episode():
     }
 
 
-def _mock_llm_response(response_json: dict) -> MagicMock:
-    mock = MagicMock()
-    mock.text = json.dumps(response_json)
-    return mock
+def _mock_litellm_response(response_json: dict) -> MagicMock:
+    """Create a mock LiteLLM response object (OpenAI-compatible)."""
+    mock_response = MagicMock()
+    mock_message = MagicMock()
+    mock_message.content = json.dumps(response_json)
+    mock_choice = MagicMock()
+    mock_choice.message = mock_message
+    mock_response.choices = [mock_choice]
+    return mock_response
 
 
-# ── extract_meta_beliefs ─────────────────────────────────────────
+# -- extract_meta_beliefs -----------------------------------------------------
 
 
 class TestExtractMetaBeliefs:
-    @patch("src.memory.episodes.get_client")
-    def test_extracts_meta_beliefs(self, mock_client, sample_episode):
-        mock_model = MagicMock()
-        mock_client.return_value.models = mock_model
-        mock_model.generate_content.return_value = _mock_llm_response({
+    @patch("src.memory.episodes.chat_completion")
+    def test_extracts_meta_beliefs(self, mock_completion, sample_episode):
+        mock_completion.return_value = _mock_litellm_response({
             "meta_beliefs": [
                 {
-                    "text": "Athlete runs easy sessions too fast — emphasize zone discipline",
+                    "text": "Athlete runs easy sessions too fast -- emphasize zone discipline",
                     "category": "meta",
                     "confidence": 0.85,
                     "reasoning": "Pattern persists across 3 weeks",
@@ -81,55 +84,53 @@ class TestExtractMetaBeliefs:
         assert beliefs[0]["category"] == "meta"
         assert "zone discipline" in beliefs[0]["text"]
 
-    @patch("src.memory.episodes.get_client")
-    def test_returns_empty_for_no_insights(self, mock_client, sample_episode):
-        mock_model = MagicMock()
-        mock_client.return_value.models = mock_model
-        mock_model.generate_content.return_value = _mock_llm_response({
+    @patch("src.memory.episodes.chat_completion")
+    def test_returns_empty_for_no_insights(self, mock_completion, sample_episode):
+        mock_completion.return_value = _mock_litellm_response({
             "meta_beliefs": []
         })
 
         beliefs = extract_meta_beliefs(sample_episode)
         assert beliefs == []
 
-    @patch("src.memory.episodes.get_client")
-    def test_handles_malformed_response(self, mock_client, sample_episode):
-        mock_model = MagicMock()
-        mock_client.return_value.models = mock_model
-        mock_model.generate_content.return_value = MagicMock(text="not json at all")
+    @patch("src.memory.episodes.chat_completion")
+    def test_handles_malformed_response(self, mock_completion, sample_episode):
+        mock_response = MagicMock()
+        mock_message = MagicMock()
+        mock_message.content = "not json at all"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_response.choices = [mock_choice]
+        mock_completion.return_value = mock_response
 
         beliefs = extract_meta_beliefs(sample_episode)
         assert beliefs == []
 
-    @patch("src.memory.episodes.get_client")
-    def test_prompt_includes_episode_data(self, mock_client, sample_episode):
-        mock_model = MagicMock()
-        mock_client.return_value.models = mock_model
-        mock_model.generate_content.return_value = _mock_llm_response({"meta_beliefs": []})
+    @patch("src.memory.episodes.chat_completion")
+    def test_prompt_includes_episode_data(self, mock_completion, sample_episode):
+        mock_completion.return_value = _mock_litellm_response({"meta_beliefs": []})
 
         extract_meta_beliefs(sample_episode)
 
         # Verify the prompt was built with episode data
-        call_args = mock_model.generate_content.call_args
-        prompt_content = call_args.kwargs.get("contents") or call_args[1].get("contents")
-        prompt_text = prompt_content[0].parts[0].text
+        call_args = mock_completion.call_args
+        messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        prompt_text = messages[0]["content"]
         assert "2026-W06" in prompt_text
         assert "Zone 3 instead of Zone 2" in prompt_text
 
-    @patch("src.memory.episodes.get_client")
-    def test_uses_meta_reflection_system_prompt(self, mock_client, sample_episode):
-        mock_model = MagicMock()
-        mock_client.return_value.models = mock_model
-        mock_model.generate_content.return_value = _mock_llm_response({"meta_beliefs": []})
+    @patch("src.memory.episodes.chat_completion")
+    def test_uses_meta_reflection_system_prompt(self, mock_completion, sample_episode):
+        mock_completion.return_value = _mock_litellm_response({"meta_beliefs": []})
 
         extract_meta_beliefs(sample_episode)
 
-        call_args = mock_model.generate_content.call_args
-        config = call_args.kwargs.get("config") or call_args[1].get("config")
-        assert "coaching effectiveness" in config.system_instruction.lower()
+        call_args = mock_completion.call_args
+        system_prompt = call_args.kwargs.get("system_prompt") or call_args[1].get("system_prompt")
+        assert "coaching effectiveness" in system_prompt.lower()
 
 
-# ── Meta-Belief Storage in UserModel ─────────────────────────────
+# -- Meta-Belief Storage in UserModel -----------------------------------------
 
 
 class TestMetaBeliefStorage:
@@ -188,7 +189,7 @@ class TestMetaBeliefStorage:
         assert high_conf[0]["text"] == "High confidence meta"
 
 
-# ── Meta-Beliefs in Plan Prompt (PrefEval) ───────────────────────
+# -- Meta-Beliefs in Plan Prompt (PrefEval) -----------------------------------
 
 
 class TestMetaBeliefInjection:
@@ -224,16 +225,14 @@ class TestMetaBeliefInjection:
         assert "Thursday compliance" in prompt
 
 
-# ── Meta-Belief Lifecycle ────────────────────────────────────────
+# -- Meta-Belief Lifecycle ----------------------------------------------------
 
 
 class TestMetaBeliefLifecycle:
-    @patch("src.memory.episodes.get_client")
-    def test_full_lifecycle_extract_and_store(self, mock_client, sample_episode, tmp_path):
+    @patch("src.memory.episodes.chat_completion")
+    def test_full_lifecycle_extract_and_store(self, mock_completion, sample_episode, tmp_path):
         """Full flow: reflection -> extract meta-beliefs -> store in user model."""
-        mock_model = MagicMock()
-        mock_client.return_value.models = mock_model
-        mock_model.generate_content.return_value = _mock_llm_response({
+        mock_completion.return_value = _mock_litellm_response({
             "meta_beliefs": [
                 {
                     "text": "Zone 2 discipline needs reinforcement in plans",
@@ -274,7 +273,7 @@ class TestMetaBeliefLifecycle:
         assert "Zone 2 discipline" in summary
 
 
-# ── META_REFLECTION_PROMPT ───────────────────────────────────────
+# -- META_REFLECTION_PROMPT ---------------------------------------------------
 
 
 class TestMetaReflectionPrompt:

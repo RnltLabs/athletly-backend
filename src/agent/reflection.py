@@ -18,7 +18,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from src.agent.json_utils import extract_json
-from src.agent.llm import MODEL, get_client
 
 log = logging.getLogger(__name__)
 

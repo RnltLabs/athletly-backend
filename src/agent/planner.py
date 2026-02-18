@@ -3,10 +3,8 @@
 import json
 import re
 
-from google import genai
-
 from src.agent.json_utils import extract_json
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 from src.agent.prompts import COACH_SYSTEM_PROMPT
 
 ADJUSTED_PLAN_SYSTEM_PROMPT = COACH_SYSTEM_PROMPT + """
@@ -45,27 +43,18 @@ def generate_adjusted_plan(
     Returns:
         New plan dict with adjustments_applied field
     """
-    client = get_client()
     prompt = _build_adjusted_plan_prompt(
         profile, previous_plan, assessment, relevant_episodes,
         beliefs=beliefs, activities=activities,
     )
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=prompt)],
-            ),
-        ],
-        config=genai.types.GenerateContentConfig(
-            system_instruction=ADJUSTED_PLAN_SYSTEM_PROMPT,
-            temperature=0.7,
-        ),
+    response = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt=ADJUSTED_PLAN_SYSTEM_PROMPT,
+        temperature=0.7,
     )
 
-    text = response.text.strip()
+    text = response.choices[0].message.content.strip()
     return extract_json(text)
 
 

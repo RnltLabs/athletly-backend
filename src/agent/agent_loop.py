@@ -28,11 +28,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from google import genai
-
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import MODEL, chat_completion
 from src.agent.tools.registry import ToolRegistry, get_default_tools
 from src.agent.system_prompt import build_system_prompt
+from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -95,79 +94,105 @@ class AgentLoop:
         self.user_model = user_model
         self.tools = tool_registry or get_default_tools(user_model)
         self.on_progress = on_progress
-        self.client = get_client()
         self.startup_context = startup_context
 
+        # Detect persistence mode
+        self._settings = get_settings()
+        self._use_supabase = self._settings.use_supabase
+
         # Conversation history (persists across messages within a session)
-        self._messages: list[genai.types.Content] = []
+        # Uses OpenAI-compatible message format: list of dicts
+        self._messages: list[dict] = []
 
         # Session metadata
         self._session_id: str | None = None
-        self._session_file: Path | None = None
+        self._session_file: Path | None = None  # file-based mode only
         self._turns_this_session: int = 0
 
     # -- Session Persistence (Gap 1) ----------------------------------------
 
     def start_session(self, resume_session_id: str | None = None) -> str:
         """Start a new coaching session or resume an existing one."""
-        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-
         if resume_session_id:
             return self._load_session(resume_session_id)
 
-        self._session_id = datetime.now().strftime("session_%Y-%m-%d_%H%M%S")
-        self._session_file = SESSIONS_DIR / f"{self._session_id}.jsonl"
         self._messages = []
         self._turns_this_session = 0
+
+        if self._use_supabase:
+            from src.db import create_session
+            self._session_id = create_session(self._settings.agenticsports_user_id)
+        else:
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            self._session_id = datetime.now().strftime("session_%Y-%m-%d_%H%M%S")
+            self._session_file = SESSIONS_DIR / f"{self._session_id}.jsonl"
+
         return self._session_id
 
     def _save_turn(self, role: str, content: str, metadata: dict | None = None):
-        """Append a single turn to the session JSONL file."""
-        if not self._session_file:
+        """Persist a single turn to the session store (Supabase or JSONL)."""
+        if not self._session_id:
             return
 
-        entry = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "role": role,
-            "content": content[:4000],
-        }
-        if metadata:
-            entry["meta"] = metadata
-
-        with self._session_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if self._use_supabase:
+            from src.db import save_message
+            try:
+                save_message(
+                    session_id=self._session_id,
+                    user_id=self._settings.agenticsports_user_id,
+                    role=role,
+                    content=content[:4000],
+                    meta=metadata,
+                )
+            except Exception:
+                logger.warning("Failed to save turn to Supabase", exc_info=True)
+        else:
+            if not self._session_file:
+                return
+            entry = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "role": role,
+                "content": content[:4000],
+            }
+            if metadata:
+                entry["meta"] = metadata
+            with self._session_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def _load_session(self, session_id: str) -> str:
         """Reload a previous session's history into self._messages."""
         self._session_id = session_id
-        self._session_file = SESSIONS_DIR / f"{session_id}.jsonl"
         self._messages = []
         self._turns_this_session = 0
 
-        if not self._session_file.exists():
-            logger.warning("Session file %s not found, starting fresh", session_id)
-            return session_id
-
-        for line in self._session_file.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            role = entry.get("role", "user")
-            content = entry.get("content", "")
-
-            if role in ("user", "model"):
-                genai_role = "user" if role == "user" else "model"
-                self._messages.append(
-                    genai.types.Content(
-                        role=genai_role,
-                        parts=[genai.types.Part(text=content)],
-                    )
-                )
-                self._turns_this_session += 1
+        if self._use_supabase:
+            from src.db import load_session_messages
+            rows = load_session_messages(session_id)
+            for row in rows:
+                role = row.get("role", "user")
+                content = row.get("content", "")
+                if role in ("user", "model"):
+                    oai_role = "user" if role == "user" else "assistant"
+                    self._messages.append({"role": oai_role, "content": content})
+                    self._turns_this_session += 1
+        else:
+            self._session_file = SESSIONS_DIR / f"{session_id}.jsonl"
+            if not self._session_file.exists():
+                logger.warning("Session file %s not found, starting fresh", session_id)
+                return session_id
+            for line in self._session_file.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                role = entry.get("role", "user")
+                content = entry.get("content", "")
+                if role in ("user", "model"):
+                    oai_role = "user" if role == "user" else "assistant"
+                    self._messages.append({"role": oai_role, "content": content})
+                    self._turns_this_session += 1
 
         logger.info("Resumed session %s with %d messages", session_id, len(self._messages))
         return session_id
@@ -178,7 +203,7 @@ class AgentLoop:
         """Compress older tool-call rounds into text summaries.
 
         When self._messages exceeds COMPRESSION_THRESHOLD, older rounds
-        are replaced with a single model message summarizing what happened.
+        are replaced with a single user message summarizing what happened.
         """
         if len(self._messages) <= COMPRESSION_THRESHOLD:
             return
@@ -186,16 +211,9 @@ class AgentLoop:
         # Find round boundaries (each user message starts a new round)
         round_starts = []
         for i, m in enumerate(self._messages):
-            if m.role == "user" and m.parts:
-                # Skip function_response "user" messages
-                has_text = any(
-                    hasattr(p, "text") and p.text and not (
-                        hasattr(p, "function_response") and p.function_response
-                    )
-                    for p in m.parts
-                )
-                if has_text:
-                    round_starts.append(i)
+            if m["role"] == "user" and m.get("content"):
+                # Skip tool-result "messages" (they have role "tool")
+                round_starts.append(i)
 
         if len(round_starts) <= COMPRESSION_KEEP_ROUNDS + 1:
             return
@@ -205,18 +223,19 @@ class AgentLoop:
         # Build summary of old rounds
         summaries = []
         for msg in self._messages[:keep_from]:
-            if msg.role == "model" and msg.parts:
-                for part in msg.parts:
-                    if hasattr(part, "function_call") and part.function_call:
-                        fc = part.function_call
-                        args_preview = ""
-                        if fc.args:
-                            args_preview = json.dumps(dict(fc.args), ensure_ascii=False)[:80]
-                        summaries.append(f"- Called {fc.name}({args_preview})")
-                    elif hasattr(part, "text") and part.text:
-                        text = part.text.strip()
-                        if text:
-                            summaries.append(f"- Responded: {text[:120]}...")
+            if msg["role"] == "assistant":
+                # Check for tool calls
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        name = fn.get("name", "?")
+                        args_preview = fn.get("arguments", "")[:80]
+                        summaries.append(f"- Called {name}({args_preview})")
+                elif msg.get("content"):
+                    text = msg["content"].strip()
+                    if text:
+                        summaries.append(f"- Responded: {text[:120]}...")
 
         if not summaries:
             return
@@ -226,10 +245,7 @@ class AgentLoop:
             + "\n".join(summaries[:30])
         )
 
-        compressed_msg = genai.types.Content(
-            role="user",
-            parts=[genai.types.Part(text=summary_text)],
-        )
+        compressed_msg = {"role": "user", "content": summary_text}
 
         old_count = len(self._messages)
         self._messages = [compressed_msg] + self._messages[keep_from:]
@@ -247,7 +263,7 @@ class AgentLoop:
         if not profile.get("name") or profile.get("name") == "Athlete":
             import re
             name_patterns = [
-                r"(?:Hallo|Hi|Hey|Hello|Servus|Moin)\s+([A-Z][a-zäöü]{2,})",
+                r"(?:Hallo|Hi|Hey|Hello|Servus|Moin)\s+([A-Z][a-zu\u00e4\u00f6\u00fc]{2,})",
             ]
             for pattern in name_patterns:
                 match = re.search(pattern, response_text)
@@ -304,55 +320,43 @@ class AgentLoop:
         self._compress_history()
 
         # Append user message
-        self._messages.append(
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=user_message)],
-            )
-        )
+        self._messages.append({"role": "user", "content": user_message})
 
         # Persist user turn (Gap 1)
         self._save_turn("user", user_message)
 
-        # Get tool declarations for Gemini
-        tool_declarations = self.tools.get_declarations()
+        # Get tool declarations in OpenAI format for LiteLLM
+        openai_tools = self.tools.get_openai_tools()
 
         consecutive_errors = 0
-        text_parts = []
+        last_content = None  # Track last assistant content for MAX_TOOL_ROUNDS fallback
 
         # -- THE LOOP --
         for round_num in range(MAX_TOOL_ROUNDS):
 
-            # Call Gemini with conversation history + tools
-            response = self.client.models.generate_content(
-                model=MODEL,
-                contents=self._messages,
-                config=genai.types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=AGENT_TEMPERATURE,
-                    tools=[genai.types.Tool(
-                        function_declarations=tool_declarations
-                    )],
-                ),
+            # Call LLM with conversation history + tools via LiteLLM
+            response = chat_completion(
+                messages=self._messages,
+                system_prompt=system_prompt,
+                tools=openai_tools if openai_tools else None,
+                temperature=AGENT_TEMPERATURE,
             )
 
-            # Extract parts from response
-            candidate = response.candidates[0]
-            parts = candidate.content.parts or []
+            message = response.choices[0].message
+            content = message.content
+            tool_calls = message.tool_calls
 
-            # Handle empty response (Gemini edge case -- Gap 9c)
-            if not parts:
+            # Handle empty response (edge case -- Gap 9c)
+            if not content and not tool_calls:
                 consecutive_errors += 1
                 logger.warning(
-                    "Empty response from Gemini (round %d, errors: %d), retrying...",
+                    "Empty response from LLM (round %d, errors: %d), retrying...",
                     round_num, consecutive_errors,
                 )
 
                 # After 3 empty retries, try WITHOUT tools as fallback
                 if consecutive_errors == 3:
                     logger.info("Falling back to tool-free call...")
-                    # Strip tool instructions -- without actual tools the model
-                    # would write tool calls as text (e.g. "update_profile(...)")
                     fallback_prompt = (
                         system_prompt
                         + "\n\n# IMPORTANT OVERRIDE\n"
@@ -362,21 +366,18 @@ class AgentLoop:
                         "get_activities, etc.). Just answer the athlete directly "
                         "as a coach would in a normal conversation."
                     )
-                    fallback_response = self.client.models.generate_content(
-                        model=MODEL,
-                        contents=self._messages,
-                        config=genai.types.GenerateContentConfig(
-                            system_instruction=fallback_prompt,
-                            temperature=AGENT_TEMPERATURE,
-                        ),
+                    fallback_response = chat_completion(
+                        messages=self._messages,
+                        system_prompt=fallback_prompt,
+                        temperature=AGENT_TEMPERATURE,
                     )
-                    fb_candidate = fallback_response.candidates[0]
-                    fb_parts = fb_candidate.content.parts or []
-                    if fb_parts:
-                        result.response_text = "\n".join(
-                            p.text for p in fb_parts if p.text
-                        ).strip()
-                        self._messages.append(fb_candidate.content)
+                    fb_message = fallback_response.choices[0].message
+                    if fb_message.content:
+                        result.response_text = fb_message.content.strip()
+                        self._messages.append({
+                            "role": "assistant",
+                            "content": result.response_text,
+                        })
                         break
 
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
@@ -390,32 +391,46 @@ class AgentLoop:
                 time.sleep(0.5)
                 continue
 
-            # Separate function calls from text
-            function_calls = [p for p in parts if p.function_call]
-            text_parts = [p for p in parts if p.text]
-
-            if not function_calls:
+            if not tool_calls:
                 # -- MODEL DECIDED TO RESPOND --
-                response_text = "\n".join(p.text for p in text_parts if p.text)
-                result.response_text = response_text.strip()
+                result.response_text = (content or "").strip()
 
                 # Append model response to history
-                self._messages.append(candidate.content)
+                self._messages.append({"role": "assistant", "content": result.response_text})
 
                 if self.on_progress:
-                    self.on_progress("responding", response_text[:100])
+                    self.on_progress("responding", result.response_text[:100])
 
                 break
             else:
                 # -- MODEL WANTS TO USE TOOLS --
-                self._messages.append(candidate.content)
+                # Append the assistant message with tool_calls to history
+                assistant_msg: dict = {"role": "assistant", "content": content or ""}
+                # Serialize tool_calls for the message history
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in tool_calls
+                ]
+                self._messages.append(assistant_msg)
+
+                # Track last content for MAX_TOOL_ROUNDS fallback
+                if content:
+                    last_content = content
 
                 # Execute each tool call
-                tool_responses = []
-                for part in function_calls:
-                    call = part.function_call
-                    tool_name = call.name
-                    tool_args = dict(call.args) if call.args else {}
+                for tc in tool_calls:
+                    tool_name = tc.function.name
+                    try:
+                        tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    except json.JSONDecodeError:
+                        tool_args = {}
 
                     if self.on_progress:
                         self.on_progress(
@@ -460,20 +475,12 @@ class AgentLoop:
                         "duration_ms": tool_duration,
                     })
 
-                    # Build function response
-                    tool_responses.append(
-                        genai.types.Part(
-                            function_response=genai.types.FunctionResponse(
-                                name=tool_name,
-                                response=tool_result,
-                            )
-                        )
-                    )
-
-                # Append all tool results to history
-                self._messages.append(
-                    genai.types.Content(role="user", parts=tool_responses)
-                )
+                    # Append tool result to history (OpenAI format)
+                    self._messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps(tool_result, ensure_ascii=False),
+                    })
 
                 # Safety: too many consecutive errors
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
@@ -485,8 +492,8 @@ class AgentLoop:
 
         else:
             # Hit MAX_TOOL_ROUNDS -- return partial response
-            if text_parts:
-                result.response_text = "\n".join(p.text for p in text_parts if p.text)
+            if last_content:
+                result.response_text = last_content.strip()
             else:
                 result.response_text = (
                     "I spent a lot of time analyzing your request but need to wrap up. "
@@ -510,10 +517,6 @@ class AgentLoop:
 
     def inject_context(self, role: str, text: str):
         """Inject context into the conversation (e.g., startup greeting)."""
-        self._messages.append(
-            genai.types.Content(
-                role=role,
-                parts=[genai.types.Part(text=text)],
-            )
-        )
+        oai_role = "assistant" if role == "model" else role
+        self._messages.append({"role": oai_role, "content": text})
         self._save_turn(role, text, {"injected": True})

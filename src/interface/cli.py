@@ -12,16 +12,46 @@ from rich.markup import escape
 from src.agent.coach import generate_plan, save_plan
 from src.agent.proactive import check_proactive_triggers, format_proactive_message
 from src.agent.trajectory import assess_trajectory
-from src.memory.episodes import list_episodes
+from src.config import get_settings
+from src.memory.episodes import list_episodes as list_episodes_file
 from src.memory.profile import create_profile, save_profile, load_profile
 from src.memory.user_model import UserModel
 from src.tools.fit_parser import parse_fit_file
 from src.tools.metrics import calculate_trimp, classify_hr_zone
-from src.tools.activity_store import store_activity, list_activities, import_new_activities
+from src.tools.activity_store import store_activity as store_activity_file
+from src.tools.activity_store import list_activities as list_activities_file
+from src.tools.activity_store import import_new_activities
 
 console = Console()
 
 AVAILABLE_SPORTS = ["running", "cycling", "swimming", "gym"]
+
+
+def _get_backends():
+    """Return (user_model, list_activities_fn, list_episodes_fn, store_activity_fn) based on config.
+
+    When Supabase is configured with a user_id, returns DB-backed implementations.
+    Otherwise falls back to legacy file-based storage.
+    """
+    settings = get_settings()
+    if settings.use_supabase:
+        from src.db import UserModelDB
+        from src.db import list_activities as db_list_activities
+        from src.db import list_episodes as db_list_episodes
+        uid = settings.agenticsports_user_id
+        user_model = UserModelDB.load_or_create(uid)
+        return (
+            user_model,
+            lambda **kw: db_list_activities(uid, **kw),
+            lambda **kw: db_list_episodes(uid, **kw),
+        )
+    else:
+        user_model = UserModel.load_or_create()
+        return (
+            user_model,
+            lambda **kw: list_activities_file(),
+            lambda **kw: list_episodes_file(**kw),
+        )
 
 
 def _format_targets(targets: dict) -> str:
@@ -294,8 +324,9 @@ def run_trajectory() -> None:
         console.print("[red]No training plan found.[/red]")
         return
 
-    activities = list_activities()
-    episodes = list_episodes()
+    _, list_acts_fn, list_eps_fn = _get_backends()
+    activities = list_acts_fn()
+    episodes = list_eps_fn()
 
     console.print("[yellow]Assessing training trajectory...[/yellow]\n")
 
@@ -352,8 +383,9 @@ def run_status() -> None:
         return
 
     plan = _load_latest_plan()
-    activities = list_activities()
-    episodes = list_episodes()
+    _, list_acts_fn, list_eps_fn = _get_backends()
+    activities = list_acts_fn()
+    episodes = list_eps_fn()
 
     console.print(Panel(
         f"Athlete: [cyan]{profile.get('name', 'Unknown')}[/cyan]\n"
@@ -398,7 +430,7 @@ def _run_chat() -> None:
     from src.agent.startup_context import build_startup_context
 
     imported = run_import()
-    user_model = UserModel.load_or_create()
+    user_model, _, _ = _get_backends()
 
     # Pre-compute startup context (Gap 5 -- instant greeting)
     startup_ctx = build_startup_context(user_model, imported=imported)
@@ -547,9 +579,10 @@ def main(args: list[str] | None = None):
         # Legacy form-based onboarding
         profile = onboard_athlete()
         console.print("\n[yellow]Generating your training plan...[/yellow]\n")
-        activities = list_activities()
+        _, list_acts_fn, list_eps_fn = _get_backends()
+        activities = list_acts_fn()
         from src.memory.episodes import retrieve_relevant_episodes
-        _episodes = list_episodes(limit=10)
+        _episodes = list_eps_fn(limit=10)
         _relevant_eps = retrieve_relevant_episodes(
             {"goal": profile.get("goal", {}), "sports": profile.get("sports", [])},
             _episodes,

@@ -1,13 +1,11 @@
-"""Training coach agent: generates weekly plans via Gemini."""
+"""Training coach agent: generates weekly plans via LiteLLM."""
 
 import json
 from datetime import datetime
 from pathlib import Path
 
-from google import genai
-
 from src.agent.json_utils import extract_json
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 from src.agent.prompts import COACH_SYSTEM_PROMPT, build_plan_prompt
 
 PLANS_DIR = Path(__file__).parent.parent.parent / "data" / "plans"
@@ -19,7 +17,7 @@ def generate_plan(
     activities: list[dict] | None = None,
     relevant_episodes: list[dict] | None = None,
 ) -> dict:
-    """Send athlete profile to Gemini and return a structured training plan.
+    """Send athlete profile to LLM and return a structured training plan.
 
     Args:
         profile: Athlete profile dict (from UserModel.project_profile()).
@@ -30,29 +28,19 @@ def generate_plan(
         relevant_episodes: Past episode reflections to inform planning.
 
     Raises ValueError if the response is not valid JSON.
-    Raises google.genai errors on API failure.
     """
-    client = get_client()
     user_prompt = build_plan_prompt(
         profile, beliefs=beliefs, activities=activities,
         relevant_episodes=relevant_episodes,
     )
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=user_prompt)],
-            ),
-        ],
-        config=genai.types.GenerateContentConfig(
-            system_instruction=COACH_SYSTEM_PROMPT,
-            temperature=0.7,
-        ),
+    response = chat_completion(
+        messages=[{"role": "user", "content": user_prompt}],
+        system_prompt=COACH_SYSTEM_PROMPT,
+        temperature=0.7,
     )
 
-    text = response.text.strip()
+    text = response.choices[0].message.content.strip()
     return extract_json(text)
 
 

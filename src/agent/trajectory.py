@@ -3,10 +3,8 @@
 import json
 from datetime import datetime, date
 
-from google import genai
-
 from src.agent.json_utils import extract_json
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 
 TRAJECTORY_SYSTEM_PROMPT = """\
 You are an expert endurance sports coach evaluating an athlete's long-term training trajectory.
@@ -63,27 +61,18 @@ def assess_trajectory(
 ) -> dict:
     """Assess whether current training trajectory leads to the goal.
 
-    Sends all context to Gemini and returns a trajectory assessment
+    Sends all context to LLM and returns a trajectory assessment
     with confidence scoring.
     """
-    client = get_client()
     prompt = _build_trajectory_prompt(athlete_profile, recent_activities, episodes, current_plan)
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=prompt)],
-            ),
-        ],
-        config=genai.types.GenerateContentConfig(
-            system_instruction=TRAJECTORY_SYSTEM_PROMPT,
-            temperature=0.4,
-        ),
+    response = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt=TRAJECTORY_SYSTEM_PROMPT,
+        temperature=0.4,
     )
 
-    text = response.text.strip()
+    text = response.choices[0].message.content.strip()
     result = extract_json(text)
 
     # Calculate and overlay our own confidence score

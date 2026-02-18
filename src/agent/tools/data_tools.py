@@ -8,10 +8,12 @@ zone_distribution) not flat keys (avg_heart_rate, avg_pace_min_km, hr_zone_distr
 """
 
 from src.agent.tools.registry import Tool, ToolRegistry
+from src.config import get_settings
 
 
 def register_data_tools(registry: ToolRegistry, user_model):
     """Register all data access tools."""
+    _settings = get_settings()
 
     def get_athlete_profile() -> dict:
         """Get the current athlete profile."""
@@ -38,10 +40,14 @@ def register_data_tools(registry: ToolRegistry, user_model):
 
     def get_activities(limit: int = 10, sport: str = None, days: int = None) -> dict:
         """Get recent training activities."""
-        from src.tools.activity_store import list_activities
         from datetime import datetime, timedelta
 
-        activities = list_activities()
+        if _settings.use_supabase:
+            from src.db import list_activities as db_list_activities
+            activities = db_list_activities(_settings.agenticsports_user_id, limit=100)
+        else:
+            from src.tools.activity_store import list_activities
+            activities = list_activities()
 
         if sport:
             activities = [a for a in activities if a.get("sport", "").lower() == sport.lower()]
@@ -126,24 +132,34 @@ def register_data_tools(registry: ToolRegistry, user_model):
 
     def get_current_plan() -> dict:
         """Get the current active training plan."""
-        from pathlib import Path
-        import json
-
-        plans_dir = Path("data/plans")
-        if not plans_dir.exists():
-            return {"plan": None, "message": "No training plans exist yet."}
-
-        plan_files = sorted(plans_dir.glob("plan_*.json"), reverse=True)
-        if not plan_files:
-            return {"plan": None, "message": "No training plans exist yet."}
-
-        latest = json.loads(plan_files[0].read_text())
-        return {
-            "plan": latest,
-            "file": str(plan_files[0]),
-            "sessions_count": len(latest.get("sessions", [])),
-            "training_phase": latest.get("training_phase", "unknown"),
-        }
+        if _settings.use_supabase:
+            from src.db import get_active_plan
+            plan_row = get_active_plan(_settings.agenticsports_user_id)
+            if not plan_row:
+                return {"plan": None, "message": "No training plans exist yet."}
+            plan_data = plan_row.get("plan_data", {})
+            return {
+                "plan": plan_data,
+                "id": plan_row["id"],
+                "sessions_count": len(plan_data.get("sessions", [])),
+                "training_phase": plan_data.get("training_phase", "unknown"),
+            }
+        else:
+            from pathlib import Path
+            import json
+            plans_dir = Path("data/plans")
+            if not plans_dir.exists():
+                return {"plan": None, "message": "No training plans exist yet."}
+            plan_files = sorted(plans_dir.glob("plan_*.json"), reverse=True)
+            if not plan_files:
+                return {"plan": None, "message": "No training plans exist yet."}
+            latest = json.loads(plan_files[0].read_text())
+            return {
+                "plan": latest,
+                "file": str(plan_files[0]),
+                "sessions_count": len(latest.get("sessions", [])),
+                "training_phase": latest.get("training_phase", "unknown"),
+            }
 
     registry.register(Tool(
         name="get_current_plan",
@@ -158,29 +174,41 @@ def register_data_tools(registry: ToolRegistry, user_model):
 
     def get_past_plans(limit: int = 5) -> dict:
         """Get previously generated plans."""
-        from pathlib import Path
-        import json
-
-        plans_dir = Path("data/plans")
-        if not plans_dir.exists():
-            return {"plans": [], "count": 0}
-
-        plan_files = sorted(plans_dir.glob("plan_*.json"), reverse=True)[:limit]
-        plans = []
-        for f in plan_files:
-            try:
-                plan = json.loads(f.read_text())
+        if _settings.use_supabase:
+            from src.db import list_plans
+            rows = list_plans(_settings.agenticsports_user_id, limit=limit)
+            plans = []
+            for r in rows:
+                pd = r.get("plan_data", {})
                 plans.append({
-                    "file": f.name,
-                    "date": f.stem.replace("plan_", ""),
-                    "phase": plan.get("training_phase", "unknown"),
-                    "sessions": len(plan.get("sessions", [])),
-                    "evaluation_score": plan.get("_evaluation", {}).get("score"),
+                    "id": r["id"],
+                    "date": r.get("created_at", "")[:10],
+                    "phase": pd.get("training_phase", "unknown"),
+                    "sessions": len(pd.get("sessions", [])),
+                    "evaluation_score": r.get("evaluation_score"),
                 })
-            except (json.JSONDecodeError, OSError):
-                continue
-
-        return {"plans": plans, "count": len(plans)}
+            return {"plans": plans, "count": len(plans)}
+        else:
+            from pathlib import Path
+            import json
+            plans_dir = Path("data/plans")
+            if not plans_dir.exists():
+                return {"plans": [], "count": 0}
+            plan_files = sorted(plans_dir.glob("plan_*.json"), reverse=True)[:limit]
+            plans = []
+            for f in plan_files:
+                try:
+                    plan = json.loads(f.read_text())
+                    plans.append({
+                        "file": f.name,
+                        "date": f.stem.replace("plan_", ""),
+                        "phase": plan.get("training_phase", "unknown"),
+                        "sessions": len(plan.get("sessions", [])),
+                        "evaluation_score": plan.get("_evaluation", {}).get("score"),
+                    })
+                except (json.JSONDecodeError, OSError):
+                    continue
+            return {"plans": plans, "count": len(plans)}
 
     registry.register(Tool(
         name="get_past_plans",

@@ -1,12 +1,10 @@
-"""Training assessment: compares actual training vs prescribed plan using Gemini."""
+"""Training assessment: compares actual training vs prescribed plan using LiteLLM."""
 
 import json
 import re
 
-from google import genai
-
 from src.agent.json_utils import extract_json
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 
 ASSESSMENT_SYSTEM_PROMPT = """\
 You are an expert endurance sports coach analyzing an athlete's training data.
@@ -58,7 +56,7 @@ def assess_training(
     conversation_context: str | None = None,
     beliefs: list[dict] | None = None,
 ) -> dict:
-    """Send plan + actual activities to Gemini for structured assessment.
+    """Send plan + actual activities to LLM for structured assessment.
 
     Args:
         profile: Athlete profile dict.
@@ -70,29 +68,19 @@ def assess_training(
 
     Returns a dict with assessment and recommended_adjustments.
     """
-    client = get_client()
-
     prompt = _build_assessment_prompt(
         profile, plan, activities,
         conversation_context=conversation_context,
         beliefs=beliefs,
     )
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=prompt)],
-            ),
-        ],
-        config=genai.types.GenerateContentConfig(
-            system_instruction=ASSESSMENT_SYSTEM_PROMPT,
-            temperature=0.4,
-        ),
+    response = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt=ASSESSMENT_SYSTEM_PROMPT,
+        temperature=0.4,
     )
 
-    text = response.text.strip()
+    text = response.choices[0].message.content.strip()
     return extract_json(text)
 
 

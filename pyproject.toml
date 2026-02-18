@@ -11,6 +11,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "numpy>=2.4.2",
     "bm25s>=0.2.14",
+    "litellm>=1.60",
+    "pydantic-settings>=2.13.0",
+    "supabase>=2.28.0",
 ]
 
 [build-system]

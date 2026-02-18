@@ -5,10 +5,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from google import genai
-
 from src.agent.json_utils import extract_json
-from src.agent.llm import MODEL, get_client
+from src.agent.llm import chat_completion
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 EPISODES_DIR = DATA_DIR / "episodes"
@@ -59,7 +57,7 @@ def generate_reflection(
 ) -> dict:
     """Generate a structured reflection for a completed training block.
 
-    Sends plan + activities + assessment to Gemini.
+    Sends plan + activities + assessment to LLM.
     Returns a complete episode dict ready for storage.
 
     Args:
@@ -71,28 +69,19 @@ def generate_reflection(
                               subjective context about the training period.
         beliefs: Optional list of active beliefs to inject as coach's notes.
     """
-    client = get_client()
     prompt = _build_reflection_prompt(
         plan, activities, assessment, athlete_profile,
         conversation_context=conversation_context,
         beliefs=beliefs,
     )
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=prompt)],
-            ),
-        ],
-        config=genai.types.GenerateContentConfig(
-            system_instruction=REFLECTION_SYSTEM_PROMPT,
-            temperature=0.4,
-        ),
+    response = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt=REFLECTION_SYSTEM_PROMPT,
+        temperature=0.4,
     )
 
-    text = response.text.strip()
+    text = response.choices[0].message.content.strip()
     reflection = extract_json(text)
 
     # Build complete episode
@@ -142,7 +131,7 @@ def store_episode(episode: dict, storage_dir: str | Path | None = None) -> Path:
     filename = f"{ep_id}.json"
     path = dest / filename
 
-    # Avoid overwriting existing episodes — append timestamp suffix
+    # Avoid overwriting existing episodes -- append timestamp suffix
     if path.exists():
         ts = datetime.now().strftime("%H%M%S_%f")
         filename = f"{ep_id}_{ts}.json"
@@ -284,9 +273,9 @@ Rules:
 - Focus on actionable coaching insights, not generic observations
 - Each meta-belief should inform future plan generation or conversation style
 - Examples of good meta-beliefs:
-  - "Athlete runs easy sessions too fast — need to emphasize zone discipline in plans"
+  - "Athlete runs easy sessions too fast -- need to emphasize zone discipline in plans"
   - "Motivation increases when sessions include race-specific elements"
-  - "Plan compliance drops on Thursdays — consider lighter sessions mid-week"
+  - "Plan compliance drops on Thursdays -- consider lighter sessions mid-week"
   - "Athlete prefers direct feedback over gentle suggestions"
 - confidence: 0.0-1.0 based on how much supporting data exists
 - Empty array if no coaching insights are warranted
@@ -306,8 +295,6 @@ def extract_meta_beliefs(episode: dict) -> list[dict]:
     Returns:
         List of meta-belief dicts with text, category, confidence, reasoning.
     """
-    client = get_client()
-
     # Build context from the episode
     observations = episode.get("key_observations", [])
     lessons = episode.get("lessons", [])
@@ -330,22 +317,14 @@ PATTERNS DETECTED:
 Based on this reflection, what coaching insights should I remember for future plans and conversations with this athlete?
 """
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=prompt)],
-            ),
-        ],
-        config=genai.types.GenerateContentConfig(
-            system_instruction=META_REFLECTION_PROMPT,
-            temperature=0.4,
-        ),
+    response = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt=META_REFLECTION_PROMPT,
+        temperature=0.4,
     )
 
     try:
-        result = extract_json(response.text)
+        result = extract_json(response.choices[0].message.content)
         return result.get("meta_beliefs", [])
     except (ValueError, AttributeError):
         return []

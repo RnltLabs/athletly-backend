@@ -11,10 +11,12 @@ We build the dict inside the wrapper.
 """
 
 from src.agent.tools.registry import Tool, ToolRegistry
+from src.config import get_settings
 
 
 def register_memory_tools(registry: ToolRegistry, user_model):
     """Register all memory management tools."""
+    _settings = get_settings()
 
     def update_profile(field: str, value) -> dict:
         """Update a field in the athlete's structured profile."""
@@ -197,24 +199,29 @@ def register_memory_tools(registry: ToolRegistry, user_model):
     ))
 
     def store_episode(summary: str, context: str, learnings: list = None) -> dict:
-        """Store a coaching episode for future reference.
-
-        FIX: The actual episodes.store_episode() takes a dict, not separate params.
-        We build the dict here.
-        """
-        from src.memory.episodes import store_episode as _store
+        """Store a coaching episode for future reference."""
         from datetime import datetime
 
-        episode = {
-            "summary": summary,
-            "context": context,
-            "learnings": learnings or [],
-            "timestamp": datetime.now().isoformat(),
-            "source": "agent_v3",
-        }
-
-        path = _store(episode)
-        return {"stored": True, "path": str(path)}
+        if _settings.use_supabase:
+            from src.db import store_episode as db_store_episode
+            episode = {
+                "summary": f"{summary}\n\n{context}",
+                "insights": learnings or [],
+                "episode_type": "coaching_insight",
+            }
+            row = db_store_episode(_settings.agenticsports_user_id, episode)
+            return {"stored": True, "id": row["id"]}
+        else:
+            from src.memory.episodes import store_episode as _store
+            episode = {
+                "summary": summary,
+                "context": context,
+                "learnings": learnings or [],
+                "timestamp": datetime.now().isoformat(),
+                "source": "agent_v3",
+            }
+            path = _store(episode)
+            return {"stored": True, "path": str(path)}
 
     registry.register(Tool(
         name="store_episode",
