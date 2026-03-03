@@ -50,8 +50,33 @@ class Settings(BaseSettings):
     # -- User / multi-tenancy -------------------------------------------------
     agenticsports_user_id: str = ""  # Set for Supabase mode; leave empty for file-based
 
+    # -- FastAPI / Server -----------------------------------------------------
+    supabase_jwt_secret: str = ""  # HS256 secret for Supabase JWT verification
+    redis_url: str = "redis://localhost:6379"
+    cors_origins: str = "*"  # comma-separated origins or "*"
+    webhook_secret: str = ""  # HMAC secret for activity webhooks
+
+    # -- LLM fallback chain ---------------------------------------------------
+    litellm_fallback_models: str = "gemini/gemini-2.5-flash,anthropic/claude-haiku-4-5-20251001"
+
+    # -- Heartbeat / proactive ------------------------------------------------
+    heartbeat_interval_seconds: int = 1800  # 30 minutes
+
+    # -- Tool output budget (tokens) ------------------------------------------
+    tool_output_budget_default: int = 2000
+
     # -- Data (legacy file-based, kept for gradual migration) -----------------
     data_dir: str = "data"
+
+    @property
+    def fallback_models(self) -> list[str]:
+        """Parse comma-separated fallback model string into a list."""
+        return [m.strip() for m in self.litellm_fallback_models.split(",") if m.strip()]
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """Parse comma-separated CORS origins into a list."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
     def use_supabase(self) -> bool:

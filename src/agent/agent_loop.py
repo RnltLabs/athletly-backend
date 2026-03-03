@@ -20,8 +20,10 @@ Gaps addressed:
     Gap 4b -- Onboarding Completion Check: _check_onboarding_complete()
 """
 
+import asyncio
 import json
 import logging
+import queue
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -520,3 +522,187 @@ class AgentLoop:
         oai_role = "assistant" if role == "model" else role
         self._messages.append({"role": oai_role, "content": text})
         self._save_turn(role, text, {"injected": True})
+
+
+# -- Async Agent Loop (SSE streaming) ----------------------------------------
+
+# Sentinel object placed in the sync queue to signal that the worker thread
+# has finished (either successfully or with an error).
+_DONE_SENTINEL = object()
+
+
+class AsyncAgentLoop(AgentLoop):
+    """Async wrapper around AgentLoop that streams progress events via SSE.
+
+    The synchronous ``process_message()`` runs in a dedicated thread.
+    A thread-safe ``queue.Queue`` bridges progress events from the worker
+    thread to an async consumer that calls ``emit_fn``.
+
+    Usage::
+
+        loop = AsyncAgentLoop(user_model=model)
+        loop.start_session()
+
+        async def emit(event_type, data):
+            ...  # write SSE frame to response
+
+        result = await loop.process_message_sse("I want a marathon plan", emit)
+    """
+
+    async def process_message_sse(
+        self,
+        user_message: str,
+        emit_fn: Callable,
+    ) -> AgentResult:
+        """Process a user message and stream progress events via *emit_fn*.
+
+        Args:
+            user_message: The user's chat message.
+            emit_fn: An async callable ``(event_type: str, data: dict) -> None``.
+                     Called for each agent progress event.
+
+        Returns:
+            The ``AgentResult`` from the underlying synchronous loop.
+
+        The following event types are emitted:
+
+        - ``thinking``    — LLM call starting (shows a spinner in the UI).
+        - ``tool_hint``   — Tool is about to be executed (name + args).
+        - ``tool_result`` — Tool has finished (name + preview of result).
+        - ``tool_error``  — Tool execution raised an exception.
+        - ``message``     — Final coach reply text.
+        - ``done``        — Stream is complete (always emitted last).
+        - ``error``       — Unhandled exception in the worker thread.
+                            Error responses are NEVER persisted to session
+                            history (critical invariant).
+        """
+        sync_queue: queue.Queue = queue.Queue()
+        result_holder: list[AgentResult | BaseException] = []
+
+        # -- Bridge: on_progress callback → sync queue --
+        def _bridge_progress(event_type: str, detail: str) -> None:
+            sync_queue.put((event_type, detail))
+
+        # Swap out on_progress for the duration of this call.
+        original_on_progress = self.on_progress
+        self.on_progress = _bridge_progress
+
+        # -- Worker: runs synchronous process_message in a thread --
+        def _worker() -> None:
+            try:
+                agent_result = self.process_message(user_message)
+                result_holder.append(agent_result)
+            except Exception as exc:
+                result_holder.append(exc)
+            finally:
+                sync_queue.put(_DONE_SENTINEL)
+
+        # -- Async consumer: reads from sync queue and calls emit_fn --
+        async def _consume() -> None:
+            while True:
+                try:
+                    item = await asyncio.to_thread(
+                        sync_queue.get, True, 0.05  # blocking=True, timeout=50ms
+                    )
+                except queue.Empty:
+                    continue
+
+                if item is _DONE_SENTINEL:
+                    return
+
+                event_type, detail = item
+                data = _progress_to_sse_data(event_type, detail)
+                try:
+                    await emit_fn(event_type, data)
+                except Exception:
+                    logger.warning(
+                        "emit_fn raised while emitting %s event", event_type, exc_info=True
+                    )
+
+        # Run worker and consumer concurrently.
+        worker_task = asyncio.to_thread(_worker)
+        consumer_task = asyncio.create_task(_consume())
+
+        try:
+            await asyncio.gather(worker_task, consumer_task)
+        finally:
+            # Restore the original callback regardless of outcome.
+            self.on_progress = original_on_progress
+
+        # Drain any leftover items that arrived after _DONE_SENTINEL
+        # (shouldn't happen, but defensive drain is cheap).
+        _drain_sync_queue(sync_queue)
+
+        # Unwrap result or re-raise as SSE error (never persist error).
+        if not result_holder:
+            await emit_fn("error", {"message": "Agent returned no result", "code": "no_result"})
+            raise RuntimeError("Agent returned no result")
+
+        outcome = result_holder[0]
+        if isinstance(outcome, BaseException):
+            logger.exception("AsyncAgentLoop worker raised", exc_info=outcome)
+            await emit_fn(
+                "error",
+                {
+                    "message": "An internal error occurred. Please try again.",
+                    "code": "internal_error",
+                },
+            )
+            raise outcome
+
+        # Emit the final message event.
+        if outcome.response_text:
+            await emit_fn("message", {"text": outcome.response_text})
+
+        return outcome
+
+
+# -- Helpers ------------------------------------------------------------------
+
+def _progress_to_sse_data(event_type: str, detail: str) -> dict:
+    """Convert an on_progress (event_type, detail) pair into an SSE data dict.
+
+    The ``on_progress`` callback in ``AgentLoop`` passes a plain string as
+    ``detail``.  This function translates those strings into structured dicts
+    that the SSE router can forward directly to the client.
+    """
+    if event_type == "tool_call":
+        # detail: "tool_name({"arg": "value"})"
+        paren = detail.find("(")
+        if paren != -1:
+            name = detail[:paren]
+            args_str = detail[paren + 1:].rstrip(")")
+            try:
+                args = json.loads(args_str) if args_str else {}
+            except json.JSONDecodeError:
+                args = {"raw": args_str}
+            return {"name": name, "args": args}
+        return {"name": detail, "args": {}}
+
+    if event_type == "tool_result":
+        # detail: "tool_name -> {result preview}"
+        arrow = detail.find(" -> ")
+        name = detail[:arrow] if arrow != -1 else detail
+        preview = detail[arrow + 4:] if arrow != -1 else ""
+        return {"name": name, "preview": preview}
+
+    if event_type == "tool_error":
+        # detail: "tool_name -> Error: <message>"
+        return {"detail": detail}
+
+    if event_type == "responding":
+        # The loop emits this just before setting response_text; we map it
+        # to a thinking event so the UI can clear the spinner.
+        return {"text": detail}
+
+    # Default: wrap as text.
+    return {"text": detail}
+
+
+def _drain_sync_queue(sync_queue: queue.Queue) -> None:
+    """Empty all remaining items from a sync queue (non-blocking)."""
+    while True:
+        try:
+            sync_queue.get_nowait()
+        except queue.Empty:
+            break

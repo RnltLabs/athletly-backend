@@ -10,7 +10,7 @@ Sub-modules
 - ``plans_db``          -- Training plan storage
 """
 
-from src.db.client import get_supabase
+from src.db.client import get_supabase, get_async_supabase
 from src.db.user_model_db import UserModelDB
 
 from src.db.activity_store_db import (
@@ -47,6 +47,7 @@ from src.db.session_store_db import (
 __all__ = [
     # client
     "get_supabase",
+    "get_async_supabase",
     # user_model_db
     "UserModelDB",
     # activity_store_db

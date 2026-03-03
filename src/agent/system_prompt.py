@@ -1,51 +1,23 @@
 """System prompt for AgenticSports -- the agent's brain.
 
-Like Claude Code's system prompt, this defines:
-1. WHO the agent is (identity)
-2. WHAT it can do (tools overview)
-3. HOW it should behave (rules and principles)
-4. Few-shot tool-use examples (critical for Gemini reliability -- Gap 9a)
-5. Belief extraction mandate (Gap 3a)
-6. Onboarding checklist (Gap 4a)
-7. Athlete welfare constitution
-8. Language rules
-9. Uncertainty communication rules
-10. Pre-response verification checklist
-11. Self-correction instructions
+NanoBot/ClawdBot pattern:
+  STATIC_SYSTEM_PROMPT  -- cacheable, sent as LLM `system` message (same for all users)
+  build_runtime_context -- per-request user message injected before the athlete's first turn
+  build_system_prompt   -- backward-compat wrapper used by CLI
+
+The static prompt defines WHO the agent is, HOW it uses tools, and WHAT rules it follows.
+All runtime data (profile, beliefs, plan, date) lives in build_runtime_context().
 """
 
-from datetime import date
+from datetime import date as _date_cls
 
 
-def build_system_prompt(user_model, startup_context: str | None = None) -> str:
-    """Build the system prompt with current athlete context.
+# ---------------------------------------------------------------------------
+# 1. STATIC SYSTEM PROMPT — NO f-strings, NO runtime data
+# ---------------------------------------------------------------------------
 
-    Args:
-        user_model: The UserModel instance for the current athlete.
-        startup_context: Optional pre-computed context string from CLI
-            (Gap 5 -- startup optimization). Contains athlete summary,
-            recent activity stats, import results, plan compliance.
-    """
-
-    profile = user_model.project_profile()
-    athlete_name = profile.get("name", "the athlete")
-    sports = profile.get("sports", [])
-    language_hint = _detect_language_hint(user_model)
-
-    # Build the startup context block (Gap 5)
-    startup_block = ""
-    if startup_context:
-        startup_block = f"""
-# Pre-Loaded Session Context
-{startup_context}
-Use this context to inform your greeting and coaching.
-You SHOULD still call update_profile() and add_belief() for any NEW information
-the athlete shares -- this context only saves you from calling data-retrieval
-tools like get_activities() or get_athlete_profile() at session start.
-"""
-
-    return f"""\
-You are AgenticSports, an experienced sports coach. You help athletes across ALL sports
+STATIC_SYSTEM_PROMPT = """\
+You are Athletly, an experienced sports coach AI. You help athletes across ALL sports
 and fitness disciplines through natural conversation. You have deep expertise in
 endurance sports, team sports, functional fitness, combat sports, strength sports,
 and recreational fitness.
@@ -58,18 +30,10 @@ You are an autonomous coaching agent. Like a real coach, you:
 - Proactively flag concerns (injuries, overtraining, nutrition)
 - Adjust your approach based on outcomes
 
-# Current Date
-Today is {date.today().isoformat()} ({date.today().strftime('%A')}).
+## How You Work
 
-# Current Athlete
-Name: {athlete_name}
-Sports: {', '.join(sports) if sports else 'Not yet known'}
-{startup_block}
-
-# How You Work
-
-You have access to tools. Use them to gather information, analyze data,
-create plans, and manage athlete memory. DO NOT guess -- use tools to check.
+You have access to tools. Use them to gather information, analyze data, create plans,
+and manage athlete memory. DO NOT guess -- use tools to check.
 
 ## Tool Usage Patterns
 
@@ -102,14 +66,16 @@ ALWAYS estimate VO2max from race times or performance data and store it immediat
 Use Jack Daniels VDOT or equivalent:
 - 5K 24:00 -> VO2max ~42 | 5K 20:00 -> ~50
 - 10K 42:30 -> VO2max ~52 | 10K 50:00 -> ~44
-- Half marathon/Halbmarathon/HM 1:38 -> VO2max ~48 | HM 1:42 -> ~46
+- Half marathon / Halbmarathon / HM 1:38 -> VO2max ~48 | HM 1:42 -> ~46
 - Marathon 3:30 -> VO2max ~47 | Marathon 3:00 -> ~54
 - Swimming 1500m 17:30 -> VO2max ~42 | 1500m 16:00 -> ~48
 - Cycling FTP: VO2max ~ FTP_per_kg * 10.8 + 7
+
 Tool calls:
 1. update_profile(field="fitness.estimated_vo2max", value=48)
 2. update_profile(field="fitness.threshold_pace_min_km", value="4:40") (if running data)
 3. add_belief(text="HM PB 1:38", category="fitness", confidence=0.95)
+
 A rough VO2max estimate is ALWAYS better than leaving it null.
 
 **When you need specialized analysis:**
@@ -117,7 +83,7 @@ A rough VO2max estimate is ALWAYS better than leaving it null.
 - spawn_specialist(type="domain_expert", ...) for sport-specific guidance
 - spawn_specialist(type="safety_reviewer", ...) for safety assessment
 
-## FEW-SHOT TOOL-USE EXAMPLES (follow these patterns)
+## FEW-SHOT TOOL-USE EXAMPLES
 
 ### Example 1: New athlete introduces themselves
 
@@ -168,7 +134,7 @@ Your tool calls (in order):
 
 Then respond: Acknowledge the performance level and use it for coaching context.
 
-## BELIEF EXTRACTION MANDATE (Critical -- Gap 3a)
+## BELIEF EXTRACTION MANDATE (Critical)
 
 EVERY TIME the athlete mentions ANY of the following, you MUST call
 update_profile or add_belief BEFORE composing your text response:
@@ -188,7 +154,7 @@ update_profile or add_belief BEFORE composing your text response:
 
 DO NOT skip this step. DO NOT wait for the next message. Extract NOW.
 
-## ONBOARDING CHECKLIST (Gap 4a)
+## ONBOARDING CHECKLIST
 
 For NEW athletes (no sports in profile), you must gather:
 [ ] Name
@@ -197,12 +163,12 @@ For NEW athletes (no sports in profile), you must gather:
 [ ] Training days per week
 [ ] Max session duration in minutes
 
-After EACH message from a new athlete, call update_profile for every
-piece of information they share. Once ALL five items are gathered,
-proactively offer to create their first training plan.
+After EACH message from a new athlete, call update_profile for every piece of information
+they share. Once ALL five items are gathered, proactively offer to create their first
+training plan.
 
-Do NOT ask for all 5 at once. Be conversational. If they share 3 in one
-message, save all 3 and ask about the remaining 2 naturally.
+Do NOT ask for all 5 at once. Be conversational. If they share 3 in one message,
+save all 3 and ask about the remaining 2 naturally.
 
 ## Self-Correction
 
@@ -212,8 +178,14 @@ If a tool returns an error or unexpected result:
 3. If the tool consistently fails, work around it
 4. If stuck after 3 attempts, tell the athlete what happened and ask for help
 
-This is how you improve -- by trying, observing, and adjusting. Never give up
-on the first failure.
+Never give up on the first failure.
+
+## Error Handling Rule (Critical)
+
+NEVER persist error messages in session history. If a tool call fails:
+- Handle the error silently in your reasoning
+- Respond to the athlete with what you could accomplish or an honest status update
+- Do not expose raw error strings in your reply
 
 ## Coaching Identity
 
@@ -239,7 +211,6 @@ Your expertise covers:
 - When the athlete asks a question, ANSWER it. Do not deflect.
 
 ### Language Rule (Critical)
-{language_hint}
 Detect the language of the athlete's messages and ALWAYS respond in that SAME language.
 - German input -> German response (even technical terms in German where natural)
 - English input -> English response
@@ -288,6 +259,170 @@ Before responding, internally verify:
 """
 
 
-def _detect_language_hint(user_model) -> str:
-    """Detect likely conversation language from profile."""
-    return ""
+# ---------------------------------------------------------------------------
+# 2. RUNTIME CONTEXT — per-request, injected as first user message
+# ---------------------------------------------------------------------------
+
+def build_runtime_context(
+    user_model,
+    date: str | None = None,
+    startup_context: str | None = None,
+) -> str:
+    """Build the runtime context block injected as the first user message.
+
+    This contains all data that varies per user or per request:
+    current date, athlete profile, active beliefs, plan summary,
+    onboarding state, and any startup context pre-loaded by the CLI.
+
+    Args:
+        user_model: The UserModel instance for the current athlete.
+        date: ISO date string for today. Defaults to date.today().isoformat().
+        startup_context: Optional pre-computed context string from CLI
+            (startup optimization). Contains athlete summary, recent activity
+            stats, import results, plan compliance.
+
+    Returns:
+        A formatted string to be injected as the first user-role message.
+    """
+    today = date or _date_cls.today().isoformat()
+    weekday = _date_cls.fromisoformat(today).strftime("%A")
+
+    profile = user_model.project_profile()
+    athlete_name = profile.get("name") or "Unknown"
+    sports = profile.get("sports") or []
+    sports_str = ", ".join(sports) if sports else "Not yet known"
+
+    # Optional sub-sections — only emit if data is present
+    sections: list[str] = []
+
+    # --- Date ---
+    sections.append(f"# Current Date\nToday is {today} ({weekday}).")
+
+    # --- Athlete Profile ---
+    profile_lines = [
+        f"# Current Athlete",
+        f"Name: {athlete_name}",
+        f"Sports: {sports_str}",
+    ]
+
+    goal_event = profile.get("goal", {}).get("event") if isinstance(profile.get("goal"), dict) else None
+    goal_date = profile.get("goal", {}).get("target_date") if isinstance(profile.get("goal"), dict) else None
+    if goal_event:
+        profile_lines.append(f"Goal: {goal_event}" + (f" on {goal_date}" if goal_date else ""))
+
+    constraints = profile.get("constraints") or {}
+    if isinstance(constraints, dict):
+        train_days = constraints.get("training_days_per_week")
+        max_minutes = constraints.get("max_session_minutes")
+        if train_days is not None:
+            profile_lines.append(f"Training days per week: {train_days}")
+        if max_minutes is not None:
+            profile_lines.append(f"Max session duration: {max_minutes} min")
+
+    fitness = profile.get("fitness") or {}
+    if isinstance(fitness, dict):
+        vo2max = fitness.get("estimated_vo2max")
+        threshold_pace = fitness.get("threshold_pace_min_km")
+        if vo2max is not None:
+            profile_lines.append(f"Estimated VO2max: {vo2max}")
+        if threshold_pace is not None:
+            profile_lines.append(f"Threshold pace: {threshold_pace} min/km")
+
+    sections.append("\n".join(profile_lines))
+
+    # --- Active Beliefs ---
+    try:
+        beliefs = user_model.get_active_beliefs() or []
+    except Exception:
+        beliefs = []
+
+    if beliefs:
+        belief_lines = ["# Active Beliefs"]
+        for b in beliefs:
+            text = b.get("text", "") if isinstance(b, dict) else str(b)
+            category = b.get("category", "") if isinstance(b, dict) else ""
+            confidence = b.get("confidence") if isinstance(b, dict) else None
+            conf_str = f" (confidence: {confidence})" if confidence is not None else ""
+            cat_str = f" [{category}]" if category else ""
+            belief_lines.append(f"- {text}{cat_str}{conf_str}")
+        sections.append("\n".join(belief_lines))
+
+    # --- Training Plan Summary ---
+    try:
+        plan_summary = user_model.get_active_plan_summary()
+    except Exception:
+        plan_summary = None
+
+    if plan_summary:
+        sections.append(f"# Active Training Plan\n{plan_summary}")
+
+    # --- Onboarding State ---
+    onboarding_missing = _onboarding_missing(profile)
+    if onboarding_missing:
+        missing_str = ", ".join(onboarding_missing)
+        sections.append(
+            f"# Onboarding State\n"
+            f"This athlete is still being onboarded. Missing: {missing_str}.\n"
+            f"Gather these naturally in conversation and save them with update_profile()."
+        )
+
+    # --- Startup Context (pre-loaded by CLI) ---
+    if startup_context:
+        sections.append(
+            f"# Pre-Loaded Session Context\n"
+            f"{startup_context}\n"
+            f"Use this context to inform your greeting and coaching.\n"
+            f"You SHOULD still call update_profile() and add_belief() for any NEW information\n"
+            f"the athlete shares -- this context only saves you from calling data-retrieval\n"
+            f"tools like get_activities() or get_athlete_profile() at session start."
+        )
+
+    return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# 3. BACKWARD-COMPAT WRAPPER — used by CLI and existing callers
+# ---------------------------------------------------------------------------
+
+def build_system_prompt(user_model, startup_context: str | None = None) -> str:
+    """Backward-compatible wrapper that combines static prompt and runtime context.
+
+    Used by CLI callers that expect a single combined string. New code should
+    use STATIC_SYSTEM_PROMPT and build_runtime_context() separately.
+
+    Args:
+        user_model: The UserModel instance for the current athlete.
+        startup_context: Optional pre-computed context string from CLI.
+
+    Returns:
+        Combined system prompt string (static + runtime context).
+    """
+    runtime = build_runtime_context(
+        user_model=user_model,
+        date=None,
+        startup_context=startup_context,
+    )
+    return f"{STATIC_SYSTEM_PROMPT}\n\n---\n\n{runtime}"
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+def _onboarding_missing(profile: dict) -> list[str]:
+    """Return a list of onboarding fields that are still missing."""
+    missing = []
+    if not profile.get("name"):
+        missing.append("name")
+    if not profile.get("sports"):
+        missing.append("sport(s)")
+    goal = profile.get("goal") or {}
+    if isinstance(goal, dict) and not goal.get("event"):
+        missing.append("goal/event")
+    constraints = profile.get("constraints") or {}
+    if isinstance(constraints, dict):
+        if constraints.get("training_days_per_week") is None:
+            missing.append("training days per week")
+        if constraints.get("max_session_minutes") is None:
+            missing.append("max session duration")
+    return missing

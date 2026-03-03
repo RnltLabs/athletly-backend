@@ -1,0 +1,25 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - redis
+    restart: unless-stopped
+    # Pass the Redis URL pointing at the compose-internal service name.
+    environment:
+      REDIS_URL: redis://redis:6379
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    # Persist data across container restarts.
+    command: redis-server --appendonly yes
+
+volumes:
+  redis_data:

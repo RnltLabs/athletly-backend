@@ -34,11 +34,11 @@ class ToolRegistry:
         """Register a tool."""
         self._tools[tool.name] = tool
 
-    def register_mcp_tools(self, mcp_tools: list[Tool]):
+    def register_mcp_tools(self, mcp_tools: list[Tool]) -> None:
         """Register tools loaded from an MCP server."""
+        from dataclasses import replace
         for tool in mcp_tools:
-            tool.source = "mcp"
-            self._tools[tool.name] = tool
+            self._tools[tool.name] = replace(tool, source="mcp")
 
     def get_openai_tools(self) -> list[dict]:
         """Get tool declarations in OpenAI/LiteLLM format.
@@ -102,6 +102,57 @@ def _clean_parameters(schema: dict) -> dict:
     return cleaned
 
 
+def execute_with_budget(
+    tool_registry: "ToolRegistry",
+    name: str,
+    args: dict,
+    budget_tokens: int = 2000,
+) -> dict:
+    """Execute a tool and truncate its result if it exceeds the token budget.
+
+    Token estimation: 4 characters ≈ 1 token (rough GPT/Gemini average).
+
+    Args:
+        tool_registry: The registry to dispatch the call through.
+        name: Tool name.
+        args: Tool arguments.
+        budget_tokens: Maximum allowed tokens in the result text. Uses the
+            per-tool budget map when available, falling back to budget_tokens.
+
+    Returns:
+        The tool result dict, possibly with string fields truncated.
+    """
+    import json as _json
+
+    per_tool_budget: dict[str, int] = {
+        "get_activities": 1500,
+        "analyze_training_load": 800,
+        "web_search": 1200,
+        "create_training_plan": 2000,
+    }
+    effective_budget = per_tool_budget.get(name, budget_tokens)
+
+    result = tool_registry.execute(name, args)
+
+    # Estimate size via JSON serialisation
+    try:
+        text = _json.dumps(result)
+    except (TypeError, ValueError):
+        text = str(result)
+
+    char_budget = effective_budget * 4
+    if len(text) > char_budget:
+        n_tokens = len(text) // 4
+        truncated = text[:char_budget]
+        return {
+            "result": truncated,
+            "_truncated": True,
+            "_note": f"... [truncated, {n_tokens} tokens]",
+        }
+
+    return result
+
+
 def get_default_tools(user_model) -> ToolRegistry:
     """Create the default tool registry with all native tools.
 
@@ -116,6 +167,8 @@ def get_default_tools(user_model) -> ToolRegistry:
     from src.agent.tools.memory_tools import register_memory_tools
     from src.agent.tools.research_tools import register_research_tools
     from src.agent.tools.meta_tools import register_meta_tools
+    from src.agent.tools.config_tools import register_config_tools
+    from src.agent.tools.calc_tools import register_calc_tools
 
     register_data_tools(registry, user_model)
     register_analysis_tools(registry)
@@ -123,6 +176,8 @@ def get_default_tools(user_model) -> ToolRegistry:
     register_memory_tools(registry, user_model)
     register_research_tools(registry)
     register_meta_tools(registry, user_model)
+    register_config_tools(registry, user_model)
+    register_calc_tools(registry, user_model)
 
     # Register MCP tools (overrides native fallbacks if available)
     from src.agent.mcp.client import load_mcp_tools

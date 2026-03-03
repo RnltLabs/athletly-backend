@@ -85,6 +85,53 @@ def get_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
+def chat_completion_with_fallback(
+    messages: list[dict],
+    system_prompt: str | None = None,
+    tools: list[dict] | None = None,
+    temperature: float | None = None,
+) -> litellm.ModelResponse:
+    """Try models in sequence from settings.fallback_models until one succeeds.
+
+    Iterates through ``settings.fallback_models`` (comma-separated list from
+    ``LITELLM_FALLBACK_MODELS`` env var) and returns the first successful
+    response.  If every model fails, re-raises the last exception.
+
+    Args:
+        messages: Conversation messages in OpenAI format.
+        system_prompt: Optional system prompt prepended to messages.
+        tools: Optional OpenAI-format tool definitions.
+        temperature: Sampling temperature (defaults to settings.agent_temperature).
+
+    Returns:
+        litellm.ModelResponse from the first model that succeeds.
+
+    Raises:
+        Exception: The last exception raised when all models fail.
+    """
+    from src.config import get_settings
+
+    settings = get_settings()
+    resolved_temperature = temperature if temperature is not None else settings.agent_temperature
+    models = settings.fallback_models
+
+    last_error: Exception | None = None
+    for model in models:
+        try:
+            return chat_completion(
+                messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                temperature=resolved_temperature,
+                model=model,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Model %s failed: %s — trying next...", model, exc)
+
+    raise last_error or RuntimeError("All fallback models failed")
+
+
 def test_connection() -> str:
     """Send a test prompt via LiteLLM and return the response text."""
     response = chat_completion(
