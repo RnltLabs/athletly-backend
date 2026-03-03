@@ -70,13 +70,15 @@ def _rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONRespons
 def create_app() -> FastAPI:
     settings = get_settings()
 
+    _docs_url = "/docs" if settings.debug else None
+    _redoc_url = "/redoc" if settings.debug else None
+
     app = FastAPI(
         title="Athletly",
         version=VERSION,
         lifespan=_lifespan,
-        # Disable default /docs and /redoc in production by checking env if needed
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url=_docs_url,
+        redoc_url=_redoc_url,
     )
 
     # -- Middleware -----------------------------------------------------------
@@ -97,15 +99,21 @@ def create_app() -> FastAPI:
 
     # -- Routers --------------------------------------------------------------
 
-    # Chat router will live at /chat (imported lazily to avoid circular deps
-    # during early boot when tools/agent are still initialising).
-    try:
+    # Chat router: imported lazily to avoid circular deps during early boot.
+    # In debug mode a missing module is silently skipped (gradual rollout).
+    # In production any ImportError propagates immediately so misconfigured
+    # deployments fail loudly rather than serving silent 404s.
+    if settings.debug:
+        try:
+            from src.api.routers.chat import router as chat_router
+            app.include_router(chat_router, prefix="/chat")
+        except ImportError:
+            logger.warning(
+                "Chat router not yet implemented — /chat will return 404 until created"
+            )
+    else:
         from src.api.routers.chat import router as chat_router
         app.include_router(chat_router, prefix="/chat")
-    except ImportError:
-        logger.warning(
-            "Chat router not yet implemented — /chat will return 404 until created"
-        )
 
     # Webhook router — activity events from external providers.
     from src.api.routers.webhook import router as webhook_router

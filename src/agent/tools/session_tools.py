@@ -13,6 +13,8 @@ from src.agent.tools.registry import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+_MAX_QUERY_LENGTH = 500  # Maximum characters allowed in a session search query
+
 
 # ---------------------------------------------------------------------------
 # Registration
@@ -26,6 +28,11 @@ def register_session_tools(registry: ToolRegistry, user_id: str) -> None:
         """Search past session summaries for relevant context."""
         if not query.strip():
             return {"error": "query must not be empty", "results": []}
+        if len(query) > _MAX_QUERY_LENGTH:
+            return {
+                "error": f"query too long (max {_MAX_QUERY_LENGTH} characters)",
+                "results": [],
+            }
 
         clamped_limit = max(1, min(limit, 50))
 

@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     # -- FastAPI / Server -----------------------------------------------------
     supabase_jwt_secret: str = ""  # HS256 secret for Supabase JWT verification
     redis_url: str = "redis://localhost:6379"
+    debug: bool = False  # Set DEBUG=true in .env for local development
     cors_origins: str = "*"  # comma-separated origins or "*"
     webhook_secret: str = ""  # HMAC secret for activity webhooks
 

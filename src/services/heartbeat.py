@@ -14,6 +14,10 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
+# Module-level Redis connection pool — created lazily on first use and reused
+# across all lock operations for the lifetime of the process.
+_redis_pool: "aioredis.Redis | None" = None  # noqa: F821  (type-only forward ref)
+
 # How long a heartbeat lock is valid (seconds).
 # Must be longer than the slowest proactive check.
 _LOCK_TTL_SECONDS = 120
@@ -233,18 +237,34 @@ async def _notify_user(user_id: str, trigger: dict) -> None:
 # ------------------------------------------------------------------
 
 
+async def _get_redis() -> "aioredis.Redis":
+    """Return the shared Redis client, creating it once per process.
+
+    Uses a connection pool backed by the configured ``redis_url``.
+    Upstash Redis requires the ``rediss://`` (TLS) URL which is handled
+    transparently by redis-py when the scheme is ``rediss``.
+    """
+    import redis.asyncio as aioredis
+    from src.config import get_settings
+
+    global _redis_pool  # noqa: PLW0603
+    if _redis_pool is None:
+        settings = get_settings()
+        _redis_pool = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            # Single-connection pool is sufficient; heartbeat is not high-throughput.
+            max_connections=5,
+        )
+    return _redis_pool
+
+
 async def _try_acquire_lock(key: str) -> bool:
     """Try to set a Redis NX lock.  Returns True if acquired, False if busy."""
     try:
-        import redis.asyncio as aioredis
-        from src.config import get_settings
-
-        settings = get_settings()
-        client = aioredis.from_url(settings.redis_url, decode_responses=True)
-
-        async with client:
-            result = await client.set(key, "1", nx=True, ex=_LOCK_TTL_SECONDS)
-            return result is True
+        client = await _get_redis()
+        result = await client.set(key, "1", nx=True, ex=_LOCK_TTL_SECONDS)
+        return result is True
     except Exception as exc:
         # If Redis is down, proceed without locking (best-effort).
         logger.warning("Redis lock unavailable (%s) — proceeding without lock", exc)
@@ -254,13 +274,7 @@ async def _try_acquire_lock(key: str) -> bool:
 async def _release_lock(key: str) -> None:
     """Release a previously acquired Redis lock."""
     try:
-        import redis.asyncio as aioredis
-        from src.config import get_settings
-
-        settings = get_settings()
-        client = aioredis.from_url(settings.redis_url, decode_responses=True)
-
-        async with client:
-            await client.delete(key)
+        client = await _get_redis()
+        await client.delete(key)
     except Exception as exc:
         logger.warning("Failed to release Redis lock %s: %s", key, exc)
