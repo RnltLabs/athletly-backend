@@ -92,15 +92,20 @@ class AgentLoop:
         tool_registry: ToolRegistry | None = None,
         on_progress: ProgressCallback = None,
         startup_context: str | None = None,
+        context: str = "coach",
     ):
         self.user_model = user_model
-        self.tools = tool_registry or get_default_tools(user_model)
+        self.tools = tool_registry or get_default_tools(user_model, context=context)
         self.on_progress = on_progress
         self.startup_context = startup_context
+        self.context = context
 
         # Detect persistence mode
         self._settings = get_settings()
         self._use_supabase = self._settings.use_supabase
+
+        # Resolve user_id: prefer user_model (multi-tenant API), fall back to settings (CLI)
+        self._user_id: str = getattr(user_model, "user_id", None) or self._settings.agenticsports_user_id
 
         # Conversation history (persists across messages within a session)
         # Uses OpenAI-compatible message format: list of dicts
@@ -123,7 +128,10 @@ class AgentLoop:
 
         if self._use_supabase:
             from src.db import create_session
-            self._session_id = create_session(self._settings.agenticsports_user_id)
+            self._session_id = create_session(
+                self._user_id,
+                context=self.context,
+            )
         else:
             SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
             self._session_id = datetime.now().strftime("session_%Y-%m-%d_%H%M%S")
@@ -141,7 +149,7 @@ class AgentLoop:
             try:
                 save_message(
                     session_id=self._session_id,
-                    user_id=self._settings.agenticsports_user_id,
+                    user_id=self._user_id,
                     role=role,
                     content=content[:4000],
                     meta=metadata,
@@ -168,7 +176,10 @@ class AgentLoop:
         self._turns_this_session = 0
 
         if self._use_supabase:
-            from src.db import load_session_messages
+            from src.db import get_session, load_session_messages
+            session_row = get_session(session_id)
+            if session_row and "context" in session_row:
+                self.context = session_row["context"]
             rows = load_session_messages(session_id)
             for row in rows:
                 role = row.get("role", "user")
@@ -278,7 +289,16 @@ class AgentLoop:
                     break
 
     def _check_onboarding_complete(self) -> bool:
-        """Check if onboarding info is complete (Gap 4b)."""
+        """Check if onboarding info is complete (Gap 4b).
+
+        Only runs in onboarding context to avoid spurious events in coach mode.
+        """
+        if self.context != "onboarding":
+            return False
+
+        if self.user_model.meta.get("_onboarding_complete", False):
+            return False  # already done, skip
+
         profile = self.user_model.project_profile()
         constraints = profile.get("constraints", {})
 
@@ -290,11 +310,8 @@ class AgentLoop:
             bool(constraints.get("max_session_minutes")),
         ]
 
-        is_complete = all(required)
-        was_complete = self.user_model.meta.get("_onboarding_complete", False)
-
-        if is_complete and not was_complete:
-            self.user_model.meta["_onboarding_complete"] = True
+        if all(required):
+            self.user_model.meta = {**self.user_model.meta, "_onboarding_complete": True}
             self.user_model.save()
             logger.info("ONBOARDING COMPLETE: All required profile fields gathered.")
             return True
@@ -316,6 +333,7 @@ class AgentLoop:
         system_prompt = build_system_prompt(
             self.user_model,
             startup_context=self.startup_context,
+            context=self.context,
         )
 
         # Compress history before adding new message (Gap 2)

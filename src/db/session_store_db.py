@@ -26,11 +26,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def create_session(user_id: str) -> str:
+def create_session(user_id: str, context: str = "coach") -> str:
     """Create a new session row and return its UUID.
 
     Args:
         user_id: UUID of the owning user.
+        context: Session context — ``"coach"`` (default) or ``"onboarding"``.
 
     Returns:
         The server-generated session UUID.
@@ -38,7 +39,7 @@ def create_session(user_id: str) -> str:
     result = (
         get_supabase()
         .table("sessions")
-        .insert({"user_id": user_id})
+        .insert({"user_id": user_id, "context": context})
         .execute()
     )
     return result.data[0]["id"]

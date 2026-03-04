@@ -75,6 +75,14 @@ class SSEEmitter:
         )
 
     @staticmethod
+    def onboarding_complete() -> ServerSentEvent:
+        """Signal that onboarding has been completed — client should transition UI."""
+        return ServerSentEvent(
+            event="onboarding_complete",
+            data=json.dumps({"onboarding_complete": True}, ensure_ascii=False),
+        )
+
+    @staticmethod
     def done() -> ServerSentEvent:
         """Sentinel event — signals the stream is finished."""
         return ServerSentEvent(

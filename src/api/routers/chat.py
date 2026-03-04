@@ -48,6 +48,10 @@ class ChatRequest(BaseModel):
 
     message: str = Field(..., min_length=1, max_length=10_000)
     session_id: str | None = Field(default=None)
+    context: str = Field(
+        default="coach",
+        pattern=r"^(coach|onboarding)$",
+    )
 
 
 class ConfirmRequest(BaseModel):
@@ -151,6 +155,7 @@ async def _chat_event_generator(
     session_id: str | None,
     user_id: str,
     redis: aioredis.Redis | None,
+    context: str = "coach",
 ) -> AsyncGenerator[ServerSentEvent, None]:
     """Async generator that drives the agent and yields SSE frames in real-time.
 
@@ -168,7 +173,7 @@ async def _chat_event_generator(
 
     try:
         user_model = await _load_user_model(user_id)
-        loop = AsyncAgentLoop(user_model=user_model)
+        loop = AsyncAgentLoop(user_model=user_model, context=context)
         resolved_session_id = loop.start_session(resume_session_id=session_id)
         logger.info(
             "Chat request: user=%s session=%s message_len=%d",
@@ -187,10 +192,13 @@ async def _chat_event_generator(
         async def emit_fn(event_type: str, data: dict) -> None:
             await event_queue.put(_make_sse_event(event_type, data))
 
+        agent_result_holder: list = []
+
         async def run_agent() -> None:
             try:
-                await loop.process_message_sse(user_message, emit_fn)
-            except Exception as exc:
+                result = await loop.process_message_sse(user_message, emit_fn)
+                agent_result_holder.append(result)
+            except Exception:
                 logger.exception("Agent error for user %s", user_id)
                 await event_queue.put(SSEEmitter.error(
                     message="An unexpected error occurred. Please try again.",
@@ -208,6 +216,12 @@ async def _chat_event_generator(
             yield evt
 
         await agent_task  # ensure clean completion
+
+        # Emit onboarding_complete if the agent flagged it
+        if agent_result_holder:
+            agent_result = agent_result_holder[0]
+            if getattr(agent_result, "onboarding_just_completed", False):
+                yield SSEEmitter.onboarding_complete()
 
         # Emit token usage summary (best-effort)
         try:
@@ -262,6 +276,7 @@ async def post_chat(
         session_id=body.session_id,
         user_id=user_id,
         redis=redis,
+        context=body.context,
     )
 
     return EventSourceResponse(generator)

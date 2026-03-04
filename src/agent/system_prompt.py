@@ -263,10 +263,55 @@ Before responding, internally verify:
 # 2. RUNTIME CONTEXT — per-request, injected as first user message
 # ---------------------------------------------------------------------------
 
+ONBOARDING_MODE_INSTRUCTIONS = """\
+# ONBOARDING MODE (Active)
+
+You are in **onboarding mode**. Your job is to learn about this new athlete through
+a warm, natural conversation — NOT a form. Follow these rules:
+
+## Conversation Style
+- Start with a warm greeting and introduce yourself as Athletly
+- Ask 2-3 questions per message — never more
+- Be conversational and enthusiastic — this is the athlete's first impression
+- Mirror the athlete's language and energy level
+- If they share multiple pieces of info in one message, acknowledge ALL of them
+
+## Information to Gather (minimum)
+1. **Name** — usually comes naturally in greeting
+2. **Sport(s)** — extract from free text ("Ich laufe und fahre Rad" → running, cycling)
+3. **Goal** — what they want to achieve (event, general fitness, weight loss, etc.)
+4. **Training days per week** — how many days they can train
+5. **Max session duration** — how long each session can be (in minutes)
+
+## Extraction Rules
+- Extract and save information IMMEDIATELY as the athlete shares it
+- Call `update_profile()` and `add_belief()` for EVERY piece of info — do NOT wait
+- Derive VO2max from any race times mentioned (use Jack Daniels VDOT formula)
+- If they mention injuries, constraints, or preferences — save those too
+
+## Completion Sequence
+Once ALL 5 minimum items are gathered, execute this sequence:
+1. `define_session_schema` — for each sport mentioned
+2. `define_metric` — sport-specific metrics (pace, power, HR zones, etc.)
+3. `define_eval_criteria` — plan quality criteria
+4. `create_training_plan` — generate their first plan
+5. `evaluate_plan` — quality check the plan
+6. `save_plan` — persist the approved plan
+7. `complete_onboarding` — mark onboarding as done
+
+## Important
+- Do NOT ask for all 5 items at once — be natural
+- Do NOT skip the setup sequence — the athlete needs configs before their first plan
+- Do NOT complete onboarding without at least one sport and one goal
+- If the athlete asks coaching questions during onboarding, answer them AND continue gathering info
+"""
+
+
 def build_runtime_context(
     user_model,
     date: str | None = None,
     startup_context: str | None = None,
+    context: str = "coach",
 ) -> str:
     """Build the runtime context block injected as the first user message.
 
@@ -280,6 +325,8 @@ def build_runtime_context(
         startup_context: Optional pre-computed context string from CLI
             (startup optimization). Contains athlete summary, recent activity
             stats, import results, plan compliance.
+        context: Session context — ``"coach"`` (default) or ``"onboarding"``.
+            When ``"onboarding"``, appends onboarding-mode instructions.
 
     Returns:
         A formatted string to be injected as the first user-role message.
@@ -377,6 +424,10 @@ def build_runtime_context(
             f"tools like get_activities() or get_athlete_profile() at session start."
         )
 
+    # --- Onboarding Mode Instructions ---
+    if context == "onboarding":
+        sections.append(ONBOARDING_MODE_INSTRUCTIONS)
+
     return "\n\n".join(sections)
 
 
@@ -384,7 +435,11 @@ def build_runtime_context(
 # 3. BACKWARD-COMPAT WRAPPER — used by CLI and existing callers
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(user_model, startup_context: str | None = None) -> str:
+def build_system_prompt(
+    user_model,
+    startup_context: str | None = None,
+    context: str = "coach",
+) -> str:
     """Backward-compatible wrapper that combines static prompt and runtime context.
 
     Used by CLI callers that expect a single combined string. New code should
@@ -393,6 +448,7 @@ def build_system_prompt(user_model, startup_context: str | None = None) -> str:
     Args:
         user_model: The UserModel instance for the current athlete.
         startup_context: Optional pre-computed context string from CLI.
+        context: Session context — ``"coach"`` (default) or ``"onboarding"``.
 
     Returns:
         Combined system prompt string (static + runtime context).
@@ -401,6 +457,7 @@ def build_system_prompt(user_model, startup_context: str | None = None) -> str:
         user_model=user_model,
         date=None,
         startup_context=startup_context,
+        context=context,
     )
     return f"{STATIC_SYSTEM_PROMPT}\n\n---\n\n{runtime}"
 

@@ -153,10 +153,16 @@ def execute_with_budget(
     return result
 
 
-def get_default_tools(user_model) -> ToolRegistry:
+def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     """Create the default tool registry with all native tools.
 
     This is called once at agent startup. MCP tools are added separately.
+
+    Args:
+        user_model: The user model instance.
+        context: Session context — "coach" or "onboarding". Onboarding tools
+                 (e.g. complete_onboarding) are only registered when
+                 context == "onboarding".
     """
     registry = ToolRegistry()
 
@@ -178,6 +184,10 @@ def get_default_tools(user_model) -> ToolRegistry:
     register_meta_tools(registry, user_model)
     register_config_tools(registry, user_model)
     register_calc_tools(registry, user_model)
+
+    if context == "onboarding":
+        from src.agent.tools.onboarding_tools import register_onboarding_tools
+        register_onboarding_tools(registry, user_model)
 
     # Register MCP tools (overrides native fallbacks if available)
     from src.agent.mcp.client import load_mcp_tools
