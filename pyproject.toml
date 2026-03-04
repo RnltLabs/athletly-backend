@@ -29,6 +29,8 @@ dependencies = [
     "evalidate>=2.0",
     # -- HTTP client -----------------------------------------------------------
     "httpx>=0.27",
+    # -- Garmin sync (interim, unofficial API via Garth OAuth) -----------------
+    "garminconnect>=0.2",
 ]
 
 [build-system]
