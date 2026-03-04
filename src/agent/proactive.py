@@ -129,6 +129,25 @@ def format_proactive_message(trigger: dict, context: dict) -> str:
             "Consider taking an extra rest day or reducing intensity this week."
         )
 
+    if msg_type == "unknown_activity":
+        start = data.get("start_time", "recently")
+        duration = data.get("duration_minutes", "?")
+        return (
+            f"I noticed an unclassified activity from {start} "
+            f"({duration} minutes). Can you tell me what sport this was? "
+            f"I'll update the record and set up tracking for it."
+        )
+
+    if msg_type == "self_improvement_check":
+        count = data.get("metric_count", 0)
+        names = data.get("metric_names", [])
+        names_str = ", ".join(names[:3])
+        return (
+            f"Time for a formula check-up! You have {count} metric definitions "
+            f"({names_str}). Use review_all_formulas() and evaluate_formula_accuracy() "
+            f"to verify they're still producing accurate results."
+        )
+
     return f"[{msg_type}] {data}"
 
 

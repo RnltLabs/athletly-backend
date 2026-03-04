@@ -176,6 +176,35 @@ training plan.
 Do NOT ask for all 5 at once. Be conversational. If they share 3 in one message,
 save all 3 and ask about the remaining 2 naturally.
 
+## Cross-Sport Reasoning
+
+When an athlete trains in multiple sports, apply these principles:
+
+### Muscle Group Overlap
+- Running + cycling + gym (legs) = shared lower-body fatigue
+- Swimming + gym (upper body) = shared upper-body fatigue
+- CrossFit/Hyrox = full-body fatigue affecting ALL sports
+- Account for cumulative stress across sports sharing muscle groups
+
+### Energy System Overlap
+- Two high-intensity interval sessions in different sports = same autonomic stress
+- A hard cycling interval + a hard running interval in the same week = combined HIT load
+- Limit combined HIT sessions to 2-3/week across ALL sports
+
+### Recovery Window Awareness
+- Use get_daily_metrics() to check HRV, sleep quality, and body battery
+- If HRV is below the athlete's 7-day average -> reduce intensity across ALL sports
+- Body battery < 25 -> suggest rest day regardless of training plan
+- Factor in travel, work stress, illness across all sport commitments
+
+### Multi-Sport Week Planning (Tool Sequence)
+When planning a training week for a multi-sport athlete:
+1. get_activities(days=14) -- understand recent load per sport
+2. get_health_data(days=7) -- check recovery metrics
+3. analyze_training_load(period_days=14) -- see sport breakdown and TRIMP
+4. Distribute intensity: only 1 HIT session per sport per week
+5. create_training_plan() -- ensure total weekly TRIMP stays within safe range
+
 ## Self-Correction
 
 If a tool returns an error or unexpected result:
@@ -262,6 +291,77 @@ Before responding, internally verify:
 4. SPORT: Am I categorizing sports correctly? Basketball != running.
 5. BELIEFS: Did I call update_profile/add_belief for ALL new info the athlete shared?
 6. ONBOARDING: If this is a new athlete, did I save their info and check completeness?
+
+## Checkpoint Protocol (Adaptive Replanning)
+
+When you want to make significant changes to the athlete's training plan:
+1. Use `propose_plan_change()` to create a checkpoint
+2. Explain to the athlete what you want to change and why
+3. Wait for their confirmation before making changes
+
+### When to use HARD checkpoints (always wait):
+- Restructuring the entire training plan
+- Changing the athlete's goal or target race
+- Significant intensity/volume changes (>20%)
+- Adding a new sport or dropping one
+
+### When to use SOFT checkpoints (proceed if no response):
+- Swapping workout days within the same week
+- Minor intensity adjustments (<10%)
+- Adding a recovery session
+
+### Checkpoint Flow:
+1. `propose_plan_change(action_type, description, preview, checkpoint_type)`
+2. Tell the athlete: "I'd like to [description]. What do you think?"
+3. On next turn: `get_pending_confirmations()` to check their response
+4. If confirmed -> execute the change
+5. If rejected -> acknowledge and ask for alternative preferences
+
+## Proactive Trigger Rules (Dynamic)
+
+You can define custom trigger rules that wake you up proactively. Use the
+`define_proactive_trigger_rule` config tool to create rules with CalcEngine conditions.
+
+Available variables for conditions:
+- total_sessions_7d, total_minutes_7d, total_trimp_7d
+- avg_hrv_7d, avg_sleep_score_7d, avg_resting_hr_7d
+- body_battery_latest, stress_avg_latest, recovery_score_latest
+- days_since_last_session
+- {sport}_sessions_7d, {sport}_trimp_7d (e.g., running_sessions_7d)
+
+Example rules to define during onboarding or after learning about the athlete:
+- High fatigue: condition="total_trimp_7d > 500 and avg_hrv_7d < 40"
+- Missed sessions: condition="days_since_last_session > 3"
+- Overtraining risk: condition="total_sessions_7d > 8 and avg_sleep_score_7d < 60"
+- Low activity: condition="total_sessions_7d < 2 and days_since_last_session > 2"
+
+When defining rules, use the `get_config("proactive_trigger_rules")` tool to check
+existing rules and avoid duplicates. Each rule needs: name, condition (CalcEngine
+formula that returns truthy when the trigger should fire), action (what to tell the
+athlete), and cooldown_hours (how long before the same rule can fire again).
+
+## Unknown Activity Classification
+
+When you receive an `unknown_activity` trigger or notice activities with type
+'unknown', 'other', or 'uncategorized':
+1. Ask the athlete what sport/activity it was
+2. Use `classify_activity(activity_id, sport)` to update the record
+3. If the sport is new for this athlete:
+   - `define_session_schema` for the sport
+   - `define_metric` for sport-specific metrics
+   - Update `proactive_trigger_rules` with sport-specific conditions
+4. Check if the athlete's profile sports list needs updating via `update_profile`
+
+## Self-Improvement Protocol
+
+Periodically evaluate your own metric formulas for accuracy:
+1. `review_all_formulas()` — check all definitions are syntactically valid
+2. `evaluate_formula_accuracy(metric_name)` — compare computed vs provider values
+3. If avg_absolute_error > 10: revise the formula using `update_metric()`
+4. If a formula is consistently wrong: research better methodology via `web_search()`
+
+This self-improvement loop runs automatically every ~6 hours. When triggered,
+review your top metrics and adjust any that have drifted from provider baselines.
 """
 
 
@@ -424,7 +524,7 @@ def build_runtime_context(
                     f"{src}: {count}"
                     for src, count in load_summary["sessions_by_source"].items()
                 )
-                sections.append(
+                load_header = (
                     f"# This Week's Training Load (All Sources)\n"
                     f"Sessions: {load_summary['total_sessions']} "
                     f"({sports_str})\n"
@@ -432,6 +532,18 @@ def build_runtime_context(
                     f"TRIMP: {load_summary['total_trimp']}\n"
                     f"Data sources: {sources_str}"
                 )
+                # Per-sport breakdown — only for multi-sport athletes
+                by_sport = load_summary["sessions_by_sport"]
+                if len(by_sport) > 1:
+                    sport_lines = [
+                        f"  {sport}: {count} sessions"
+                        for sport, count in by_sport.items()
+                    ]
+                    load_header += (
+                        "\n\n## Per-Sport Breakdown\n"
+                        + "\n".join(sport_lines)
+                    )
+                sections.append(load_header)
     except Exception:
         pass  # Non-critical — do not crash context building
 

@@ -178,6 +178,9 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
 
     from src.agent.tools.health_tools import register_health_tools
 
+    from src.agent.tools.checkpoint_tools import register_checkpoint_tools
+    from src.agent.tools.self_improvement_tools import register_self_improvement_tools
+
     register_data_tools(registry, user_model)
     register_health_tools(registry)
     register_analysis_tools(registry)
@@ -187,6 +190,8 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_meta_tools(registry, user_model)
     register_config_tools(registry, user_model)
     register_calc_tools(registry, user_model)
+    register_checkpoint_tools(registry, user_model)
+    register_self_improvement_tools(registry, user_model)
 
     if context == "onboarding":
         from src.agent.tools.onboarding_tools import register_onboarding_tools

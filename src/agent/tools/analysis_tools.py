@@ -148,3 +148,76 @@ def register_analysis_tools(registry: ToolRegistry):
         parameters={},
         category="analysis",
     ))
+
+    def classify_activity(activity_id: str, sport: str) -> dict:
+        """Classify an unknown activity by updating its sport type.
+
+        After classification, the agent should consider defining sport-specific
+        configs if this is a new sport (define_session_schema, define_metric).
+        """
+        from src.config import get_settings
+
+        settings = get_settings()
+        user_id = settings.agenticsports_user_id
+        if not user_id:
+            return {"status": "error", "message": "No user_id configured."}
+
+        if not activity_id or not sport:
+            return {"status": "error", "message": "activity_id and sport are required."}
+
+        try:
+            from src.db.client import get_supabase
+
+            result = (
+                get_supabase()
+                .table("health_activities")
+                .update({"activity_type": sport.lower().strip()})
+                .eq("id", activity_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+
+            if not result.data:
+                return {
+                    "status": "not_found",
+                    "message": f"Activity {activity_id} not found.",
+                }
+
+            return {
+                "status": "classified",
+                "activity_id": activity_id,
+                "sport": sport.lower().strip(),
+                "message": (
+                    f"Activity classified as '{sport}'. "
+                    f"If this is a new sport, consider using define_session_schema "
+                    f"and define_metric to set up sport-specific configurations."
+                ),
+            }
+        except Exception as exc:
+            return {"status": "error", "message": f"Classification failed: {exc}"}
+
+    registry.register(Tool(
+        name="classify_activity",
+        description=(
+            "Classify an unknown or uncategorized activity by setting its sport type. "
+            "Use this when you detect an activity with type 'unknown', 'other', or "
+            "'uncategorized'. After classifying, consider defining sport-specific "
+            "configs if this is a new sport for the athlete."
+        ),
+        handler=classify_activity,
+        parameters={
+            "type": "object",
+            "properties": {
+                "activity_id": {
+                    "type": "string",
+                    "description": "UUID of the health_activity to classify.",
+                },
+                "sport": {
+                    "type": "string",
+                    "description": "The correct sport type (e.g., 'running', 'cycling', 'swimming').",
+                },
+            },
+            "required": ["activity_id", "sport"],
+        },
+        category="analysis",
+    ))

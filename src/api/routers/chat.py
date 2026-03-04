@@ -186,6 +186,24 @@ async def _chat_event_generator(
         # knows which session this stream belongs to.
         yield SSEEmitter.session_start(resolved_session_id)
 
+        # Inject checkpoint context (recently resolved pending actions)
+        try:
+            from src.db.pending_actions_db import get_recently_resolved
+            resolved_actions = await asyncio.to_thread(
+                get_recently_resolved, user_id, hours=1,
+            )
+            if resolved_actions:
+                checkpoint_context = "\n".join(
+                    f"- {a['action_type']}: {a['status']}"
+                    for a in resolved_actions
+                )
+                user_message = (
+                    f"[System: The user has responded to your previous proposals: "
+                    f"{checkpoint_context}]\n\n{user_message}"
+                )
+        except Exception:
+            logger.debug("Checkpoint context injection skipped", exc_info=True)
+
         # Real-time streaming via asyncio.Queue
         event_queue: asyncio.Queue[ServerSentEvent | None] = asyncio.Queue()
 
@@ -315,5 +333,14 @@ async def post_chat_confirm(
             "Redis unavailable; stored confirmation %s in-process (unreliable)",
             confirm_key,
         )
+
+    # Also update the pending_actions table if it exists
+    try:
+        from src.db.pending_actions_db import resolve_pending_action
+        await asyncio.to_thread(
+            resolve_pending_action, user_id, body.action_id, body.confirmed,
+        )
+    except Exception:
+        logger.debug("pending_actions update skipped", exc_info=True)
 
     return {"status": "ok"}

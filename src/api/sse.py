@@ -83,6 +83,27 @@ class SSEEmitter:
         )
 
     @staticmethod
+    def pending_action(
+        action_id: str,
+        action_type: str,
+        description: str,
+        preview: dict,
+    ) -> ServerSentEvent:
+        """Emit a pending action proposal — client should show a confirm/reject UI."""
+        return ServerSentEvent(
+            event="pending_action",
+            data=json.dumps(
+                {
+                    "action_id": action_id,
+                    "action_type": action_type,
+                    "description": description,
+                    "preview": preview,
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    @staticmethod
     def done() -> ServerSentEvent:
         """Sentinel event — signals the stream is finished."""
         return ServerSentEvent(

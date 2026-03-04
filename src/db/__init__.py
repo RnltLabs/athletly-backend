@@ -8,6 +8,7 @@ Sub-modules
 - ``session_store_db``  -- Session + message persistence
 - ``episodes_db``       -- Episodic memory (training reflections)
 - ``plans_db``          -- Training plan storage
+- ``pending_actions_db``-- Checkpoint / adaptive replanning actions
 """
 
 from src.db.client import get_supabase, get_async_supabase
@@ -49,6 +50,13 @@ from src.db.proactive_queue_db import (
     get_pending_messages as get_pending_proactive_messages,
     queue_message as queue_proactive_message,
     record_engagement as record_proactive_engagement,
+)
+from src.db.pending_actions_db import (
+    create_pending_action,
+    expire_stale_actions,
+    get_pending_for_user,
+    get_recently_resolved,
+    resolve_pending_action,
 )
 from src.db.session_store_db import (
     create_session,
@@ -104,4 +112,10 @@ __all__ = [
     "list_plans",
     "update_plan_evaluation",
     "deactivate_plan",
+    # pending_actions_db
+    "create_pending_action",
+    "get_pending_for_user",
+    "get_recently_resolved",
+    "resolve_pending_action",
+    "expire_stale_actions",
 ]

@@ -36,6 +36,7 @@ class HeartbeatService:
         self.interval = interval_seconds
         self._task: asyncio.Task | None = None
         self._running: bool = False
+        self._tick_count: int = 0
 
     async def start(self) -> None:
         """Start the background loop."""
@@ -69,7 +70,8 @@ class HeartbeatService:
     async def _tick(self) -> None:
         """One heartbeat cycle — process all recently-active users."""
         now = datetime.now(timezone.utc)
-        logger.info("Heartbeat tick at %s", now.isoformat())
+        self._tick_count += 1
+        logger.info("Heartbeat tick #%d at %s", self._tick_count, now.isoformat())
 
         user_ids = await _fetch_active_user_ids()
         if not user_ids:
@@ -85,6 +87,53 @@ class HeartbeatService:
                 await _process_user(user_id)
 
         await asyncio.gather(*(process_one(uid) for uid in user_ids))
+
+        # Self-improvement check every 12th tick (~6 hours at 30min interval)
+        if self._tick_count % 12 == 0:
+            await self._run_self_improvement(user_ids)
+
+    async def _run_self_improvement(self, user_ids: list[str]) -> None:
+        """Queue self-improvement checks for users with metric definitions."""
+        try:
+            from src.agent.proactive import queue_proactive_message
+            from src.db.agent_config_db import get_metric_definitions
+
+            loop = asyncio.get_running_loop()
+
+            for user_id in user_ids:
+                try:
+                    definitions = await loop.run_in_executor(
+                        None, get_metric_definitions, user_id,
+                    )
+                    if definitions:
+                        trigger = {
+                            "type": "self_improvement_check",
+                            "priority": "low",
+                            "data": {
+                                "metric_count": len(definitions),
+                                "metric_names": [
+                                    d.get("name", "") for d in definitions[:5]
+                                ],
+                            },
+                        }
+                        await loop.run_in_executor(
+                            None,
+                            lambda t=trigger: queue_proactive_message(
+                                user_id=user_id,
+                                trigger=t,
+                                priority=0.3,
+                            ),
+                        )
+                        logger.info(
+                            "Self-improvement check queued for user %s (%d metrics)",
+                            user_id, len(definitions),
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "Self-improvement skip for user %s: %s", user_id, exc,
+                    )
+        except Exception as exc:
+            logger.error("Self-improvement check failed: %s", exc)
 
 
 # ------------------------------------------------------------------
@@ -159,6 +208,14 @@ async def _process_user(user_id: str) -> None:
                 "Silence triggers queued for user %s: %d message(s)",
                 user_id,
                 len(silence_queued),
+            )
+
+        # Unknown activity detection
+        unknown_queued = await _detect_unknown_activities(user_id)
+        if unknown_queued:
+            logger.info(
+                "Unknown activities queued for user %s: %d",
+                user_id, len(unknown_queued),
             )
     except Exception as exc:
         logger.error("Error processing user %s: %s", user_id, exc)
@@ -240,8 +297,34 @@ async def _check_triggers_for_user(user_id: str) -> list[dict]:
         )
         athlete_profile: dict = (profile_result.data or {}) if profile_result else {}
 
-        # Trigger check runs synchronously — offload to thread pool.
         loop = asyncio.get_running_loop()
+
+        # PHASE 4b: Dynamic trigger evaluation (agent-defined rules first)
+        try:
+            from src.agent.dynamic_triggers import evaluate_dynamic_triggers
+            from src.db.health_data_db import list_daily_metrics as _list_daily_metrics
+
+            # Fetch daily metrics synchronously (offload to thread pool).
+            daily_metrics = await loop.run_in_executor(
+                None,
+                lambda: _list_daily_metrics(user_id, days=14),
+            )
+
+            dynamic_triggers = await loop.run_in_executor(
+                None,
+                evaluate_dynamic_triggers,
+                user_id,
+                activities,
+                daily_metrics,
+                athlete_profile,
+            )
+
+            if dynamic_triggers:
+                return dynamic_triggers
+        except Exception as exc:
+            logger.debug("Dynamic trigger eval skipped for %s: %s", user_id, exc)
+
+        # Fallback: hardcoded triggers
         triggers = await loop.run_in_executor(
             None,
             check_proactive_triggers,
@@ -336,6 +419,62 @@ async def _check_silence_triggers(user_id: str) -> list[dict]:
         return queued
     except Exception as exc:
         logger.error("Silence trigger check failed for user %s: %s", user_id, exc)
+        return []
+
+
+async def _detect_unknown_activities(user_id: str) -> list[dict]:
+    """Detect unclassified activities from the last 24 hours and queue triggers.
+
+    Queries health_activities for activity_type IN ('unknown', 'other', 'uncategorized')
+    within the last 24 hours. For each found, queues an unknown_activity trigger.
+    """
+    try:
+        from src.agent.proactive import queue_proactive_message
+        from src.db.client import get_async_supabase
+
+        client = await get_async_supabase()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+        result = await (
+            client.table("health_activities")
+            .select("id,activity_type,start_time,duration_seconds,distance_meters")
+            .eq("user_id", user_id)
+            .in_("activity_type", ["unknown", "other", "uncategorized"])
+            .gte("start_time", cutoff)
+            .execute()
+        )
+
+        unknown_acts = result.data or []
+        if not unknown_acts:
+            return []
+
+        queued = []
+        loop = asyncio.get_running_loop()
+        for act in unknown_acts:
+            duration_min = round((act.get("duration_seconds") or 0) / 60)
+            trigger = {
+                "type": "unknown_activity",
+                "priority": "medium",
+                "data": {
+                    "activity_id": act.get("id"),
+                    "start_time": act.get("start_time"),
+                    "duration_minutes": duration_min,
+                    "distance_meters": act.get("distance_meters"),
+                },
+            }
+            msg = await loop.run_in_executor(
+                None,
+                lambda t=trigger: queue_proactive_message(
+                    user_id=user_id,
+                    trigger=t,
+                    priority=0.6,
+                ),
+            )
+            queued.append(msg)
+
+        return queued
+    except Exception as exc:
+        logger.debug("Unknown activity detection skipped for %s: %s", user_id, exc)
         return []
 
 
