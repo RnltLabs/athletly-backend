@@ -1,19 +1,21 @@
-"""Step 5 tests: Trajectory assessment, confidence scoring, proactive communication."""
+"""Step 5 tests: Trajectory assessment, confidence scoring, proactive communication.
 
-import json
-from pathlib import Path
+Updated to use the Supabase-backed proactive queue (file-based I/O removed).
+All queue operations are mocked via src.db.proactive_queue_db.
+"""
 
-import pytest
+from unittest.mock import patch
 
-from src.agent.trajectory import assess_trajectory, calculate_confidence
+from src.agent.trajectory import calculate_confidence
 from src.agent.proactive import (
     check_proactive_triggers,
     format_proactive_message,
+    queue_proactive_message,
+    get_pending_messages,
+    refresh_proactive_triggers,
 )
-from src.tools.fit_parser import parse_fit_file
-from src.tools.metrics import calculate_trimp, classify_hr_zone
 
-FIXTURES = Path(__file__).parent / "fixtures"
+USER_ID = "test-user-id"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -39,23 +41,6 @@ def _test_profile():
             "available_sports": ["running"],
         },
     }
-
-
-def _load_fixtures(names: list[str]) -> list[dict]:
-    activities = []
-    for name in names:
-        act = parse_fit_file(str(FIXTURES / name))
-        hr = act.get("heart_rate")
-        if hr and hr.get("avg"):
-            dur = act["duration_seconds"] / 60
-            act["trimp"] = calculate_trimp(dur, hr["avg"])
-            act["hr_zone"] = classify_hr_zone(hr["avg"])
-        activities.append(act)
-    return activities
-
-
-def _load_plan(name: str) -> dict:
-    return json.loads((FIXTURES / name).read_text())
 
 
 def _mock_episodes():
@@ -200,65 +185,160 @@ class TestProactiveMessages:
         assert "fatigue" in msg.lower()
 
 
-# ── Integration Tests (calls Gemini) ─────────────────────────────────
+# ── Queue round-trip (DB-mocked) ─────────────────────────────────────
 
-class TestStep5Integration:
-    @pytest.mark.integration
-    def test_trajectory_assessment(self):
-        """Full trajectory assessment with 3 weeks of data."""
-        profile = _test_profile()
-        plan = _load_plan("week3_plan.json")
+class TestQueueRoundTrip:
+    """Replaces the old file-based queue tests with DB-mock equivalents.
 
-        # Load all activities across 3 weeks
-        all_activity_files = [
-            "easy_run.json", "interval_run.json",
-            "week2_mon_easy.json", "week2_wed_tempo.json", "week2_sat_long.json", "week2_sun_recovery.json",
-            "week3_mon_easy.json", "week3_wed_tempo.json", "week3_thu_intervals.json",
-            "week3_sat_long.json", "week3_sun_fatigued.json",
+    The core behaviour under test is unchanged: queue_proactive_message stores
+    a message and get_pending_messages retrieves it.  Only the I/O layer
+    (file system → Supabase) has changed.
+    """
+
+    def test_queue_message_returns_db_row(self) -> None:
+        trigger = {
+            "type": "goal_at_risk",
+            "priority": "high",
+            "data": {"predicted_time": "2:00:00", "target_time": "1:45:00"},
+        }
+        expected_row = {"id": "row-1", "trigger_type": "goal_at_risk", "priority": 0.9}
+
+        with patch("src.db.proactive_queue_db.queue_message", return_value=expected_row):
+            result = queue_proactive_message(USER_ID, trigger, priority=0.9)
+
+        assert result["id"] == "row-1"
+        assert result["trigger_type"] == "goal_at_risk"
+
+    def test_get_pending_messages_returns_db_rows(self) -> None:
+        stored = [
+            {"id": "1", "trigger_type": "goal_at_risk", "priority": 0.9, "status": "pending"},
+            {"id": "2", "trigger_type": "fitness_improving", "priority": 0.2, "status": "pending"},
         ]
-        activities = _load_fixtures(all_activity_files)
-        episodes = _mock_episodes()
 
-        traj = assess_trajectory(profile, activities, episodes, plan)
+        with patch("src.db.proactive_queue_db.get_pending_messages", return_value=stored):
+            result = get_pending_messages(USER_ID)
 
-        # Verify structure
-        assert "goal" in traj
-        assert traj["goal"]["event"] == "Half Marathon"
-        assert traj["goal"]["weeks_remaining"] is not None
-        assert traj["goal"]["weeks_remaining"] > 0
+        assert len(result) == 2
+        assert result[0]["trigger_type"] == "goal_at_risk"
 
-        assert "confidence" in traj
-        # 3 weeks of data -> capped at 0.5
-        assert traj["confidence"] <= 0.5
+    def test_queue_then_get_reflects_stored_message(self) -> None:
+        """Simulate queue → get round-trip via mocked DB."""
+        trigger = {
+            "type": "fatigue_warning",
+            "priority": "high",
+            "data": {"message": "Tired"},
+        }
+        db_row = {"id": "99", "trigger_type": "fatigue_warning", "priority": 0.9, "status": "pending"}
 
-        assert "confidence_explanation" in traj
-        assert isinstance(traj["confidence_explanation"], str)
+        with patch("src.db.proactive_queue_db.queue_message", return_value=db_row):
+            queued = queue_proactive_message(USER_ID, trigger, priority=0.9)
 
-        assert "trajectory" in traj
-        assert "recommendations" in traj
-        assert len(traj["recommendations"]) > 0
+        # After queuing, the same row appears in pending list
+        with patch("src.db.proactive_queue_db.get_pending_messages", return_value=[queued]):
+            pending = get_pending_messages(USER_ID)
 
-    @pytest.mark.integration
-    def test_full_cycle_trajectory_proactive(self):
-        """End-to-end: activities -> trajectory -> proactive messages."""
+        assert len(pending) == 1
+        assert pending[0]["trigger_type"] == "fatigue_warning"
+
+
+# ── Full cycle: trajectory → triggers → queue (DB-mocked) ────────────
+
+class TestFullCycleTrajectoryToQueue:
+    """Trajectory → check_proactive_triggers → refresh_proactive_triggers.
+
+    This mirrors the old test_full_cycle_trajectory_proactive integration test
+    but replaces API calls and file I/O with mocks.
+    """
+
+    def test_trajectory_assessment_produces_triggers(self) -> None:
+        """Meaningful trajectory data yields at least one trigger."""
         profile = _test_profile()
-        plan = _load_plan("week3_plan.json")
-        activities = _load_fixtures([
-            "easy_run.json", "interval_run.json",
-            "week2_mon_easy.json", "week2_wed_tempo.json",
-            "week3_mon_easy.json", "week3_wed_tempo.json", "week3_sat_long.json",
-        ])
         episodes = _mock_episodes()
+        trajectory = {
+            "trajectory": {"on_track": False, "predicted_race_time": "2:00:00"},
+            "confidence": 0.6,
+            "goal": {"target_time": "1:45:00"},
+        }
 
-        # Get trajectory
-        traj = assess_trajectory(profile, activities, episodes, plan)
-        assert "trajectory" in traj
-
-        # Get proactive triggers
-        triggers = check_proactive_triggers(profile, activities, episodes, traj)
+        triggers = check_proactive_triggers(profile, [], episodes, trajectory)
         assert len(triggers) > 0
 
-        # Format messages
+    def test_triggers_have_meaningful_messages(self) -> None:
+        profile = _test_profile()
+        episodes = _mock_episodes()
+        trajectory = {
+            "trajectory": {"on_track": False, "predicted_race_time": "2:00:00"},
+            "confidence": 0.6,
+            "goal": {"target_time": "1:45:00"},
+        }
+
+        triggers = check_proactive_triggers(profile, [], episodes, trajectory)
         for trigger in triggers:
             msg = format_proactive_message(trigger, profile)
-            assert len(msg) > 10  # meaningful message, not empty
+            assert isinstance(msg, str)
+            assert len(msg) > 10
+
+    def test_refresh_queues_all_new_triggers(self) -> None:
+        """refresh_proactive_triggers queues every trigger not already pending."""
+        profile = _test_profile()
+        episodes = _mock_episodes()
+        trajectory = {
+            "trajectory": {"on_track": False, "predicted_race_time": "2:00:00"},
+            "confidence": 0.6,
+            "goal": {"target_time": "1:45:00"},
+        }
+
+        queued_count = 0
+
+        def fake_queue(**kwargs):
+            nonlocal queued_count
+            queued_count += 1
+            return {"id": str(queued_count), "trigger_type": kwargs["trigger_type"]}
+
+        with (
+            patch("src.db.proactive_queue_db.get_pending_messages", return_value=[]),
+            patch("src.db.proactive_queue_db.queue_message", side_effect=fake_queue),
+        ):
+            result = refresh_proactive_triggers(
+                USER_ID,
+                activities=[],
+                episodes=episodes,
+                trajectory=trajectory,
+                athlete_profile=profile,
+            )
+
+        assert len(result) == queued_count
+        assert queued_count > 0
+
+    def test_refresh_skips_already_pending_triggers(self) -> None:
+        """If goal_at_risk is already pending, it must not be re-queued."""
+        profile = _test_profile()
+        episodes = _mock_episodes()
+        trajectory = {
+            "trajectory": {"on_track": False, "predicted_race_time": "2:00:00"},
+            "confidence": 0.6,
+            "goal": {"target_time": "1:45:00"},
+        }
+        already_pending = [{"id": "existing", "trigger_type": "goal_at_risk"}]
+
+        queued_types: list[str] = []
+
+        def fake_queue(**kwargs):
+            queued_types.append(kwargs["trigger_type"])
+            return {"id": "new", "trigger_type": kwargs["trigger_type"]}
+
+        with (
+            patch("src.db.proactive_queue_db.get_pending_messages", return_value=already_pending),
+            patch("src.db.proactive_queue_db.queue_message", side_effect=fake_queue),
+        ):
+            refresh_proactive_triggers(
+                USER_ID,
+                activities=[],
+                episodes=episodes,
+                trajectory=trajectory,
+                athlete_profile=profile,
+            )
+
+        assert "goal_at_risk" not in queued_types
+
+

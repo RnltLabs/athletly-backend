@@ -176,7 +176,10 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     from src.agent.tools.config_tools import register_config_tools
     from src.agent.tools.calc_tools import register_calc_tools
 
+    from src.agent.tools.health_tools import register_health_tools
+
     register_data_tools(registry, user_model)
+    register_health_tools(registry)
     register_analysis_tools(registry)
     register_planning_tools(registry, user_model)
     register_memory_tools(registry, user_model)

@@ -35,6 +35,21 @@ from src.db.plans_db import (
     store_plan,
     update_plan_evaluation,
 )
+from src.db.health_data_db import (
+    get_cross_source_load_summary,
+    get_health_activity_summary,
+    list_daily_metrics,
+    list_garmin_activities,
+    list_garmin_daily_stats,
+    list_health_activities,
+)
+from src.db.proactive_queue_db import (
+    deliver_message as deliver_proactive_message,
+    expire_stale_messages as expire_proactive_messages,
+    get_pending_messages as get_pending_proactive_messages,
+    queue_message as queue_proactive_message,
+    record_engagement as record_proactive_engagement,
+)
 from src.db.session_store_db import (
     create_session,
     get_recent_sessions,
@@ -70,6 +85,19 @@ __all__ = [
     "list_episodes",
     "get_episode",
     "list_episodes_by_type",
+    # health_data_db
+    "list_health_activities",
+    "list_garmin_activities",
+    "list_daily_metrics",
+    "list_garmin_daily_stats",
+    "get_health_activity_summary",
+    "get_cross_source_load_summary",
+    # proactive_queue_db
+    "queue_proactive_message",
+    "get_pending_proactive_messages",
+    "deliver_proactive_message",
+    "record_proactive_engagement",
+    "expire_proactive_messages",
     # plans_db
     "store_plan",
     "get_active_plan",

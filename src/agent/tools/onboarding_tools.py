@@ -46,6 +46,40 @@ def register_onboarding_tools(registry: ToolRegistry, user_model) -> None:
                 "missing": missing,
             }
 
+        # Gate 2: Validate configs + plan exist before allowing completion
+        if _settings.use_supabase:
+            try:
+                from src.db.client import get_supabase
+
+                uid = _get_user_id()
+
+                schemas = get_supabase().table("agent_configs").select("id").eq(
+                    "user_id", uid
+                ).eq("config_type", "session_schema").limit(1).execute()
+                if not schemas.data:
+                    missing.append("session_schemas (call define_session_schema first)")
+
+                metrics = get_supabase().table("agent_configs").select("id").eq(
+                    "user_id", uid
+                ).eq("config_type", "metric").limit(1).execute()
+                if not metrics.data:
+                    missing.append("metrics (call define_metric first)")
+
+                plans = get_supabase().table("weekly_plans").select("id").eq(
+                    "user_id", uid
+                ).eq("status", "active").limit(1).execute()
+                if not plans.data:
+                    missing.append("training_plan (call create_training_plan + save_plan first)")
+            except Exception:
+                logger.warning("Config gate DB check failed", exc_info=True)
+
+        if missing:
+            return {
+                "status": "error",
+                "error": f"Cannot complete onboarding: missing {', '.join(missing)}",
+                "missing": missing,
+            }
+
         # Set onboarding_complete in Supabase profiles table
         if _settings.use_supabase:
             try:

@@ -1,9 +1,6 @@
 """Proactive communication: triggers, message queue, and engagement tracking."""
 
-import json
-import uuid
-from datetime import datetime, date, timedelta
-from pathlib import Path
+from datetime import datetime, timedelta
 
 
 def check_proactive_triggers(
@@ -236,160 +233,87 @@ def _detect_fatigue_llm(recent_activities: list[dict]) -> bool | None:
 
 # ── Proactive Message Queue ──────────────────────────────────────
 
-DATA_DIR = Path(__file__).parent.parent.parent / "data"
-DEFAULT_QUEUE_PATH = DATA_DIR / "user_model" / "proactive_queue.json"
-
-
-def _load_queue(queue_path: Path | None = None) -> list[dict]:
-    """Load the proactive message queue from disk."""
-    path = queue_path or DEFAULT_QUEUE_PATH
-    if not path.exists():
-        return []
-    return json.loads(path.read_text())
-
-
-def _save_queue(queue: list[dict], queue_path: Path | None = None) -> None:
-    """Save the proactive message queue to disk."""
-    path = queue_path or DEFAULT_QUEUE_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(queue, indent=2))
-
 
 def queue_proactive_message(
+    user_id: str,
     trigger: dict,
     priority: float = 0.5,
-    queue_path: Path | None = None,
     context: dict | None = None,
 ) -> dict:
     """Add a proactive trigger to the message queue.
 
+    Deduplication is handled at the DB level via upsert: if a pending message
+    of the same trigger type already exists for the user it is updated in place.
+
     Args:
+        user_id: UUID of the owning user.
         trigger: Trigger dict with type, priority, data fields.
         priority: Numeric priority 0.0-1.0 (higher = more urgent).
-        queue_path: Optional path for the queue file (for testing).
         context: Optional context dict for format_proactive_message().
 
     Returns:
         The queued message dict.
     """
-    queue = _load_queue(queue_path)
+    from src.db.proactive_queue_db import queue_message
 
-    # Format a human-readable message for LLM consumption
     message_text = format_proactive_message(trigger, context or {})
-
-    msg = {
-        "id": f"msg_{uuid.uuid4().hex[:8]}",
-        "trigger_type": trigger.get("type", "unknown"),
-        "priority": priority,
-        "data": trigger.get("data", {}),
-        "message_text": message_text,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "delivered_at": None,
-        "status": "pending",
-        "engagement_tracking": {
-            "user_responded_at": None,
-            "response_latency_seconds": None,
-            "user_continued_session": False,
-            "session_turns_after_delivery": 0,
-        },
-    }
-
-    queue.append(msg)
-    _save_queue(queue, queue_path)
-    return msg
+    return queue_message(
+        user_id=user_id,
+        trigger_type=trigger.get("type", "unknown"),
+        priority=priority,
+        data=trigger.get("data", {}),
+        message_text=message_text,
+    )
 
 
-def get_pending_messages(queue_path: Path | None = None) -> list[dict]:
-    """Return pending messages sorted by priority (highest first)."""
-    queue = _load_queue(queue_path)
-    pending = [m for m in queue if m.get("status") == "pending"]
-    pending.sort(key=lambda m: m.get("priority", 0), reverse=True)
-    return pending
+def get_pending_messages(user_id: str) -> list[dict]:
+    """Return pending messages for a user, sorted by priority (highest first)."""
+    from src.db.proactive_queue_db import get_pending_messages as _get_pending
+
+    return _get_pending(user_id)
 
 
-def deliver_message(
-    message_id: str,
-    queue_path: Path | None = None,
-) -> dict | None:
+def deliver_message(user_id: str, message_id: str) -> dict | None:
     """Mark a message as delivered and record delivery timestamp.
 
     Returns the updated message, or None if not found.
     """
-    queue = _load_queue(queue_path)
+    from src.db.proactive_queue_db import deliver_message as _deliver
 
-    for msg in queue:
-        if msg.get("id") == message_id:
-            msg["status"] = "delivered"
-            msg["delivered_at"] = datetime.now().isoformat(timespec="seconds")
-            _save_queue(queue, queue_path)
-            return msg
-
-    return None
+    return _deliver(user_id, message_id)
 
 
 def record_engagement(
+    user_id: str,
     message_id: str,
     responded: bool = False,
     continued_session: bool = False,
     turns_after: int = 0,
-    queue_path: Path | None = None,
 ) -> dict | None:
     """Record user engagement with a delivered proactive message.
 
     Args:
-        message_id: ID of the delivered message.
+        user_id: UUID of the owning user.
+        message_id: UUID of the proactive_queue row.
         responded: Whether the user responded to the message.
         continued_session: Whether the user continued the session after delivery.
         turns_after: Number of conversation turns after delivery.
-        queue_path: Optional path for the queue file.
 
     Returns the updated message, or None if not found.
     """
-    queue = _load_queue(queue_path)
+    from src.db.proactive_queue_db import record_engagement as _record
 
-    for msg in queue:
-        if msg.get("id") == message_id and msg.get("status") == "delivered":
-            tracking = msg.get("engagement_tracking", {})
-            if responded and not tracking.get("user_responded_at"):
-                tracking["user_responded_at"] = datetime.now().isoformat(timespec="seconds")
-                delivered_at = msg.get("delivered_at")
-                if delivered_at:
-                    delivered_dt = datetime.fromisoformat(delivered_at)
-                    tracking["response_latency_seconds"] = int(
-                        (datetime.now() - delivered_dt).total_seconds()
-                    )
-            tracking["user_continued_session"] = continued_session
-            tracking["session_turns_after_delivery"] = turns_after
-            msg["engagement_tracking"] = tracking
-            _save_queue(queue, queue_path)
-            return msg
-
-    return None
+    return _record(user_id, message_id, responded, continued_session, turns_after)
 
 
-def expire_stale_messages(
-    max_age_days: int = 7,
-    queue_path: Path | None = None,
-) -> list[dict]:
+def expire_stale_messages(user_id: str, max_age_days: int = 7) -> list[dict]:
     """Expire pending messages older than max_age_days.
 
     Returns the list of expired messages.
     """
-    queue = _load_queue(queue_path)
-    cutoff = datetime.now() - timedelta(days=max_age_days)
-    expired = []
+    from src.db.proactive_queue_db import expire_stale_messages as _expire
 
-    for msg in queue:
-        if msg.get("status") == "pending":
-            created = msg.get("created_at")
-            if created and datetime.fromisoformat(created) < cutoff:
-                msg["status"] = "expired"
-                expired.append(msg)
-
-    if expired:
-        _save_queue(queue, queue_path)
-
-    return expired
+    return _expire(user_id, max_age_days)
 
 
 # ── Mid-Conversation Trigger Refresh (P8) ────────────────────────
@@ -403,11 +327,11 @@ PROACTIVE_REFRESH_INTERVAL = 3
 
 
 def refresh_proactive_triggers(
+    user_id: str,
     activities: list[dict],
     episodes: list[dict],
     trajectory: dict,
     athlete_profile: dict,
-    queue_path: Path | None = None,
     context: dict | None = None,
 ) -> list[dict]:
     """Check for new proactive triggers and queue any that aren't already pending.
@@ -415,15 +339,15 @@ def refresh_proactive_triggers(
     P8 enhancement: called during conversation (not just startup) to keep
     the proactive queue fresh with relevant insights.
 
-    Deduplicates: won't queue a trigger if a pending message of the same
-    type already exists.
+    Deduplication is handled at the DB level via upsert, so duplicate trigger
+    types for the same user are updated rather than duplicated.
 
     Args:
+        user_id: UUID of the owning user.
         activities: Recent activity dicts.
         episodes: Episode dicts.
         trajectory: Trajectory dict.
         athlete_profile: Athlete profile dict.
-        queue_path: Optional queue file path (for testing).
         context: Optional context for message formatting.
 
     Returns:
@@ -437,8 +361,8 @@ def refresh_proactive_triggers(
     if not triggers:
         return []
 
-    # Get existing pending types to avoid duplicates
-    pending = get_pending_messages(queue_path)
+    # Get existing pending types to avoid redundant upserts within the same call
+    pending = get_pending_messages(user_id)
     pending_types = {m.get("trigger_type") for m in pending}
 
     queued = []
@@ -451,8 +375,7 @@ def refresh_proactive_triggers(
         priority_num = _PRIORITY_MAP.get(priority_str, 0.5)
 
         msg = queue_proactive_message(
-            trigger, priority=priority_num,
-            queue_path=queue_path, context=context,
+            user_id, trigger, priority=priority_num, context=context,
         )
         queued.append(msg)
         pending_types.add(trigger_type)

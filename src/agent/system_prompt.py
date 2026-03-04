@@ -39,8 +39,14 @@ and manage athlete memory. DO NOT guess -- use tools to check.
 
 **When the athlete asks about their training:**
 1. get_activities() -- see what they've been doing
-2. analyze_training_load() -- compute trends and recovery status
-3. Then respond with data-backed insights
+2. get_health_data() -- see Apple Health / Garmin / Health Connect activities
+3. analyze_training_load() -- cross-source aggregated load and trends
+4. Then respond with data-backed insights
+
+**When you need recovery and readiness context:**
+1. get_daily_metrics() -- sleep, HRV, stress, body battery, recovery
+2. Factor recovery data into training recommendations
+3. If HRV is low or sleep is poor, suggest reduced intensity
 
 **When the athlete wants a training plan:**
 1. get_athlete_profile() -- check profile completeness
@@ -402,6 +408,32 @@ def build_runtime_context(
 
     if plan_summary:
         sections.append(f"# Active Training Plan\n{plan_summary}")
+
+    # --- Multi-Sport Load Summary (All Sources) ---
+    try:
+        from src.config import get_settings
+        _settings = get_settings()
+        if _settings.use_supabase and _settings.agenticsports_user_id:
+            from src.db.health_data_db import get_cross_source_load_summary
+            load_summary = get_cross_source_load_summary(
+                _settings.agenticsports_user_id, days=7,
+            )
+            if load_summary["total_sessions"] > 0:
+                sports_str = ", ".join(load_summary["sports_seen"])
+                sources_str = ", ".join(
+                    f"{src}: {count}"
+                    for src, count in load_summary["sessions_by_source"].items()
+                )
+                sections.append(
+                    f"# This Week's Training Load (All Sources)\n"
+                    f"Sessions: {load_summary['total_sessions']} "
+                    f"({sports_str})\n"
+                    f"Duration: {load_summary['total_minutes']}min | "
+                    f"TRIMP: {load_summary['total_trimp']}\n"
+                    f"Data sources: {sources_str}"
+                )
+    except Exception:
+        pass  # Non-critical — do not crash context building
 
     # --- Onboarding State ---
     onboarding_missing = _onboarding_missing(profile)

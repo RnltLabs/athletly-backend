@@ -133,7 +133,8 @@ async def _process_user(user_id: str) -> None:
     1. Try to acquire a Redis lock (skip if user is chatting).
     2. Check proactive triggers from stored data.
     3. If triggers found, send a push notification.
-    4. Release lock.
+    4. Check silence-based conversation triggers and queue them.
+    5. Release lock.
     """
     lock_key = f"heartbeat:lock:{user_id}"
     lock_acquired = await _try_acquire_lock(lock_key)
@@ -149,6 +150,15 @@ async def _process_user(user_id: str) -> None:
                 "Proactive trigger for user %s: %s",
                 user_id,
                 triggers[0].get("type"),
+            )
+
+        # Silence-based conversation triggers (queue for later delivery).
+        silence_queued = await _check_silence_triggers(user_id)
+        if silence_queued:
+            logger.info(
+                "Silence triggers queued for user %s: %d message(s)",
+                user_id,
+                len(silence_queued),
             )
     except Exception as exc:
         logger.error("Error processing user %s: %s", user_id, exc)
@@ -167,16 +177,47 @@ async def _check_triggers_for_user(user_id: str) -> list[dict]:
 
         client = await get_async_supabase()
 
-        # Fetch the most recent activity records.
+        # Fetch the most recent activity records (agent + health sources).
         acts_result = await (
             client.table("activities")
             .select("*")
             .eq("user_id", user_id)
-            .order("started_at", desc=True)
+            .order("start_time", desc=True)
             .limit(20)
             .execute()
         )
         activities: list[dict] = acts_result.data or []
+
+        # Also fetch health provider activities for cross-sport awareness.
+        try:
+            health_result = await (
+                client.table("health_activities")
+                .select("*")
+                .eq("user_id", user_id)
+                .order("start_time", desc=True)
+                .limit(20)
+                .execute()
+            )
+            health_acts: list[dict] = health_result.data or []
+            # Normalize and merge (avoid duplicates via garmin_activity_id).
+            agent_garmin_ids = {
+                a["garmin_activity_id"]
+                for a in activities
+                if a.get("garmin_activity_id")
+            }
+            for ha in health_acts:
+                if ha.get("external_id") not in agent_garmin_ids:
+                    activities.append({
+                        "sport": ha.get("activity_type", "unknown"),
+                        "start_time": ha.get("start_time"),
+                        "duration_seconds": ha.get("duration_seconds", 0),
+                        "avg_hr": ha.get("avg_heart_rate"),
+                        "max_hr": ha.get("max_heart_rate"),
+                        "trimp": ha.get("training_load_trimp"),
+                        "source": "health",
+                    })
+        except Exception as exc:
+            logger.debug("Health activities fetch skipped: %s", exc)
 
         # Fetch stored episodes.
         eps_result = await (
@@ -212,6 +253,89 @@ async def _check_triggers_for_user(user_id: str) -> list[dict]:
         return triggers
     except Exception as exc:
         logger.error("Trigger check failed for user %s: %s", user_id, exc)
+        return []
+
+
+async def _fetch_last_interaction(user_id: str) -> str | None:
+    """Query the sessions table for the user's most recent ``updated_at``.
+
+    Returns an ISO timestamp string, or ``None`` if no sessions exist.
+    """
+    try:
+        from src.db.client import get_async_supabase
+
+        client = await get_async_supabase()
+        result = await (
+            client.table("sessions")
+            .select("updated_at")
+            .eq("user_id", user_id)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        rows: list[dict] = result.data or []
+        if rows and rows[0].get("updated_at"):
+            return str(rows[0]["updated_at"])
+        return None
+    except Exception as exc:
+        logger.error("Failed to fetch last interaction for user %s: %s", user_id, exc)
+        return None
+
+
+async def _check_silence_triggers(user_id: str) -> list[dict]:
+    """Check silence-based conversation triggers and queue any that fire.
+
+    Queries the user's most recent session timestamp and passes it to
+    ``check_conversation_triggers()``.  Any resulting triggers are queued
+    via ``queue_proactive_message()`` for later delivery.
+
+    Returns a list of queued message dicts (may be empty).
+    Non-blocking: logs and returns [] on any error.
+    """
+    try:
+        last_interaction = await _fetch_last_interaction(user_id)
+
+        # No sessions at all — nothing to evaluate silence against.
+        if last_interaction is None:
+            return []
+
+        from src.agent.proactive import (
+            check_conversation_triggers,
+            queue_proactive_message,
+        )
+
+        loop = asyncio.get_running_loop()
+
+        # check_conversation_triggers is synchronous — offload to thread pool.
+        triggers = await loop.run_in_executor(
+            None,
+            check_conversation_triggers,
+            {},  # user_model_data (silence check only needs timestamp)
+            last_interaction,
+        )
+
+        if not triggers:
+            return []
+
+        queued: list[dict] = []
+        for trigger in triggers:
+            # Use the trigger's urgency (from silence decay) as priority,
+            # falling back to a moderate default.
+            priority = trigger.get("urgency", 0.5)
+            msg = await loop.run_in_executor(
+                None,
+                lambda t=trigger, p=priority: queue_proactive_message(
+                    user_id=user_id,
+                    trigger=t,
+                    priority=p,
+                ),
+            )
+            queued.append(msg)
+
+        return queued
+    except Exception as exc:
+        logger.error("Silence trigger check failed for user %s: %s", user_id, exc)
         return []
 
 
