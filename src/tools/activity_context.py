@@ -172,97 +172,40 @@ def build_planning_context(activities: list[dict], lookback_days: int = 28) -> s
 
 
 def _summarize_sport(sport: str, activities: list[dict]) -> str:
-    """Summarize activities for a single sport into compact text."""
+    """Summarize activities for a single sport into compact text.
+
+    Fully generic: discovers available metrics from the data itself,
+    never branches on sport name. Display formatting (e.g. pace unit)
+    is derived from data magnitude, not sport identity.
+    """
     if not activities:
         return ""
 
     count = len(activities)
     limited = count < 3
-
-    if sport in ("running", "walking"):
-        return _summarize_running(sport, activities, limited)
-    elif sport == "cycling":
-        return _summarize_cycling(activities, limited)
-    elif sport == "swimming":
-        return _summarize_swimming(activities, limited)
-    else:
-        return _summarize_generic(sport, activities, limited)
-
-
-def _classify_run_intensity(activity: dict) -> str:
-    """Classify a running session by intensity based on zone distribution.
-
-    Returns one of: 'easy', 'tempo', 'intervals', 'long'.
-    """
-    duration_sec = activity.get("duration_seconds", 0)
-    dominant = _get_dominant_zone(activity)
-
-    if dominant is None:
-        # No zone data -- classify by duration
-        if duration_sec > 3600:
-            return "long"
-        return "easy"
-
-    if duration_sec > 3600 and dominant in (1, 2):
-        return "long"
-    if dominant in (4, 5):
-        return "intervals"
-    if dominant == 3:
-        return "tempo"
-    return "easy"
-
-
-def _summarize_running(sport: str, activities: list[dict], limited: bool) -> str:
-    """Running/walking sport summary with intensity classification."""
-    count = len(activities)
     header = f"{sport.title()} ({count} sessions{' - limited data' if limited else ''}):"
 
-    # Classify sessions
+    # Classify sessions by intensity (works for any sport)
     by_type: dict[str, list[dict]] = {}
     for a in activities:
-        intensity = _classify_run_intensity(a)
+        intensity = _classify_intensity(a)
         by_type.setdefault(intensity, []).append(a)
 
     lines = [header]
 
-    for run_type in ["easy", "tempo", "intervals", "long"]:
-        acts = by_type.get(run_type, [])
+    for intensity_type in ["easy", "tempo", "intervals", "long"]:
+        acts = by_type.get(intensity_type, [])
         if not acts:
             continue
 
-        paces = [
-            a["pace"]["avg_min_per_km"]
-            for a in acts
-            if a.get("pace") and a["pace"].get("avg_min_per_km")
-        ]
-        hrs = [
-            a["heart_rate"]["avg"]
-            for a in acts
-            if a.get("heart_rate") and a["heart_rate"].get("avg")
-        ]
-        durations = [a.get("duration_seconds", 0) for a in acts]
-
-        metrics = []
-        if paces:
-            avg_pace = sum(paces) / len(paces)
-            metrics.append(f"avg {format_pace(avg_pace)}")
-        if hrs:
-            metrics.append(f"HR avg {round(sum(hrs) / len(hrs))}")
-        if durations:
-            min_dur = round(min(durations) / 60)
-            max_dur = round(max(durations) / 60)
-            if min_dur == max_dur:
-                metrics.append(f"~{min_dur}min")
-            else:
-                metrics.append(f"{min_dur}-{max_dur}min")
-
+        metrics = _collect_metric_summaries(acts)
         metric_str = " | ".join(metrics)
         if metric_str:
-            lines.append(f"  {run_type.title()} ({len(acts)} sessions): {metric_str}")
+            lines.append(f"  {intensity_type.title()} ({len(acts)} sessions): {metric_str}")
         else:
-            lines.append(f"  {run_type.title()} ({len(acts)} sessions)")
+            lines.append(f"  {intensity_type.title()} ({len(acts)} sessions)")
 
-    # Best recorded pace across all sessions
+    # Best recorded pace across all sessions (if pace data exists)
     all_paces = [
         a["pace"]["avg_min_per_km"]
         for a in activities
@@ -270,7 +213,42 @@ def _summarize_running(sport: str, activities: list[dict], limited: bool) -> str
     ]
     if all_paces:
         best_pace = min(all_paces)
-        lines.append(f"  Best avg pace: {format_pace(best_pace)}")
+        pace_unit, display_pace = _pace_display_heuristic(best_pace)
+        lines.append(f"  Best avg pace: {format_pace(display_pace, pace_unit)}")
+
+    # Best/avg power across all sessions (if power data exists)
+    avg_powers = [
+        a["power"]["avg_watts"]
+        for a in activities
+        if a.get("power") and a["power"].get("avg_watts")
+    ]
+    if avg_powers:
+        lines.append(f"  Avg power: {round(sum(avg_powers) / len(avg_powers))}W")
+    max_powers = [
+        a["power"]["max_watts"]
+        for a in activities
+        if a.get("power") and a["power"].get("max_watts")
+    ]
+    if max_powers:
+        lines.append(f"  Max power: {round(max(max_powers))}W")
+
+    # Avg speed across all sessions (if speed data exists)
+    speeds = [
+        a["speed"]["avg_km_h"]
+        for a in activities
+        if a.get("speed") and a["speed"].get("avg_km_h")
+    ]
+    if speeds:
+        lines.append(f"  Avg speed: {sum(speeds) / len(speeds):.1f}km/h")
+
+    # Avg elevation across all sessions (if elevation data exists)
+    gains = [
+        a["elevation"]["gain_meters"]
+        for a in activities
+        if a.get("elevation") and a["elevation"].get("gain_meters") is not None
+    ]
+    if gains:
+        lines.append(f"  Avg elevation gain: {round(sum(gains) / len(gains))}m")
 
     # Aggregate zone distribution across all sessions
     total_zones: dict[str, float] = {}
@@ -289,50 +267,7 @@ def _summarize_running(sport: str, activities: list[dict], limited: bool) -> str
         if zone_str:
             lines.append(f"  Zones: {zone_str}")
 
-    return "\n".join(lines)
-
-
-def _summarize_cycling(activities: list[dict], limited: bool) -> str:
-    """Cycling sport summary with power, speed, HR."""
-    count = len(activities)
-    header = f"Cycling ({count} sessions{' - limited data' if limited else ''}):"
-    lines = [header]
-
-    # Power metrics
-    avg_powers = [
-        a["power"]["avg_watts"]
-        for a in activities
-        if a.get("power") and a["power"].get("avg_watts")
-    ]
-    max_powers = [
-        a["power"]["max_watts"]
-        for a in activities
-        if a.get("power") and a["power"].get("max_watts")
-    ]
-    if avg_powers:
-        lines.append(f"  Avg power: {round(sum(avg_powers) / len(avg_powers))}W")
-    if max_powers:
-        lines.append(f"  Max power: {round(max(max_powers))}W")
-
-    # Speed
-    speeds = [
-        a["speed"]["avg_km_h"]
-        for a in activities
-        if a.get("speed") and a["speed"].get("avg_km_h")
-    ]
-    if speeds:
-        lines.append(f"  Avg speed: {sum(speeds) / len(speeds):.1f}km/h")
-
-    # HR
-    hrs = [
-        a["heart_rate"]["avg"]
-        for a in activities
-        if a.get("heart_rate") and a["heart_rate"].get("avg")
-    ]
-    if hrs:
-        lines.append(f"  Avg HR: {round(sum(hrs) / len(hrs))}")
-
-    # Duration range
+    # Duration range (always shown)
     durations = [a.get("duration_seconds", 0) for a in activities]
     if durations:
         min_dur = round(min(durations) / 60)
@@ -345,66 +280,96 @@ def _summarize_cycling(activities: list[dict], limited: bool) -> str:
     return "\n".join(lines)
 
 
-def _summarize_swimming(activities: list[dict], limited: bool) -> str:
-    """Swimming sport summary with pace in min/100m."""
-    count = len(activities)
-    header = f"Swimming ({count} sessions{' - limited data' if limited else ''}):"
-    lines = [header]
+def _pace_display_heuristic(avg_min_per_km: float) -> tuple[str, float]:
+    """Determine pace display unit from data magnitude, not sport name.
 
-    # Pace in min/100m (derived from min/km / 10)
+    If avg_min_per_km > 15 (typical swim pace is ~25-50 min/km), display
+    as /100m by dividing by 10. Otherwise display as /km.
+
+    Returns (unit_label, display_value).
+    """
+    if avg_min_per_km > 15:
+        return ("100m", avg_min_per_km / 10)
+    return ("km", avg_min_per_km)
+
+
+def _collect_metric_summaries(acts: list[dict]) -> list[str]:
+    """Build summary metric strings from whatever data exists in activities."""
+    metrics = []
+
+    # Pace (auto-detect unit by magnitude)
     paces = [
-        a["pace"]["avg_min_per_km"] / 10
-        for a in activities
+        a["pace"]["avg_min_per_km"]
+        for a in acts
         if a.get("pace") and a["pace"].get("avg_min_per_km")
     ]
     if paces:
         avg_pace = sum(paces) / len(paces)
-        lines.append(f"  Avg pace: {format_pace(avg_pace, '100m')}")
+        pace_unit, display_pace = _pace_display_heuristic(avg_pace)
+        metrics.append(f"avg {format_pace(display_pace, pace_unit)}")
 
-    # HR
+    # Speed
+    speeds = [
+        a["speed"]["avg_km_h"]
+        for a in acts
+        if a.get("speed") and a["speed"].get("avg_km_h")
+    ]
+    if speeds:
+        metrics.append(f"avg {sum(speeds) / len(speeds):.1f}km/h")
+
+    # Power
+    powers = [
+        a["power"]["avg_watts"]
+        for a in acts
+        if a.get("power") and a["power"].get("avg_watts")
+    ]
+    if powers:
+        metrics.append(f"avg {round(sum(powers) / len(powers))}W")
+
+    # Heart rate
     hrs = [
         a["heart_rate"]["avg"]
-        for a in activities
+        for a in acts
         if a.get("heart_rate") and a["heart_rate"].get("avg")
     ]
     if hrs:
-        lines.append(f"  Avg HR: {round(sum(hrs) / len(hrs))}")
+        metrics.append(f"HR avg {round(sum(hrs) / len(hrs))}")
 
     # Duration range
-    durations = [a.get("duration_seconds", 0) for a in activities]
+    durations = [a.get("duration_seconds", 0) for a in acts]
     if durations:
         min_dur = round(min(durations) / 60)
         max_dur = round(max(durations) / 60)
         if min_dur == max_dur:
-            lines.append(f"  Typical duration: ~{min_dur}min")
+            metrics.append(f"~{min_dur}min")
         else:
-            lines.append(f"  Typical duration: {min_dur}-{max_dur}min")
+            metrics.append(f"{min_dur}-{max_dur}min")
 
-    return "\n".join(lines)
+    return metrics
 
 
-def _summarize_generic(sport: str, activities: list[dict], limited: bool) -> str:
-    """Generic sport summary for strength and others."""
-    count = len(activities)
-    header = f"{sport.title()} ({count} sessions{' - limited data' if limited else ''}):"
-    lines = [header]
+def _classify_intensity(activity: dict) -> str:
+    """Classify a session by intensity based on zone distribution.
 
-    # Avg duration
-    durations = [a.get("duration_seconds", 0) for a in activities]
-    if durations:
-        avg_dur = round(sum(durations) / len(durations) / 60)
-        lines.append(f"  Avg duration: {avg_dur}min")
+    Returns one of: 'easy', 'tempo', 'intervals', 'long'.
+    Works for any sport using zone data and duration.
+    """
+    duration_sec = activity.get("duration_seconds", 0)
+    dominant = _get_dominant_zone(activity)
 
-    # HR if available
-    hrs = [
-        a["heart_rate"]["avg"]
-        for a in activities
-        if a.get("heart_rate") and a["heart_rate"].get("avg")
-    ]
-    if hrs:
-        lines.append(f"  Avg HR: {round(sum(hrs) / len(hrs))}")
+    if dominant is None:
+        # No zone data -- classify by duration
+        if duration_sec > 3600:
+            return "long"
+        return "easy"
 
-    return "\n".join(lines)
+    if duration_sec > 3600 and dominant in (1, 2):
+        return "long"
+    if dominant in (4, 5):
+        return "intervals"
+    if dominant == 3:
+        return "tempo"
+    return "easy"
 
 
 def _format_trend_summary(weeks: list[dict]) -> str:
@@ -841,43 +806,44 @@ def _format_week_summary(activities_7d: list[dict]) -> str:
         total_dist_m = sum((a.get("distance_meters") or 0) for a in acts)
         total_dur_sec = sum(a.get("duration_seconds", 0) for a in acts)
 
-        # Sport-appropriate metrics
+        # Data-driven metrics: display whatever exists, no sport branching
         parts = [f"{sport.title()}: {count} sessions"]
 
         if total_dist_m > 0:
             parts.append(f"{total_dist_m / 1000:.1f}km")
 
-        # Pace for running/walking, speed for cycling, duration for others
-        if sport in ("running", "walking"):
-            paces = [
-                a["pace"]["avg_min_per_km"]
-                for a in acts
-                if a.get("pace") and a["pace"].get("avg_min_per_km")
-            ]
-            if paces:
-                avg_pace = sum(paces) / len(paces)
-                parts.append(f"avg pace {format_pace(avg_pace)}")
-        elif sport == "swimming":
-            paces = [
-                a["pace"]["avg_min_per_km"]
-                for a in acts
-                if a.get("pace") and a["pace"].get("avg_min_per_km")
-            ]
-            if paces:
-                avg_pace_100m = (sum(paces) / len(paces)) / 10
-                parts.append(f"avg pace {format_pace(avg_pace_100m, '100m')}")
-        elif sport == "cycling":
-            speeds = [
-                a["speed"]["avg_km_h"]
-                for a in acts
-                if a.get("speed") and a["speed"].get("avg_km_h")
-            ]
-            if speeds:
-                avg_speed = sum(speeds) / len(speeds)
-                parts.append(f"avg speed {avg_speed:.1f}km/h")
-        else:
-            # Strength and others: show total duration
-            parts.append(_format_duration(total_dur_sec))
+        # Pace (unit determined by data magnitude, not sport name)
+        paces = [
+            a["pace"]["avg_min_per_km"]
+            for a in acts
+            if a.get("pace") and a["pace"].get("avg_min_per_km")
+        ]
+        if paces:
+            avg_pace = sum(paces) / len(paces)
+            pace_unit, display_pace = _pace_display_heuristic(avg_pace)
+            parts.append(f"avg pace {format_pace(display_pace, pace_unit)}")
+
+        # Speed
+        speeds = [
+            a["speed"]["avg_km_h"]
+            for a in acts
+            if a.get("speed") and a["speed"].get("avg_km_h")
+        ]
+        if speeds:
+            avg_speed = sum(speeds) / len(speeds)
+            parts.append(f"avg speed {avg_speed:.1f}km/h")
+
+        # Power
+        powers = [
+            a["power"]["avg_watts"]
+            for a in acts
+            if a.get("power") and a["power"].get("avg_watts")
+        ]
+        if powers:
+            parts.append(f"avg power {round(sum(powers) / len(powers))}W")
+
+        # Duration (always useful context)
+        parts.append(_format_duration(total_dur_sec))
 
         # Avg HR
         hrs = [

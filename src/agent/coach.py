@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.agent.json_utils import extract_json
 from src.agent.llm import chat_completion
-from src.agent.prompts import COACH_SYSTEM_PROMPT, build_plan_prompt
+from src.agent.prompts import build_coach_system_prompt, build_plan_prompt
 
 PLANS_DIR = Path(__file__).parent.parent.parent / "data" / "plans"
 
@@ -16,6 +16,7 @@ def generate_plan(
     beliefs: list[dict] | None = None,
     activities: list[dict] | None = None,
     relevant_episodes: list[dict] | None = None,
+    user_id: str = "",
 ) -> dict:
     """Send athlete profile to LLM and return a structured training plan.
 
@@ -26,6 +27,7 @@ def generate_plan(
                     When provided, per-sport performance data is injected into
                     the prompt so the LLM can set athlete-specific targets.
         relevant_episodes: Past episode reflections to inform planning.
+        user_id: User ID for loading session schemas from DB.
 
     Raises ValueError if the response is not valid JSON.
     """
@@ -36,7 +38,7 @@ def generate_plan(
 
     response = chat_completion(
         messages=[{"role": "user", "content": user_prompt}],
-        system_prompt=COACH_SYSTEM_PROMPT,
+        system_prompt=build_coach_system_prompt(user_id),
         temperature=0.7,
     )
 

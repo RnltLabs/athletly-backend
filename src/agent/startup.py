@@ -4,8 +4,7 @@ Computes deterministic assessment data for the startup greeting. All arithmetic
 is done here so the LLM never computes numbers -- it only interprets and coaches.
 The greeting LLM call synthesizes the computed data into a coherent coaching message.
 
-P7 enhancement: Goal type inference uses LLM instead of keyword matching,
-with keyword fallback for reliability.
+Goal type inference is fully LLM-driven -- no hardcoded enums or keyword matching.
 
 Public API:
     infer_goal_type(goal) -> str
@@ -25,8 +24,6 @@ log = logging.getLogger(__name__)
 # Goal type classification
 # ---------------------------------------------------------------------------
 
-GOAL_TYPES = {"race_target", "performance_target", "routine", "general"}
-
 GOAL_TYPE_PROMPT = """\
 Classify this athlete's goal into exactly ONE category.
 
@@ -40,30 +37,26 @@ Goal event: "{event}"
 Target time: {target_time}
 Target date: {target_date}
 
+You may also return a different category if none of the above fit. Return a short lowercase_snake_case string.
+
 You MUST respond with ONLY a valid JSON object:
-{{"goal_type": "race_target|performance_target|routine|general"}}
+{{"goal_type": "<category>"}}
 """
 
 
-def infer_goal_type(goal: dict, use_llm: bool = True) -> str:
-    """Infer goal type from structured_core.goal fields.
+def infer_goal_type(goal: dict) -> str:
+    """Infer goal type from structured_core.goal fields using LLM.
 
-    Uses LLM-based inference (P7) with keyword fallback.
+    The LLM is the sole inference method. If it fails or returns empty,
+    "general" is used as a safe default.
 
     Args:
         goal: Dict with event, target_time, target_date fields.
-        use_llm: Whether to attempt LLM inference (disable for testing fallback).
     """
-    event = (goal.get("event") or "").lower()
-
-    # Primary: LLM-based inference (P7)
-    if use_llm and event:
-        result = _infer_goal_type_llm(goal)
-        if result in GOAL_TYPES:
-            return result
-
-    # Fallback: keyword heuristic
-    return _infer_goal_type_keywords(goal)
+    result = _infer_goal_type_llm(goal)
+    if result:
+        return result
+    return "general"
 
 
 def _infer_goal_type_llm(goal: dict) -> str | None:
@@ -81,39 +74,14 @@ def _infer_goal_type_llm(goal: dict) -> str | None:
         )
 
         result = extract_json(response.choices[0].message.content.strip())
-        goal_type = result.get("goal_type", "")
-        if goal_type in GOAL_TYPES:
+        goal_type = result.get("goal_type", "").strip()
+        if goal_type:
             return goal_type
     except Exception:
         pass
 
     return None
 
-
-def _infer_goal_type_keywords(goal: dict) -> str:
-    """Fallback: infer goal type using keyword matching."""
-    event = (goal.get("event") or "").lower()
-    has_target_time = bool(goal.get("target_time"))
-    has_target_date = bool(goal.get("target_date"))
-
-    if has_target_time and has_target_date and event:
-        return "race_target"
-
-    performance_words = {
-        "marathon", "half", "10k", "5k", "triathlon", "ironman",
-        "century", "gran fondo", "time trial", "ftp", "improve",
-    }
-    if event and any(w in event for w in performance_words):
-        return "performance_target"
-
-    routine_words = {
-        "per week", "x run", "x bike", "x swim", "times a week",
-        "consistency", "routine", "regular", "maintain",
-    }
-    if event and any(w in event for w in routine_words):
-        return "routine"
-
-    return "general"
 
 
 # ---------------------------------------------------------------------------

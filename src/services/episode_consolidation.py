@@ -142,14 +142,26 @@ async def consolidate_month(user_id: str, month: str) -> dict | None:
     await asyncio.to_thread(store_episode, user_id, review_episode)
 
     # Promote recurring patterns to beliefs (patterns in 3+ weeks → confidence 0.8)
+    promoted_count = 0
     if result["recurring_patterns"]:
-        await _promote_patterns_to_beliefs(user_id, result["recurring_patterns"])
+        promoted_count = await _promote_patterns_to_beliefs(user_id, result["recurring_patterns"])
+
+    # Record consolidation run in episode_consolidations table
+    await _record_consolidation(
+        user_id=user_id,
+        month=month,
+        weekly_episode_count=len(episodes),
+        recurring_patterns=result["recurring_patterns"],
+        key_metrics=result["key_metrics"],
+        beliefs_promoted=promoted_count,
+    )
 
     logger.info(
-        "Monthly review for %s/%s: %d patterns, %d metrics",
+        "Monthly review for %s/%s: %d patterns, %d metrics, %d beliefs promoted",
         user_id[:8], month,
         len(result["recurring_patterns"]),
         len(result["key_metrics"]),
+        promoted_count,
     )
 
     return result
@@ -192,12 +204,49 @@ async def _promote_patterns_to_beliefs(
     return promoted
 
 
+async def _record_consolidation(
+    *,
+    user_id: str,
+    month: str,
+    weekly_episode_count: int,
+    recurring_patterns: list,
+    key_metrics: dict,
+    beliefs_promoted: int,
+) -> None:
+    """Upsert a row in episode_consolidations to track the consolidation run."""
+    from src.db.client import get_supabase
+
+    try:
+        await asyncio.to_thread(
+            lambda: get_supabase()
+            .table("episode_consolidations")
+            .upsert(
+                {
+                    "user_id": user_id,
+                    "month": month,
+                    "weekly_episode_count": weekly_episode_count,
+                    "recurring_patterns": recurring_patterns,
+                    "key_metrics": key_metrics,
+                    "beliefs_promoted": beliefs_promoted,
+                },
+                on_conflict="user_id,month",
+            )
+            .execute()
+        )
+    except Exception:
+        logger.warning("Failed to record consolidation for %s/%s", user_id[:8], month, exc_info=True)
+
+
 async def get_unconsolidated_months(user_id: str) -> list[str]:
     """Find months that have ≥3 weekly reflections but no monthly review.
+
+    Uses the ``episode_consolidations`` table for an efficient lookup of
+    already-consolidated months instead of scanning all episodes.
 
     Returns:
         List of month strings in "YYYY-MM" format.
     """
+    from src.db.client import get_supabase
     from src.db.episodes_db import list_episodes_by_type
 
     try:
@@ -205,10 +254,16 @@ async def get_unconsolidated_months(user_id: str) -> list[str]:
         weekly = await asyncio.to_thread(
             list_episodes_by_type, user_id, "weekly_reflection", limit=100,
         )
-        # Get all monthly reviews
-        monthly = await asyncio.to_thread(
-            list_episodes_by_type, user_id, "monthly_review", limit=50,
+
+        # Get already-consolidated months from the tracking table
+        consolidated_result = await asyncio.to_thread(
+            lambda: get_supabase()
+            .table("episode_consolidations")
+            .select("month")
+            .eq("user_id", user_id)
+            .execute()
         )
+        consolidated_months = {row["month"] for row in consolidated_result.data}
 
         # Extract months from weekly reflections
         weekly_months: dict[str, int] = {}
@@ -218,17 +273,10 @@ async def get_unconsolidated_months(user_id: str) -> list[str]:
                 month = period[:7]
                 weekly_months[month] = weekly_months.get(month, 0) + 1
 
-        # Extract months from monthly reviews
-        reviewed_months = set()
-        for ep in monthly:
-            period = ep.get("period_start", "")
-            if len(period) >= 7:
-                reviewed_months.add(period[:7])
-
-        # Find months with enough weeklies but no monthly review
+        # Find months with enough weeklies but no consolidation record
         unconsolidated = [
             month for month, count in sorted(weekly_months.items())
-            if count >= _MIN_WEEKLY_REFLECTIONS and month not in reviewed_months
+            if count >= _MIN_WEEKLY_REFLECTIONS and month not in consolidated_months
         ]
 
         return unconsolidated

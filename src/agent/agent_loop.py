@@ -95,12 +95,14 @@ class AgentLoop:
         on_progress: ProgressCallback = None,
         startup_context: str | None = None,
         context: str = "coach",
+        max_rounds: int | None = None,
     ):
         self.user_model = user_model
         self.tools = tool_registry or get_default_tools(user_model, context=context)
         self.on_progress = on_progress
         self.startup_context = startup_context
         self.context = context
+        self._max_rounds = max_rounds or MAX_TOOL_ROUNDS
 
         # Detect persistence mode
         self._settings = get_settings()
@@ -367,7 +369,7 @@ class AgentLoop:
         last_content = None  # Track last assistant content for MAX_TOOL_ROUNDS fallback
 
         # -- THE LOOP --
-        for round_num in range(MAX_TOOL_ROUNDS):
+        for round_num in range(self._max_rounds):
 
             # Call LLM with conversation history + tools via LiteLLM
             response = chat_completion(
@@ -387,6 +389,11 @@ class AgentLoop:
             message = response.choices[0].message
             content = message.content
             tool_calls = message.tool_calls
+
+            # Forward reasoning content as thinking event (NanoBot pattern)
+            reasoning = getattr(message, "reasoning_content", None) or getattr(message, "thinking", None)
+            if reasoning and self.on_progress:
+                self.on_progress("thinking", str(reasoning)[:500])
 
             # Handle empty response (edge case -- Gap 9c)
             if not content and not tool_calls:
@@ -470,6 +477,7 @@ class AgentLoop:
                     last_content = content
 
                 # Execute each tool call
+                sent_in_turn = False
                 for tc in tool_calls:
                     tool_name = tc.function.name
                     try:
@@ -504,6 +512,10 @@ class AgentLoop:
                         if self.on_progress:
                             self.on_progress("tool_error", f"{tool_name} -> Error: {e}")
 
+                    # Check if tool already sent a push notification
+                    if isinstance(tool_result, dict) and tool_result.get("_sent_in_turn"):
+                        sent_in_turn = True
+
                     tool_duration = int((time.time() - tool_start) * 1000)
 
                     # Record turn
@@ -528,6 +540,11 @@ class AgentLoop:
                         "tool_call_id": tc.id,
                         "content": json.dumps(tool_result, ensure_ascii=False),
                     })
+
+                # If a tool already sent a push notification, suppress final LLM response
+                if sent_in_turn:
+                    result.response_text = ""
+                    break
 
                 # Active context compression: track consecutive tool-call rounds
                 self._consecutive_tool_calls += 1
@@ -781,15 +798,8 @@ def create_restricted_loop(
         user_model=user_model,
         tool_registry=restricted_registry,
         context="coach",
+        max_rounds=max_tool_rounds,
     )
-
-    # Override safety limit for subagent
-    global MAX_TOOL_ROUNDS  # noqa: PLW0603
-    # We don't mutate the global — we rely on the loop's round counter
-    # which already respects MAX_TOOL_ROUNDS. The caller passes
-    # max_tool_rounds as a hint; we enforce it by patching the loop.
-    # Actually, we'll just use the existing MAX_TOOL_ROUNDS constant
-    # since it's already checked in the for loop.
 
     return loop
 

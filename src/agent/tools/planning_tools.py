@@ -147,15 +147,15 @@ def register_planning_tools(registry: ToolRegistry, user_model):
         macrocycle_week: int = None,
     ) -> dict:
         """Generate a training plan using the coach persona."""
-        from src.agent.prompts import COACH_SYSTEM_PROMPT, build_plan_prompt
+        from src.agent.prompts import build_coach_system_prompt, build_plan_prompt
 
         profile = user_model.project_profile()
         beliefs = user_model.get_active_beliefs(min_confidence=0.6)
+        uid = _settings.agenticsports_user_id if _settings.use_supabase else ""
 
         if _settings.use_supabase:
             from src.db import list_activities as db_list_activities
             from src.db import list_episodes as db_list_episodes
-            uid = _settings.agenticsports_user_id
             activities = db_list_activities(uid, limit=50)
             episodes = db_list_episodes(uid, limit=10)
         else:
@@ -177,7 +177,7 @@ def register_planning_tools(registry: ToolRegistry, user_model):
         )
 
         # Inject recovery context when available
-        recovery_context = _build_recovery_planning_context(uid if _settings.use_supabase else None)
+        recovery_context = _build_recovery_planning_context(uid or None)
         if recovery_context:
             base_prompt += f"\n\nCURRENT RECOVERY STATUS:\n{recovery_context}"
 
@@ -196,7 +196,7 @@ def register_planning_tools(registry: ToolRegistry, user_model):
 
         response = chat_completion(
             messages=[{"role": "user", "content": base_prompt}],
-            system_prompt=COACH_SYSTEM_PROMPT,
+            system_prompt=build_coach_system_prompt(uid),
             temperature=0.7,
         )
 
@@ -248,26 +248,19 @@ def register_planning_tools(registry: ToolRegistry, user_model):
     def evaluate_plan(plan: dict) -> dict:
         """Evaluate plan quality with an independent reviewer persona.
 
-        Uses agent-defined eval criteria from DB when available,
-        otherwise falls back to hardcoded criteria.
+        Uses agent-defined eval criteria from DB. If no criteria are
+        defined, the plan is accepted by default (score=100).
         """
         from src.agent.plan_evaluator import evaluate_plan as _evaluate
-        from src.agent.plan_evaluator import evaluate_plan_dynamic
 
         profile = user_model.project_profile()
         beliefs = user_model.get_active_beliefs(min_confidence=0.6)
 
-        # Use dynamic evaluation if user has DB-defined criteria
-        user_id = None
-        if hasattr(user_model, "user_id"):
-            user_id = user_model.user_id
+        user_id = getattr(user_model, "user_id", "unknown")
 
-        if user_id:
-            evaluation = evaluate_plan_dynamic(
-                plan, profile, user_id=user_id, beliefs=beliefs,
-            )
-        else:
-            evaluation = _evaluate(plan, profile, beliefs=beliefs)
+        evaluation = _evaluate(
+            plan, profile, user_id=user_id, beliefs=beliefs,
+        )
 
         return {
             "score": evaluation.score,
@@ -335,6 +328,58 @@ def register_planning_tools(registry: ToolRegistry, user_model):
                 },
             },
             "required": ["plan"],
+        },
+        category="planning",
+    ))
+
+    def get_plan_history(limit: int = 5) -> dict:
+        """Get historical training plans for the athlete."""
+        from src.db.plans_db import list_plans
+
+        uid = getattr(user_model, "user_id", None) or _settings.agenticsports_user_id
+
+        plans = list_plans(uid, limit=min(limit, 20))
+
+        if not plans:
+            return {"plans": [], "message": "No historical plans found."}
+
+        summaries = []
+        for p in plans:
+            plan_data = p.get("plan_data", {})
+            sessions = plan_data.get("sessions", [])
+            summaries.append({
+                "id": p.get("id"),
+                "created_at": p.get("created_at"),
+                "active": p.get("active", False),
+                "evaluation_score": p.get("evaluation_score"),
+                "session_count": len(sessions),
+                "week_start": plan_data.get("week_start"),
+                "sports": list(set(
+                    s.get("sport", "unknown") for s in sessions
+                )),
+                "total_duration_min": sum(
+                    s.get("total_duration_minutes") or s.get("duration_minutes", 0)
+                    for s in sessions
+                ),
+            })
+
+        return {"plans": summaries, "count": len(summaries)}
+
+    registry.register(Tool(
+        name="get_plan_history",
+        description=(
+            "Get historical training plans. Returns compact summaries of past "
+            "plans with dates, scores, sports, and session counts."
+        ),
+        handler=get_plan_history,
+        parameters={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of plans to return (default 5, max 20)",
+                },
+            },
         },
         category="planning",
     ))

@@ -1,8 +1,8 @@
-"""Tests for dynamic plan evaluator (evaluate_plan_dynamic).
+"""Tests for plan evaluator (evaluate_plan with DB-driven criteria).
 
 Covers:
-- Dynamic criteria from DB replace hardcoded criteria
-- Fallback to hardcoded criteria when no DB criteria exist
+- Dynamic criteria from DB drive evaluation
+- No criteria → plan accepted by default (score=100)
 - Weight normalization: weights → percentages in prompt
 - LLM call mock: response parsing and PlanEvaluation construction
 - System prompt generation from DB criteria
@@ -20,7 +20,6 @@ from src.agent.plan_evaluator import (
     PlanEvaluation,
     _build_dynamic_system_prompt,
     evaluate_plan,
-    evaluate_plan_dynamic,
 )
 
 
@@ -129,7 +128,7 @@ class TestBuildDynamicSystemPrompt:
 # ---------------------------------------------------------------------------
 
 
-class TestEvaluatePlanDynamic:
+class TestEvaluatePlan:
     @patch("src.agent.plan_evaluator.chat_completion")
     @patch("src.db.agent_config_db.get_eval_criteria")
     def test_uses_db_criteria(self, mock_get_criteria, mock_chat) -> None:
@@ -139,7 +138,7 @@ class TestEvaluatePlanDynamic:
             {"endurance_base": 80, "intensity_balance": 70, "recovery_quality": 75},
             overall=75,
         )
-        result = evaluate_plan_dynamic(
+        result = evaluate_plan(
             SAMPLE_PLAN, SAMPLE_PROFILE, user_id=USER_ID,
         )
         assert isinstance(result, PlanEvaluation)
@@ -155,39 +154,37 @@ class TestEvaluatePlanDynamic:
 
     @patch("src.agent.plan_evaluator.chat_completion")
     @patch("src.db.agent_config_db.get_eval_criteria")
-    def test_fallback_when_no_criteria(self, mock_get_criteria, mock_chat) -> None:
-        """When DB has no criteria, should fall back to hardcoded evaluation."""
+    def test_default_accept_when_no_criteria(self, mock_get_criteria, mock_chat) -> None:
+        """When DB has no criteria, plan is accepted by default (score=100)."""
         mock_get_criteria.return_value = []
-        mock_chat.return_value = _mock_llm_response(
-            {"sport_distribution": 80, "target_specificity": 70},
-            overall=72,
-        )
-        result = evaluate_plan_dynamic(
+        result = evaluate_plan(
             SAMPLE_PLAN, SAMPLE_PROFILE, user_id=USER_ID,
         )
         assert isinstance(result, PlanEvaluation)
-        # Verify it used the hardcoded path (EVALUATION_SYSTEM_PROMPT)
-        mock_chat.assert_called_once()
-        call_kwargs = mock_chat.call_args
-        system_prompt = call_kwargs.kwargs.get("system_prompt", "")
-        assert "sport_distribution" in system_prompt
+        assert result.score == 100
+        assert result.acceptable is True
+        assert result.criteria_scores == {}
+        assert result.issues == []
+        assert result.suggestions == []
+        # No LLM call should be made
+        mock_chat.assert_not_called()
 
     @patch("src.agent.plan_evaluator.chat_completion")
     @patch("src.db.agent_config_db.get_eval_criteria")
-    def test_fallback_on_db_error(self, mock_get_criteria, mock_chat) -> None:
-        """DB error should gracefully fall back to hardcoded."""
+    def test_default_accept_on_db_error(self, mock_get_criteria, mock_chat) -> None:
+        """DB error should result in default acceptance (score=100)."""
         mock_get_criteria.side_effect = Exception("DB connection failed")
-        mock_chat.return_value = _mock_llm_response(
-            {"sport_distribution": 80}, overall=72,
-        )
-        result = evaluate_plan_dynamic(
+        result = evaluate_plan(
             SAMPLE_PLAN, SAMPLE_PROFILE, user_id=USER_ID,
         )
         assert isinstance(result, PlanEvaluation)
-        # Should have used hardcoded path
-        call_kwargs = mock_chat.call_args
-        system_prompt = call_kwargs.kwargs.get("system_prompt", "")
-        assert "sport_distribution" in system_prompt
+        assert result.score == 100
+        assert result.acceptable is True
+        assert result.criteria_scores == {}
+        assert result.issues == []
+        assert result.suggestions == []
+        # No LLM call should be made
+        mock_chat.assert_not_called()
 
     @patch("src.agent.plan_evaluator.chat_completion")
     @patch("src.db.agent_config_db.get_eval_criteria")
@@ -197,7 +194,7 @@ class TestEvaluatePlanDynamic:
             {"endurance_base": 40, "intensity_balance": 50, "recovery_quality": 30},
             overall=40,
         )
-        result = evaluate_plan_dynamic(
+        result = evaluate_plan(
             SAMPLE_PLAN, SAMPLE_PROFILE, user_id=USER_ID,
         )
         assert result.score == 40
@@ -211,7 +208,7 @@ class TestEvaluatePlanDynamic:
             {"endurance_base": 80}, overall=80,
         )
         beliefs = [{"text": "Prefers morning runs", "category": "scheduling"}]
-        result = evaluate_plan_dynamic(
+        result = evaluate_plan(
             SAMPLE_PLAN, SAMPLE_PROFILE, user_id=USER_ID, beliefs=beliefs,
         )
         assert isinstance(result, PlanEvaluation)
@@ -228,7 +225,7 @@ class TestEvaluatePlanDynamic:
         mock_chat.return_value = _mock_llm_response(
             {"endurance_base": 80}, overall=80,
         )
-        result = evaluate_plan_dynamic(
+        result = evaluate_plan(
             SAMPLE_PLAN, SAMPLE_PROFILE, user_id=USER_ID,
         )
         assert result.issues == ["Test issue 1"]
@@ -242,7 +239,7 @@ class TestEvaluatePlanDynamic:
         mock_chat.return_value = _mock_llm_response(
             {"endurance_base": 80}, overall=80,
         )
-        evaluate_plan_dynamic(
+        evaluate_plan(
             SAMPLE_PLAN, SAMPLE_PROFILE, user_id=USER_ID,
         )
         call_kwargs = mock_chat.call_args
@@ -279,8 +276,8 @@ class TestPlanEvaluation:
 class TestPlanningToolsIntegration:
     @patch("src.agent.plan_evaluator.chat_completion")
     @patch("src.db.agent_config_db.get_eval_criteria")
-    def test_evaluate_plan_tool_uses_dynamic(self, mock_get_criteria, mock_chat) -> None:
-        """The evaluate_plan tool in planning_tools.py should use dynamic eval."""
+    def test_evaluate_plan_tool_uses_db_criteria(self, mock_get_criteria, mock_chat) -> None:
+        """The evaluate_plan tool in planning_tools.py should use DB eval criteria."""
         mock_get_criteria.return_value = DB_CRITERIA
         mock_chat.return_value = _mock_llm_response(
             {"endurance_base": 80}, overall=80,
@@ -304,3 +301,31 @@ class TestPlanningToolsIntegration:
         result = registry.execute("evaluate_plan", {"plan": SAMPLE_PLAN})
         assert result["score"] == 80
         assert result["acceptable"] is True
+
+    @patch("src.agent.plan_evaluator.chat_completion")
+    @patch("src.db.agent_config_db.get_eval_criteria")
+    def test_evaluate_plan_tool_default_accept_no_criteria(self, mock_get_criteria, mock_chat) -> None:
+        """When no DB criteria exist, the tool should return default acceptance."""
+        mock_get_criteria.return_value = []
+        user_model = MagicMock()
+        user_model.user_id = USER_ID
+        user_model.project_profile.return_value = SAMPLE_PROFILE
+        user_model.get_active_beliefs.return_value = []
+
+        from src.agent.tools.registry import ToolRegistry
+        from src.agent.tools.planning_tools import register_planning_tools
+        registry = ToolRegistry()
+
+        settings = MagicMock()
+        settings.use_supabase = True
+        settings.agenticsports_user_id = USER_ID
+
+        with patch("src.agent.tools.planning_tools.get_settings", return_value=settings):
+            register_planning_tools(registry, user_model)
+
+        result = registry.execute("evaluate_plan", {"plan": SAMPLE_PLAN})
+        assert result["score"] == 100
+        assert result["acceptable"] is True
+        assert result["criteria"] == {}
+        assert result["issues"] == []
+        mock_chat.assert_not_called()

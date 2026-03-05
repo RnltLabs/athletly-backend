@@ -10,13 +10,8 @@ Priority 4 -- Audit finding #5 ("Kein Evaluator-Optimizer Loop"):
     state_machine.py orchestrates the generate -> evaluate cycle by selecting
     the evaluate_plan action after generate_plan.
 
-Evaluation criteria (scored 0-100):
-    - Sport Distribution (25%): sessions match athlete's sport preferences
-    - Target Specificity (20%): each session has pace/HR/power targets
-    - Constraint Compliance (20%): respects training days and duration limits
-    - Volume Progression (15%): appropriate for training phase
-    - Session Variety (10%): mix of session types (easy, tempo, intervals, long)
-    - Recovery Balance (10%): adequate rest between hard sessions
+Evaluation criteria are loaded from the DB (eval_criteria table) per user.
+If no criteria are defined, the plan is accepted by default (score=100).
 """
 
 import json
@@ -47,92 +42,7 @@ class PlanEvaluation:
         self.acceptable = self.score >= PLAN_ACCEPTANCE_THRESHOLD
 
 
-EVALUATION_SYSTEM_PROMPT = """\
-You are evaluating a training plan for an athlete (any sport). Score each criterion 0-100.
-
-Be STRICT -- a perfect plan is rare. Common issues to penalize:
-- Sessions without specific pace/HR/power targets (generic "easy run" with no zones)
-- Sport distribution that doesn't match athlete preferences
-- Too many hard sessions back-to-back without recovery
-- Session durations exceeding the athlete's stated max
-- Missing variety (all sessions same type)
-
-You MUST respond with ONLY a valid JSON object. No markdown, no explanation.
-
-{
-    "overall_score": 72,
-    "criteria": {
-        "sport_distribution": 90,
-        "target_specificity": 65,
-        "constraint_compliance": 80,
-        "volume_progression": 70,
-        "session_variety": 75,
-        "recovery_balance": 60
-    },
-    "issues": [
-        "Specific issue with the plan (reference session days/sports)"
-    ],
-    "suggestions": [
-        "Specific improvement to make"
-    ]
-}
-
-Scoring guide:
-- sport_distribution (25%): Do session sport counts match athlete's preferences?
-  90-100: exact match. 50-89: close but off by 1. <50: major mismatch.
-- target_specificity (20%): Does each session have concrete pace/HR/power targets?
-  90-100: all sessions have targets. 50-89: most have targets. <50: many generic.
-- constraint_compliance (20%): Respects max_session_minutes and training_days_per_week?
-  90-100: all within limits. 50-89: minor violations. <50: major violations.
-- volume_progression (15%): Appropriate weekly volume for athlete's level?
-  90-100: well-matched. 50-89: slightly off. <50: way too much or too little.
-- session_variety (10%): Mix of session types (easy, tempo, intervals, long)?
-  90-100: good variety. 50-89: limited. <50: all same type.
-- recovery_balance (10%): Adequate rest between hard sessions?
-  90-100: well-spaced. 50-89: some back-to-back. <50: hard sessions stacked.
-"""
-
-
 def evaluate_plan(
-    plan: dict,
-    profile: dict,
-    beliefs: list[dict] | None = None,
-    assessment: dict | None = None,
-) -> PlanEvaluation:
-    """Score a generated training plan against quality criteria.
-
-    Uses a separate LLM call (not self-evaluation) to score the plan.
-    Low temperature (0.2) for consistent scoring.
-
-    Args:
-        plan: The generated training plan dict
-        profile: Athlete profile dict
-        beliefs: Optional active beliefs for preference checking
-        assessment: Optional recent assessment for context
-
-    Returns:
-        PlanEvaluation with score, criteria, issues, and suggestions.
-    """
-    prompt = _build_evaluation_prompt(plan, profile, beliefs, assessment)
-
-    response = chat_completion(
-        messages=[{"role": "user", "content": prompt}],
-        system_prompt=EVALUATION_SYSTEM_PROMPT,
-        temperature=0.2,
-    )
-
-    text = response.choices[0].message.content.strip()
-    result = extract_json(text)
-
-    return PlanEvaluation(
-        score=result.get("overall_score", 0),
-        criteria_scores=result.get("criteria", {}),
-        issues=result.get("issues", []),
-        suggestions=result.get("suggestions", []),
-    )
-
-
-def evaluate_plan_dynamic(
     plan: dict,
     profile: dict,
     user_id: str,
@@ -141,8 +51,8 @@ def evaluate_plan_dynamic(
 ) -> PlanEvaluation:
     """Score a plan using agent-defined eval criteria from the DB.
 
-    Falls back to hardcoded criteria if no eval_criteria are defined for
-    the user (graceful degradation).
+    When no eval_criteria are defined for the user, the plan is accepted
+    by default (score=100, no issues or suggestions).
 
     Args:
         plan: The generated training plan dict.
@@ -162,7 +72,13 @@ def evaluate_plan_dynamic(
         db_criteria = []
 
     if not db_criteria:
-        return evaluate_plan(plan, profile, beliefs=beliefs, assessment=assessment)
+        return PlanEvaluation(
+            score=100,
+            criteria_scores={},
+            issues=[],
+            suggestions=[],
+            acceptable=True,
+        )
 
     system_prompt = _build_dynamic_system_prompt(db_criteria)
     prompt = _build_evaluation_prompt(plan, profile, beliefs, assessment)

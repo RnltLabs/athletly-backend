@@ -13,6 +13,17 @@ from evalidate import Expr, EvalModel, base_eval_model, EvalException
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _avg(xs):
+    """Average of a sequence. Returns 0 for empty sequences."""
+    if not xs:
+        return 0
+    return sum(xs) / len(xs)
+
+
+# ---------------------------------------------------------------------------
 # Build a safe evaluation model once at module level (immutable after setup)
 # ---------------------------------------------------------------------------
 
@@ -33,6 +44,7 @@ def _build_calc_model() -> EvalModel:
     safe_funcs = [
         "exp", "log", "log2", "log10", "sqrt", "abs",
         "min", "max", "pow", "sum", "len", "round", "int", "float",
+        "avg",  # Visionplan 8.4
     ]
     for fn in safe_funcs:
         if fn not in model.allowed_functions:
@@ -47,7 +59,7 @@ def _build_calc_model() -> EvalModel:
     builtin_overrides = {
         "min": min, "max": max, "sum": sum, "len": len,
         "round": round, "int": int, "float": float, "abs": abs,
-        "pow": pow,
+        "pow": pow, "avg": _avg,
     }
     for fn, impl in builtin_overrides.items():
         model.imported_functions[fn] = impl

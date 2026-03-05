@@ -12,6 +12,8 @@ Tools can be:
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+_RETRY_HINT = " [Analyze the error and try a different approach.]"
+
 
 @dataclass
 class Tool:
@@ -64,14 +66,14 @@ class ToolRegistry:
     def execute(self, name: str, args: dict) -> dict:
         """Execute a tool by name with given arguments."""
         if name not in self._tools:
-            return {"error": f"Unknown tool: {name}"}
+            return {"error": f"Unknown tool: {name}.{_RETRY_HINT}"}
         tool = self._tools[name]
         try:
             return tool.handler(**args)
         except TypeError as e:
-            return {"error": f"Invalid arguments for {name}: {e}"}
+            return {"error": f"Invalid arguments for {name}: {e}.{_RETRY_HINT}"}
         except Exception as e:
-            return {"error": f"Tool {name} failed: {e}"}
+            return {"error": f"Tool {name} failed: {e}.{_RETRY_HINT}"}
 
     def list_tools(self) -> list[dict]:
         """List all registered tools (for debugging)."""

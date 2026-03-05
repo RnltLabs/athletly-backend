@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.tools.fit_parser import is_activity_file, parse_fit_file
-from src.tools.metrics import calculate_trimp, classify_hr_zone
 
 logger = logging.getLogger(__name__)
 
@@ -267,14 +266,10 @@ def import_new_activities(
 
             activity = parse_fit_file(str(fit_file))
 
-            # Compute TRIMP if HR data available
-            hr_data = activity.get("heart_rate")
-            duration_sec = activity.get("duration_seconds")
-            if hr_data and hr_data.get("avg") and duration_sec:
-                duration_min = duration_sec / 60
-                avg_hr = hr_data["avg"]
-                activity["trimp"] = calculate_trimp(duration_min, avg_hr)
-                activity["hr_zone"] = classify_hr_zone(avg_hr)
+            # TRIMP/zone computation requires user_id + DB-defined formulas.
+            # Callers with a user_id should call compute_metric() after import.
+            activity["trimp"] = None
+            activity["hr_zone"] = None
 
             # Zone distribution: use device data if present, otherwise leave as None
             # (fallback from record-level HR can be added later when needed)

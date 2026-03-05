@@ -5,9 +5,9 @@ import re
 
 from src.agent.json_utils import extract_json
 from src.agent.llm import chat_completion
-from src.agent.prompts import COACH_SYSTEM_PROMPT
+from src.agent.prompts import build_coach_system_prompt
 
-ADJUSTED_PLAN_SYSTEM_PROMPT = COACH_SYSTEM_PROMPT + """
+_ADJUSTED_PLAN_SUFFIX = """
 
 ADDITIONAL CONTEXT: You are generating an ADJUSTED plan based on an assessment of the athlete's recent training.
 Incorporate the assessment's observations and recommended adjustments into the new plan.
@@ -19,6 +19,11 @@ In the JSON output, add a "adjustments_applied" field listing what was changed f
 """
 
 
+def _build_adjusted_system_prompt(user_id: str) -> str:
+    """Build the adjusted-plan system prompt from user-specific coach prompt."""
+    return build_coach_system_prompt(user_id) + _ADJUSTED_PLAN_SUFFIX
+
+
 def generate_adjusted_plan(
     profile: dict,
     previous_plan: dict,
@@ -26,6 +31,7 @@ def generate_adjusted_plan(
     relevant_episodes: list[dict] | None = None,
     beliefs: list[dict] | None = None,
     activities: list[dict] | None = None,
+    user_id: str = "",
 ) -> dict:
     """Generate an adjusted 1-week plan based on assessment results.
 
@@ -39,6 +45,7 @@ def generate_adjusted_plan(
         activities: Optional activity list for data-derived target generation.
                     When provided, per-sport performance data is injected into
                     the prompt so the LLM can set athlete-specific targets.
+        user_id: User ID for loading session schemas from DB.
 
     Returns:
         New plan dict with adjustments_applied field
@@ -50,7 +57,7 @@ def generate_adjusted_plan(
 
     response = chat_completion(
         messages=[{"role": "user", "content": prompt}],
-        system_prompt=ADJUSTED_PLAN_SYSTEM_PROMPT,
+        system_prompt=_build_adjusted_system_prompt(user_id),
         temperature=0.7,
     )
 

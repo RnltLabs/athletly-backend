@@ -81,13 +81,13 @@ def _estimate_threshold_pace(
     Returns update dict or None if insufficient data or no significant change.
     """
     # Lazy imports to avoid circular dependencies
-    from src.tools.activity_context import _classify_run_intensity, format_pace
+    from src.tools.activity_context import _classify_intensity, format_pace
 
     qualifying_paces = []
     for a in activities:
         if a.get("sport") != "running":
             continue
-        intensity = _classify_run_intensity(a)
+        intensity = _classify_intensity(a)
         if intensity not in ("intervals", "tempo"):
             continue
         pace = a.get("pace", {}).get("avg_min_per_km")

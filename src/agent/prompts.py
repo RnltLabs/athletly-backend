@@ -1,8 +1,13 @@
 """System prompts for the AgenticSports training coach agent."""
 
+from __future__ import annotations
+
+import logging
 from datetime import date, datetime
 
-COACH_SYSTEM_PROMPT = """\
+logger = logging.getLogger(__name__)
+
+_COACH_SYSTEM_PROMPT_TEMPLATE = """\
 You are an experienced sports coach with deep expertise across ALL sports and fitness disciplines:
 - Endurance sports (running, cycling, swimming, triathlon)
 - Team sports (basketball, soccer, volleyball, handball, rugby, hockey)
@@ -29,12 +34,12 @@ Guidelines:
 You MUST respond with ONLY a valid JSON object matching the training plan schema. No markdown, no explanation, no code fences — just the raw JSON object.
 
 The JSON must follow this exact structure:
-{
+{{
   "week_start": "YYYY-MM-DD",
   "week_number": 1,
   "athlete_profile": "data/athlete/profile.json",
   "sessions": [
-    {
+    {{
       "day": "Tuesday",
       "date": "YYYY-MM-DD",
       "sport": "running",
@@ -42,70 +47,49 @@ The JSON must follow this exact structure:
       "description": "6x800m intervals to build speed endurance",
       "total_duration_minutes": 55,
       "steps": [
-        {
+        {{
           "type": "warmup",
           "duration": "15:00",
           "description": "Easy jog building to moderate",
-          "targets": {"pace_min_km": "6:00-6:30", "hr_zone": "Zone 1-2"}
-        },
-        {
+          "targets": {{"pace_min_km": "6:00-6:30", "hr_zone": "Zone 1-2"}}
+        }},
+        {{
           "type": "repeat",
           "repeat_count": 6,
           "steps": [
-            {
+            {{
               "type": "work",
               "duration": "800m",
               "description": "Hard controlled effort",
-              "targets": {"pace_min_km": "3:55-4:05", "hr_zone": "Zone 4-5"}
-            },
-            {
+              "targets": {{"pace_min_km": "3:55-4:05", "hr_zone": "Zone 4-5"}}
+            }},
+            {{
               "type": "recovery",
               "duration": "2:00",
               "description": "Walk or easy jog",
-              "targets": {"pace_min_km": "6:30-7:00"}
-            }
+              "targets": {{"pace_min_km": "6:30-7:00"}}
+            }}
           ]
-        },
-        {
+        }},
+        {{
           "type": "cooldown",
           "duration": "10:00",
           "description": "Easy jog tapering to walk",
-          "targets": {"pace_min_km": "6:00-6:30", "hr_zone": "Zone 1-2"}
-        }
+          "targets": {{"pace_min_km": "6:00-6:30", "hr_zone": "Zone 1-2"}}
+        }}
       ],
       "notes": "Aim for consistent splits across all 6 reps"
-    }
+    }}
   ],
-  "weekly_summary": {
+  "weekly_summary": {{
     "total_sessions": 5,
     "total_duration_minutes": 300,
     "focus": "Base building"
-  },
+  }},
   "generated_at": "ISO 8601 timestamp"
-}
+}}
 
-WORKOUT STEP SCHEMA:
-
-Each session MUST include a "steps" array with structured workout steps.
-
-Step types: warmup, work, recovery, cooldown, repeat
-- warmup: Opening easy effort building to session intensity.
-- work: The main effort segment with specific targets.
-- recovery: Rest between work intervals.
-- cooldown: Closing easy effort to finish.
-- repeat: A group of work+recovery steps repeated N times. Format: {"type": "repeat", "repeat_count": N, "steps": [...]}. Max one level of nesting (no repeats inside repeats).
-
-Each non-repeat step has:
-- type: one of warmup, work, recovery, cooldown
-- duration: time string ("15:00", "2:00") or distance string ("800m", "1.5km", "400m")
-- description: brief description of effort
-- targets: sport-specific target object (see below)
-
-Sport-specific target keys:
-- Running: {"pace_min_km": "5:30-6:00", "hr_zone": "Zone 2"}
-- Cycling: {"power_watts": "180-200", "hr_zone": "Zone 3-4", "cadence_rpm": "85-95"}
-- Swimming: {"pace_min_100m": "1:45-1:55", "hr_zone": "Zone 2-3"}
-- Strength/general: {"hr_zone": "Zone 2-3", "rpe": "6-7"}
+{session_schema_section}
 
 Session-level fields:
 - "total_duration_minutes": total estimated session time (replaces "duration_minutes"; either is accepted)
@@ -129,6 +113,115 @@ Rules for the sessions array:
 - Days not included in sessions are rest days
 - If the athlete uses specific platforms (e.g., Zwift, TrainerRoad), reference them in the session descriptions
 """
+
+_GENERIC_SESSION_SCHEMA_SECTION = """\
+WORKOUT STEP SCHEMA:
+
+Each session MUST include a "steps" array with structured workout steps.
+Define session structure freely. Each session should have structured steps with targets \
+appropriate for the sport. Use your coaching expertise to determine step types and target metrics.
+
+Each non-repeat step has:
+- type: a descriptive step type (e.g., warmup, work, recovery, cooldown, or others as appropriate)
+- duration: time string ("15:00", "2:00") or distance string ("800m", "1.5km", "400m")
+- description: brief description of effort
+- targets: sport-specific target object with metrics appropriate for the sport
+
+A "repeat" step groups sub-steps repeated N times. Format: {"type": "repeat", "repeat_count": N, "steps": [...]}. \
+Max one level of nesting (no repeats inside repeats)."""
+
+
+def _format_session_schemas(schemas: list[dict]) -> str:
+    """Format DB-stored session schemas into a WORKOUT STEP SCHEMA prompt section.
+
+    Each schema row has 'sport' and 'schema' (a dict with step_types and target_keys).
+    """
+    lines = [
+        "WORKOUT STEP SCHEMA:",
+        "",
+        "Each session MUST include a \"steps\" array with structured workout steps.",
+        "",
+    ]
+
+    # Collect all step types across sports for the global list
+    all_step_types: dict[str, str] = {}
+    sport_targets: list[str] = []
+
+    for row in schemas:
+        sport = row.get("sport", "unknown")
+        schema = row.get("schema", {})
+
+        # Step types
+        for st in schema.get("step_types", []):
+            name = st if isinstance(st, str) else st.get("name", "")
+            desc = "" if isinstance(st, str) else st.get("description", "")
+            if name and name not in all_step_types:
+                all_step_types[name] = desc
+
+        # Target keys
+        target_keys = schema.get("target_keys", {})
+        if target_keys:
+            formatted_targets = ", ".join(
+                f'"{k}": "{v}"' if isinstance(v, str) else f'"{k}": {v}'
+                for k, v in target_keys.items()
+            )
+            sport_targets.append(f"- {sport.capitalize()}: {{{formatted_targets}}}")
+
+    # Render step types
+    if all_step_types:
+        type_names = ", ".join(all_step_types.keys())
+        lines.append(f"Step types: {type_names}")
+        for name, desc in all_step_types.items():
+            if desc:
+                lines.append(f"- {name}: {desc}")
+            else:
+                lines.append(f"- {name}")
+        lines.append("")
+
+    lines.append("Each non-repeat step has:")
+    lines.append("- type: one of the step types listed above")
+    lines.append('- duration: time string ("15:00", "2:00") or distance string ("800m", "1.5km", "400m")')
+    lines.append("- description: brief description of effort")
+    lines.append("- targets: sport-specific target object (see below)")
+    lines.append("")
+
+    lines.append(
+        'A "repeat" step groups sub-steps repeated N times. '
+        'Format: {"type": "repeat", "repeat_count": N, "steps": [...]}. '
+        "Max one level of nesting (no repeats inside repeats)."
+    )
+
+    if sport_targets:
+        lines.append("")
+        lines.append("Sport-specific target keys:")
+        lines.extend(sport_targets)
+
+    return "\n".join(lines)
+
+
+def build_coach_system_prompt(user_id: str) -> str:
+    """Build the coach system prompt with session schemas loaded from DB.
+
+    If session_schemas rows exist for the user, they define the step types and
+    target keys. Otherwise a generic fallback section is used.
+
+    Args:
+        user_id: The athlete / user ID to load schemas for.
+    """
+    try:
+        from src.db.agent_config_db import get_session_schemas
+
+        schemas = get_session_schemas(user_id)
+    except Exception:
+        logger.warning("Failed to load session_schemas for user %s, using generic section", user_id)
+        schemas = []
+
+    if schemas:
+        session_section = _format_session_schemas(schemas)
+    else:
+        session_section = _GENERIC_SESSION_SCHEMA_SECTION
+
+    return _COACH_SYSTEM_PROMPT_TEMPLATE.format(session_schema_section=session_section)
 
 
 GREETING_SYSTEM_PROMPT = """\

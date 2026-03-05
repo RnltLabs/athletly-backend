@@ -17,7 +17,7 @@ from src.memory.episodes import list_episodes as list_episodes_file
 from src.memory.profile import create_profile, save_profile, load_profile
 from src.memory.user_model import UserModel
 from src.tools.fit_parser import parse_fit_file
-from src.tools.metrics import calculate_trimp, classify_hr_zone
+from src.tools.metrics import compute_metric
 from src.tools.activity_store import store_activity as store_activity_file
 from src.tools.activity_store import list_activities as list_activities_file
 from src.tools.activity_store import import_new_activities
@@ -228,14 +228,25 @@ def import_activity(file_path: str) -> None:
     if distance:
         console.print(f"  Distance: [cyan]{distance / 1000:.1f} km[/cyan]")
 
-    # Calculate training load if HR data available
-    if avg_hr:
-        trimp = calculate_trimp(duration_min, avg_hr)
-        zone = classify_hr_zone(avg_hr)
-        console.print(f"  Avg HR: [cyan]{avg_hr} bpm[/cyan] (Zone {zone})")
-        console.print(f"  TRIMP: [cyan]{trimp}[/cyan]")
-        activity["trimp"] = trimp
-        activity["hr_zone"] = zone
+    # Compute TRIMP via DB-defined formula if user_id is available
+    settings = get_settings()
+    if avg_hr and settings.use_supabase and settings.agenticsports_user_id:
+        uid = settings.agenticsports_user_id
+        variables = {
+            "duration_minutes": duration_min,
+            "avg_hr": avg_hr,
+        }
+        trimp = compute_metric(uid, "trimp", variables)
+        if trimp is not None:
+            console.print(f"  Avg HR: [cyan]{avg_hr} bpm[/cyan]")
+            console.print(f"  TRIMP: [cyan]{trimp}[/cyan]")
+            activity["trimp"] = trimp
+        else:
+            console.print(f"  Avg HR: [cyan]{avg_hr} bpm[/cyan]")
+            console.print("  [dim]TRIMP metric not defined in DB[/dim]")
+    elif avg_hr:
+        console.print(f"  Avg HR: [cyan]{avg_hr} bpm[/cyan]")
+        console.print("  [dim]TRIMP requires Supabase with metric definitions[/dim]")
 
     stored_path = store_activity(activity)
     console.print(f"\n[green]Activity stored: {stored_path}[/green]")
@@ -589,7 +600,9 @@ def main(args: list[str] | None = None):
             max_results=5,
         )
         try:
-            plan = generate_plan(profile, activities=activities, relevant_episodes=_relevant_eps)
+            settings = get_settings()
+            uid = settings.agenticsports_user_id if settings.use_supabase else ""
+            plan = generate_plan(profile, activities=activities, relevant_episodes=_relevant_eps, user_id=uid)
         except ValueError as e:
             console.print(f"[red]Error generating plan: {e}[/red]")
             return
