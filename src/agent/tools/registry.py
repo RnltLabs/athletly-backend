@@ -167,6 +167,18 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     from src.agent.tools.goal_trajectory_tools import register_goal_trajectory_tools
     from src.agent.tools.macrocycle_tools import register_macrocycle_tools
     from src.agent.tools.garmin_tools import register_garmin_tools
+    from src.agent.tools.notification_tools import register_notification_tools
+    from src.agent.tools.session_tools import register_session_tools
+    from src.agent.tools.episode_read_tools import register_episode_read_tools
+    from src.agent.tools.plan_adjust_tools import register_plan_adjust_tools
+
+    # Resolve user_id from user_model for tools that need it
+    from src.config import get_settings as _get_settings
+    _user_id = (
+        user_model.user_id
+        if hasattr(user_model, "user_id")
+        else _get_settings().agenticsports_user_id
+    )
 
     register_data_tools(registry, user_model)
     register_health_tools(registry)
@@ -185,6 +197,10 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_goal_trajectory_tools(registry, user_model)
     register_macrocycle_tools(registry, user_model)
     register_garmin_tools(registry, user_model)
+    register_notification_tools(registry, _user_id)
+    register_session_tools(registry, _user_id)
+    register_episode_read_tools(registry, user_model)
+    register_plan_adjust_tools(registry, user_model)
 
     if context == "onboarding":
         from src.agent.tools.onboarding_tools import register_onboarding_tools
