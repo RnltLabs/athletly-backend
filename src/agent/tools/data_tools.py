@@ -26,13 +26,24 @@ def register_data_tools(registry: ToolRegistry, user_model):
         )
         return profile
 
+    _athlete_profile_description = (
+        "Get the athlete's current profile including sports, goals, constraints, "
+        "and fitness data. Use this FIRST when you need to understand who the athlete "
+        "is and what they want. Returns null fields for info not yet gathered."
+    )
+
     registry.register(Tool(
         name="get_athlete_profile",
-        description=(
-            "Get the athlete's current profile including sports, goals, constraints, "
-            "and fitness data. Use this FIRST when you need to understand who the athlete "
-            "is and what they want. Returns null fields for info not yet gathered."
-        ),
+        description=_athlete_profile_description,
+        handler=get_athlete_profile,
+        parameters={},
+        category="data",
+    ))
+
+    # Visionplan alias
+    registry.register(Tool(
+        name="get_user_profile",
+        description="Alias for get_athlete_profile. " + _athlete_profile_description,
         handler=get_athlete_profile,
         parameters={},
         category="data",

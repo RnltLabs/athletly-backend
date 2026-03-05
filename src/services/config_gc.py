@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 
@@ -29,13 +30,13 @@ logger = logging.getLogger(__name__)
 
 # Thresholds
 _LOW_CONFIDENCE_THRESHOLD = 0.5
-_STALE_DAYS = 30
-_MAX_ACTIVE_CAP = 60
+_STALE_DAYS = int(os.environ.get("ATHLETLY_GC_STALE_DAYS", "30"))
+_MAX_ACTIVE_CAP = int(os.environ.get("ATHLETLY_GC_MAX_ACTIVE_CAP", "60"))
 
 # Semantic dedup threshold (Visionplan 8.12 D)
-SIMILARITY_THRESHOLD = 0.88
-_FORMULA_WEIGHT = 0.7
-_NAME_WEIGHT = 0.3
+SIMILARITY_THRESHOLD = float(os.environ.get("ATHLETLY_GC_SIMILARITY_THRESHOLD", "0.88"))
+_FORMULA_WEIGHT = float(os.environ.get("ATHLETLY_GC_FORMULA_WEIGHT", "0.7"))
+_NAME_WEIGHT = float(os.environ.get("ATHLETLY_GC_NAME_WEIGHT", "0.3"))
 
 # Config tables to scan for GC
 _CONFIG_TABLES = (

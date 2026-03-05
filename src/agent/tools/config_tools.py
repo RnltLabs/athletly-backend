@@ -484,26 +484,38 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
         items = fetch_fn(uid)
         return {"status": "success", "config_type": config_type, "items": items, "count": len(items)}
 
+    _get_config_description = (
+        "Retrieve all stored configurations of a given type. Use this to inspect "
+        "what metrics, criteria, schemas, or rules are already defined before adding "
+        "new ones. config_type must be one of: metric_definitions, eval_criteria, "
+        "session_schemas, periodization_models, proactive_trigger_rules."
+    )
+    _get_config_parameters = {
+        "type": "object",
+        "properties": {
+            "config_type": {
+                "type": "string",
+                "description": "Type of config to retrieve",
+                "enum": sorted(_VALID_CONFIG_TYPES),
+            },
+        },
+        "required": ["config_type"],
+    }
+
     registry.register(Tool(
         name="get_config",
-        description=(
-            "Retrieve all stored configurations of a given type. Use this to inspect "
-            "what metrics, criteria, schemas, or rules are already defined before adding "
-            "new ones. config_type must be one of: metric_definitions, eval_criteria, "
-            "session_schemas, periodization_models, proactive_trigger_rules."
-        ),
+        description=_get_config_description,
         handler=get_config,
-        parameters={
-            "type": "object",
-            "properties": {
-                "config_type": {
-                    "type": "string",
-                    "description": "Type of config to retrieve",
-                    "enum": sorted(_VALID_CONFIG_TYPES),
-                },
-            },
-            "required": ["config_type"],
-        },
+        parameters=_get_config_parameters,
+        category="config",
+    ))
+
+    # Visionplan alias
+    registry.register(Tool(
+        name="get_agent_config",
+        description="Alias for get_config. " + _get_config_description,
+        handler=get_config,
+        parameters=_get_config_parameters,
         category="config",
     ))
 

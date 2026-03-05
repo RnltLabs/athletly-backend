@@ -24,7 +24,14 @@ from src.tools.activity_store import import_new_activities
 
 console = Console()
 
-AVAILABLE_SPORTS = ["running", "cycling", "swimming", "gym"]
+def _get_known_sports() -> list[str]:
+    """Get sports the athlete has actually done (from activity store)."""
+    try:
+        activities = list_activities_file()
+        sports = sorted({a.get("sport", "unknown") for a in activities})
+        return sports if sports else ["running", "cycling", "swimming"]  # empty-state hint
+    except Exception:
+        return []
 
 
 def _get_backends():
@@ -117,7 +124,11 @@ def onboard_athlete() -> dict:
     )
 
     # Sports
-    console.print("\nAvailable sports: " + ", ".join(AVAILABLE_SPORTS))
+    known = _get_known_sports()
+    if known:
+        console.print("\nSports you've trained: " + ", ".join(known))
+    else:
+        console.print("\nEnter any sport (e.g. running, cycling, swimming, gym)")
     sports_input = Prompt.ask(
         "What sport(s) do you train?",
         default="running",

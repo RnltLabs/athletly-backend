@@ -164,35 +164,20 @@ def _get_field(frame, field_name):
 
 
 def _normalize_sport(sport: str, sub_sport: str = "") -> str:
-    """Normalize sport names to our standard types, using sub_sport for disambiguation."""
-    sport = sport.lower().strip()
-    sub_sport = sub_sport.lower().strip() if sub_sport else ""
+    """Normalize sport names from FIT files.
 
-    # Sub-sport specific disambiguation
-    if sport == "training" and sub_sport == "strength_training":
-        return "strength"
-    if sport == "fitness_equipment" and sub_sport == "elliptical":
-        return "elliptical"
-    if sport == "fitness_equipment":
-        return "cross_training"
-    if sport == "racket" and sub_sport == "padel":
-        return "padel"
-    if sport == "racket":
-        return "racket"
+    Strategy: minimal cleanup, preserve original names.
+    The agent handles sport semantics — we just clean up formatting.
+    """
+    sport = sport.lower().strip().replace(" ", "_")
+    sub_sport = sub_sport.lower().strip().replace(" ", "_") if sub_sport else ""
 
-    # Direct sport mappings
-    mapping = {
-        "running": "running",
-        "walking": "walking",
-        "cycling": "cycling",
-        "swimming": "swimming",
-        "training": "training",
-        "generic": "other",
-        "strength_training": "strength",
-        "stand_up_paddleboarding": "sup",
-        "rowing": "rowing",
-    }
-    return mapping.get(sport, sport)
+    # Use sub_sport if it's more specific than a generic container
+    _GENERIC_CONTAINERS = {"training", "fitness_equipment", "racket", "generic"}
+    if sport in _GENERIC_CONTAINERS and sub_sport:
+        return sub_sport
+
+    return sport if sport else "unknown"
 
 
 def _build_zone_distribution(hr_zones_raw: list | tuple) -> dict:

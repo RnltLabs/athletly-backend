@@ -12,10 +12,11 @@
 Dies ist die vollstaendige Product Vision fuer **Athletly** — eine Mobile-First Multi-Sport AI Coach App. Zwei existierende Projekte werden zusammengefuehrt: ein Python AI Agent (AgenticSports) und eine React Native App (athletly-app).
 
 ### Aktueller Status
-- **Phase**: Vision abgeschlossen, Umsetzung noch nicht begonnen
-- **Naechster Schritt**: Phase 1 der Roadmap (Sektion 11) — Generische Fundamente
-- **AgenticSports CLI** (`/Users/roman/Development/AgenticSports`): Lauffaehig via `./start.sh`, Python + uv, braucht `GEMINI_API_KEY`
-- **athletly-app** (`/Users/roman/Development/coach/athletly-app`): React Native/Expo App mit Supabase Backend, hat bereits UI + Edge Functions Agent
+- **Phase**: Phasen 1–8 weitgehend umgesetzt (Agent Loop, Tools, Plan Generator, Episodic Memory, Proactive Triggers, Multi-User Readiness, Cost Monitoring, Garmin Sync)
+- **Naechster Schritt**: Verbleibende Luecken schliessen, End-to-End Tests, Production Hardening
+- **athletly-backend** (`~/Development/athletly/athletly-backend`): Python FastAPI Backend — GitHub: `RnltLabs/athletly-backend`
+- **athletly-app** (`~/Development/athletly/athletly-app`): React Native/Expo App (V2) — GitHub: `RnltLabs/athletly-app`
+- **athletly-v1**: Archiviert auf GitHub (`RnltLabs/athletly-v1`)
 - **Supabase**: Laufende Instanz (URL + Keys in athletly-app `.env`)
 
 ### Wichtigste Regel beim Lesen
@@ -46,8 +47,8 @@ Dies ist die vollstaendige Product Vision fuer **Athletly** — eine Mobile-Firs
 
 ### 1.2 Zwei existierende Projekte
 
-**Projekt 1: AgenticSports** — Das Hirn
-- Pfad: `/Users/roman/Development/AgenticSports`
+**Projekt 1: athletly-backend** (ehemals AgenticSports) — Das Hirn
+- Repo: `RnltLabs/athletly-backend` — Pfad: `~/Development/athletly/athletly-backend`
 - Tech: Python, CLI-basiert, 12,353 LOC
 - LLM: Gemini 2.5 Flash via LiteLLM (model-agnostic)
 - Daten: 5,975 FIT Files, 434 Aktivitaeten, 11 Sportarten erkannt
@@ -71,8 +72,8 @@ Dies ist die vollstaendige Product Vision fuer **Athletly** — eine Mobile-Firs
 - Storage: JSON Files (`data/`) oder optional Supabase
 - WICHTIG: Vieles ist sport-spezifisch hardcodiert (TRIMP, HR-Zonen, Lauf-Pace, Plan-Schema). Muss generisch werden
 
-**Projekt 2: athletly-app** — Der Koerper
-- Pfad: `/Users/roman/Development/coach/athletly-app`
+**Projekt 2: athletly-app** (V2) — Der Koerper
+- Repo: `RnltLabs/athletly-app` — Pfad: `~/Development/athletly/athletly-app`
 - Tech: React Native 0.81.5, Expo SDK 54, React 19.1, TypeScript
 - Routing: expo-router 6 (file-based)
 - State: Zustand v5 (6 Stores: user, chat, weeklyPlan, theme, sports, healthProvider)
@@ -111,7 +112,7 @@ Dies ist die vollstaendige Product Vision fuer **Athletly** — eine Mobile-Firs
   - Android Health Connect: `react-native-health-connect`
 - **Streaming:** `react-native-sse` (EventSource Polyfill)
 - **Design System:**
-  - Primary: Teal #14B8A6, Accent: Coral #F97066
+  - Primary: Royal Blue #2563EB (HubFit-inspired design)
   - Dark Theme: Background #0C1115, Surface #151C21
   - 8 Theme Presets, Light/Dark/System Mode
   - Sport-spezifische Farben in tailwind.config.js
@@ -133,7 +134,7 @@ Dies ist die vollstaendige Product Vision fuer **Athletly** — eine Mobile-Firs
 
 ## 2. Product Vision
 
-> **AgenticSports ist dein persoenlicher AI Coach fuer JEDEN Sport — als Mobile App.**
+> **Athletly ist dein persoenlicher AI Coach fuer JEDEN Sport — als Mobile App.**
 
 Ein Agent der alle deine Sportarten versteht, einen integrierten Trainingsplan erstellt, sich automatisch anpasst, und dich wie ein echter Coach begleitet. Die App ist eine generische Plattform. Der Agent ist die gesamte Intelligenz.
 
@@ -1009,7 +1010,7 @@ Ergaenzung (Active Context Compression Pattern): System Prompt Hinweis "Nach 8+ 
 
 ## 10. Was wiederverwendet wird (mit Refactoring-Status)
 
-### Aus AgenticSports (Python)
+### Aus athletly-backend (Python, ehemals AgenticSports)
 
 | Modul | Datei | Status | Was zu tun ist |
 |---|---|---|---|
@@ -1030,7 +1031,7 @@ Ergaenzung (Active Context Compression Pattern): System Prompt Hinweis "Nach 8+ 
 | Startup | `src/agent/startup.py` | 🔧 Anpassen | Goal Type Inference generischer |
 | Config | `src/config.py` | ✅ Wiederverwendbar | Erweitern fuer FastAPI |
 
-### Aus athletly-app (React Native)
+### Aus athletly-v1 (React Native, jetzt archiviert)
 
 | Modul | Status | Was zu tun ist |
 |---|---|---|
@@ -1192,7 +1193,7 @@ Jede Phase liefert eigenstaendig Wert und ist testbar.
 | Frage | Antwort |
 |---|---|
 | **Garmin API** | Noch kein Access. Apple Health + FIT Files als Fallback |
-| **Repo-Struktur** | **Separate Repos** empfohlen: athletly-app (Frontend) + athletly-backend (Python FastAPI). Getrennte Deploy-Zyklen, klare Verantwortung. Backend wird auf Hetzner deployed, App via EAS Build |
+| **Repo-Struktur** | **Separate Repos**: `RnltLabs/athletly-app` (Frontend V2) + `RnltLabs/athletly-backend` (Python FastAPI). V1 archiviert als `RnltLabs/athletly-v1`. Getrennte Deploy-Zyklen, klare Verantwortung. Backend wird auf Hetzner deployed, App via EAS Build |
 | **Deploy-Target** | **Hetzner Server mit Docker**. Zugang via `ssh hetzner` |
 | **App Name** | **Athletly** |
 | **Calc Engine Parser** | **`evalidate`** — Whitelist-AST, 0.33s/1M ops, Maerz 2026 Release. Alternativen evaluiert und verworfen (simpleeval, asteval/CVE, numexpr/unsicher, py_expression_eval/unmaintained) |
@@ -1234,7 +1235,7 @@ Der Agent sollte z.B. erkennen: Nach Gym-Beintraining am Montag sollte Dienstag 
 
 ## 14. Bekannte Probleme & technische Schulden im bestehenden Code
 
-### In athletly-app (Frontend)
+### In athletly-v1 (Legacy Frontend — archiviert)
 1. **Multi-Session pro Tag**: App zeigt nur `sessions[0]` — weitere Sessions werden ignoriert. Muss fuer Multi-Sport (z.B. morgens Lauf + abends Gym) gefixt werden
 2. **`coachMessage` + `reasoning` hardcodiert**: App setzt "Dein personalisierter Trainingsplan ist bereit!" als Default. Backend kann diese Felder nicht ueber die DB setzen. → Top-Level Columns in `weekly_plans` ergaenzen
 3. **Rest Day `reason` hardcodiert**: Immer "Erholungstag" — Backend kann keinen Custom-Grund senden. → In `days` JSONB ergaenzen
@@ -1242,7 +1243,7 @@ Der Agent sollte z.B. erkennen: Nach Gym-Beintraining am Montag sollte Dienstag 
 5. **Sport-Icons/Farben sind hardcodiert**: `tailwind.config.js` hat feste Sport-Farben. Fuer unbekannte Sports gibt es Default-Werte, aber das Mapping sollte langfristig dynamisch sein
 6. **Onboarding ist 9 feste Schritte**: Muss durch dynamischen Companion ersetzt werden (Phase 3)
 
-### In AgenticSports (Python)
+### In athletly-backend (Python, ehemals AgenticSports)
 1. **TRIMP/HR-Zonen hardcodiert** in `src/tools/metrics.py` — muss komplett raus, durch Agent Config + Calc Engine ersetzt
 2. **Plan Evaluator hat 6 feste Kriterien** — muessen durch Agent-definierte Kriterien aus DB ersetzt werden
 3. **System Prompt enthält sport-spezifische Expertise-Listen** — muss generisch werden
