@@ -123,6 +123,10 @@ def create_app() -> FastAPI:
     from src.api.routers.garmin import router as garmin_router
     app.include_router(garmin_router, prefix="/garmin", tags=["garmin"])
 
+    # Onboarding router — parse-voice (public) + setup (auth required).
+    from src.api.routers.onboarding import router as onboarding_router
+    app.include_router(onboarding_router, prefix="/api/onboarding", tags=["onboarding"])
+
     # -- Health endpoint ------------------------------------------------------
 
     @app.get("/health", tags=["meta"])

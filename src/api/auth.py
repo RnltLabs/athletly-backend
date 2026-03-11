@@ -1,14 +1,16 @@
 """JWT authentication for the Athletly FastAPI backend.
 
-Supabase issues HS256 JWTs signed with the project's JWT secret.
+Supabase may issue JWTs signed with either HS256 (legacy) or ES256 (new JWKS).
 Every protected endpoint depends on `get_current_user`, which validates
 the token and returns the decoded payload.
 """
 
 import logging
+from functools import lru_cache
 from typing import Annotated
 
 import jwt
+from jwt import PyJWKClient
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -19,27 +21,55 @@ logger = logging.getLogger(__name__)
 _bearer = HTTPBearer(auto_error=False)
 
 
+@lru_cache
+def _get_jwks_client() -> PyJWKClient:
+    """Cached JWKS client for Supabase ES256 token verification."""
+    url = get_settings().supabase_url
+    return PyJWKClient(f"{url}/auth/v1/.well-known/jwks.json")
+
+
 def verify_jwt(token: str) -> dict:
     """Decode and validate a Supabase-issued JWT.
 
-    Raises HTTPException(401) for any validation failure so callers
-    never have to handle raw PyJWT exceptions.
+    Supports both ES256 (JWKS) and HS256 (legacy secret).
+    Raises HTTPException(401) for any validation failure.
     """
-    secret = get_settings().supabase_jwt_secret
-    if not secret:
-        logger.error("supabase_jwt_secret is not configured")
+    settings = get_settings()
+
+    # Peek at the token header to determine algorithm
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.DecodeError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication not configured",
+            detail="Invalid token",
         )
 
     try:
-        payload: dict = jwt.decode(
-            token,
-            secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
+        if header.get("alg") == "ES256":
+            # New Supabase JWKS-based verification
+            signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
+            payload: dict = jwt.decode(
+                token,
+                signing_key.key,
+                algorithms=["ES256"],
+                audience="authenticated",
+            )
+        else:
+            # Legacy HS256 verification
+            secret = settings.supabase_jwt_secret
+            if not secret:
+                logger.error("supabase_jwt_secret is not configured")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication not configured",
+                )
+            payload = jwt.decode(
+                token,
+                secret,
+                algorithms=["HS256"],
+                audience="authenticated",
+            )
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
