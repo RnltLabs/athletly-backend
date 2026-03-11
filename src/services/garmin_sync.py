@@ -92,8 +92,8 @@ class GarminSyncService:
         try:
             from garminconnect import Garmin  # optional dep
             garmin = Garmin()
-            garmin.garth.loads(token_row["token_data"]["garth_tokens"])
-            garmin.login()  # refresh tokens if needed
+            garth_tokens = token_row["token_data"]["garth_tokens"]
+            garmin.login(tokenstore=garth_tokens)
             return garmin, token_row
         except Exception as exc:
             update_token_status(user_id, "garmin", "expired")
