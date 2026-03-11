@@ -63,11 +63,11 @@ def chat_completion(
     if tools:
         kwargs["tools"] = tools
 
-        # Gemini 2.5 "thinking" models need an explicit thinking budget
-        # when tools + large system prompts are combined, otherwise they
-        # return empty responses with zero completion tokens.
-        if "gemini-2.5" in resolved_model:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
+    # Gemini 2.5 "thinking" models need an explicit thinking budget
+    # when tools + large system prompts are combined, otherwise they
+    # return empty responses with zero completion tokens.
+    if "gemini-2.5" in resolved_model:
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
 
     response = litellm.completion(**kwargs)
     return response

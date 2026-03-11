@@ -387,6 +387,17 @@ class AgentLoop:
             except Exception:
                 pass  # Non-critical — never block agent loop
 
+            # Guard against empty choices (Gemini 2.5 can return empty responses)
+            if not response.choices:
+                consecutive_errors += 1
+                logger.warning(
+                    "LLM returned empty choices (round %d, errors: %d), retrying...",
+                    round_num, consecutive_errors,
+                )
+                if consecutive_errors >= 3:
+                    return "Es tut mir leid, ich habe gerade technische Schwierigkeiten. Bitte versuche es nochmal."
+                continue
+
             message = response.choices[0].message
             content = message.content
             tool_calls = message.tool_calls
