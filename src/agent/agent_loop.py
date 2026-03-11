@@ -77,6 +77,62 @@ class AgentResult:
 ProgressCallback = Callable[[str, str], None] | None
 
 
+def _extract_user_assistant_pairs(rows: list[dict], source: str = "supabase") -> list[dict]:
+    """Build a well-formed user/assistant message list from raw DB rows.
+
+    Raw session rows contain user, model, and tool_call entries.  When tool-call
+    rounds don't produce a final model response (e.g. the agent hit an error
+    loop), the loaded history ends up with consecutive user messages and no
+    assistant replies.  This confuses LLMs (especially Gemini) which expect
+    alternating user/assistant turns.
+
+    This function:
+    1. Collects tool_call results as context between user turns
+    2. Ensures every user message is followed by an assistant message
+    3. Synthesizes brief assistant placeholders where model responses are missing
+    """
+    messages: list[dict] = []
+    pending_tool_summaries: list[str] = []
+
+    for row in rows:
+        role = row.get("role", "user")
+        content = row.get("content", "") or ""
+
+        if role == "tool_call":
+            # Collect tool results as context — summarize briefly
+            meta = row.get("meta", {}) or {}
+            tool_name = meta.get("tool", "tool")
+            # Extract a brief summary of the result
+            preview = content[:150]
+            pending_tool_summaries.append(f"{tool_name}: {preview}")
+            continue
+
+        if role not in ("user", "model"):
+            continue
+
+        oai_role = "user" if role == "user" else "assistant"
+
+        if oai_role == "user" and messages and messages[-1]["role"] == "user":
+            # Consecutive user message — insert a synthetic assistant reply
+            # to maintain alternating turn structure
+            if pending_tool_summaries:
+                summary = "[I processed your request using these tools: " + "; ".join(
+                    s[:80] for s in pending_tool_summaries[-5:]
+                ) + "]"
+                pending_tool_summaries.clear()
+            else:
+                summary = "[I processed your previous message.]"
+            messages.append({"role": "assistant", "content": summary})
+
+        messages.append({"role": oai_role, "content": content})
+        if oai_role == "assistant":
+            pending_tool_summaries.clear()
+
+    # If the conversation ends with a user message, that's fine —
+    # the agent loop will add the new user message after this
+    return messages
+
+
 # -- The Loop ----------------------------------------------------------------
 
 class AgentLoop:
@@ -189,31 +245,26 @@ class AgentLoop:
             if session_row and "context" in session_row:
                 self.context = session_row["context"]
             rows = load_session_messages(session_id)
-            for row in rows:
-                role = row.get("role", "user")
-                content = row.get("content", "")
-                if role in ("user", "model"):
-                    oai_role = "user" if role == "user" else "assistant"
-                    self._messages.append({"role": oai_role, "content": content})
-                    self._turns_this_session += 1
+            raw_pairs = _extract_user_assistant_pairs(rows, source="supabase")
         else:
             self._session_file = SESSIONS_DIR / f"{session_id}.jsonl"
             if not self._session_file.exists():
                 logger.warning("Session file %s not found, starting fresh", session_id)
                 return session_id
+            entries = []
             for line in self._session_file.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
                 try:
-                    entry = json.loads(line)
+                    entries.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-                role = entry.get("role", "user")
-                content = entry.get("content", "")
-                if role in ("user", "model"):
-                    oai_role = "user" if role == "user" else "assistant"
-                    self._messages.append({"role": oai_role, "content": content})
-                    self._turns_this_session += 1
+            raw_pairs = _extract_user_assistant_pairs(entries, source="jsonl")
+
+        for msg in raw_pairs:
+            self._messages.append(msg)
+            if msg["role"] == "user":
+                self._turns_this_session += 1
 
         logger.info("Resumed session %s with %d messages", session_id, len(self._messages))
         return session_id
