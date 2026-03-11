@@ -136,16 +136,19 @@ class GarminSyncService:
                 if avg_speed and avg_speed > 0:
                     avg_pace = round(1000 / (avg_speed * 60), 2)
 
+                def _int(val: object) -> int | None:
+                    return int(val) if val is not None else None
+
                 row = {
                     "user_id": user_id,
                     "sport": act.get("activityType", {}).get("typeKey", "unknown"),
                     "start_time": act.get("startTimeLocal"),
-                    "duration_seconds": int(act.get("duration", 0)),
+                    "duration_seconds": _int(act.get("duration")),
                     "distance_meters": act.get("distance"),
-                    "avg_hr": act.get("averageHR"),
-                    "max_hr": act.get("maxHR"),
-                    "calories": int(act["calories"]) if act.get("calories") is not None else None,
-                    "training_effect": act.get("trainingEffectLabel") and act.get("aerobicTrainingEffect"),
+                    "avg_hr": _int(act.get("averageHR")),
+                    "max_hr": _int(act.get("maxHR")),
+                    "calories": _int(act.get("calories")),
+                    "training_effect": act.get("aerobicTrainingEffect"),
                     "vo2max_activity": act.get("vO2MaxValue"),
                     "avg_pace_min_km": avg_pace,
                     "elevation_gain_m": act.get("elevationGain"),
