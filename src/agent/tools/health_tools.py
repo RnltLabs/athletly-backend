@@ -3,8 +3,8 @@
 Provides the agent with cross-source activity data (Apple Health, Garmin,
 Health Connect) and daily recovery metrics (sleep, HRV, stress, body battery).
 
-These tools surface data from health_activities, garmin_activities,
-health_daily_metrics, and garmin_daily_stats tables via the DB layer.
+These tools surface data from the unified activities table (filtered by source)
+and health_daily_metrics via the DB layer.
 """
 
 from datetime import datetime, timedelta, timezone

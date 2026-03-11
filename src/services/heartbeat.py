@@ -272,9 +272,10 @@ async def _check_triggers_for_user(user_id: str) -> list[dict]:
         # Also fetch health provider activities for cross-sport awareness.
         try:
             health_result = await (
-                client.table("health_activities")
+                client.table("activities")
                 .select("*")
                 .eq("user_id", user_id)
+                .in_("source", ["apple_health", "health_connect"])
                 .order("start_time", desc=True)
                 .limit(20)
                 .execute()
@@ -460,9 +461,10 @@ async def _detect_unknown_activities(user_id: str) -> list[dict]:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
         result = await (
-            client.table("health_activities")
+            client.table("activities")
             .select("id,activity_type,start_time,duration_seconds,distance_meters")
             .eq("user_id", user_id)
+            .in_("source", ["apple_health", "health_connect"])
             .in_("activity_type", ["unknown", "other", "uncategorized"])
             .gte("start_time", cutoff)
             .execute()

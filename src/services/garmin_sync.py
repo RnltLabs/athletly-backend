@@ -192,9 +192,24 @@ class GarminSyncService:
                                 "user_id": user_id,
                                 "date": day,
                                 "source": "garmin",
-                                "resting_hr": stats.get("restingHeartRate"),
+                                "resting_heart_rate": stats.get("restingHeartRate"),
                                 "steps": stats.get("totalSteps"),
                                 "stress_avg": stats.get("averageStressLevel"),
+                                "hrv_avg": (
+                                    stats.get("hrvSummary", {}) or {}
+                                ).get("weeklyAvg"),
+                                "body_battery_high": stats.get(
+                                    "bodyBatteryChargedValue"
+                                ),
+                                "body_battery_low": stats.get(
+                                    "bodyBatteryDrainedValue"
+                                ),
+                                "active_calories": stats.get(
+                                    "activeKilocalories"
+                                ),
+                                "total_calories": stats.get(
+                                    "totalKilocalories"
+                                ),
                                 "raw_data": stats,
                             },
                             on_conflict="user_id,date,source",
@@ -248,13 +263,18 @@ class GarminSyncService:
                             .get("value")
                         )
                         sleep_seconds = daily_dto.get("sleepTimeSeconds")
+                        sleep_minutes = (
+                            sleep_seconds / 60
+                            if sleep_seconds is not None
+                            else None
+                        )
                         client.table("health_daily_metrics").upsert(
                             {
                                 "user_id": user_id,
                                 "date": day,
                                 "source": "garmin",
                                 "sleep_score": sleep_score,
-                                "sleep_duration_seconds": sleep_seconds,
+                                "sleep_duration_minutes": sleep_minutes,
                             },
                             on_conflict="user_id,date,source",
                         ).execute()

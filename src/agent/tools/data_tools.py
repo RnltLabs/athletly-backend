@@ -3,8 +3,10 @@
 These are the equivalent of Claude Code's Read, Grep, Glob tools.
 The agent uses these to inspect data BEFORE deciding what to do.
 
-FIX vs Blueprint: Activity dicts use nested keys (heart_rate.avg, pace.avg_min_per_km,
-zone_distribution) not flat keys (avg_heart_rate, avg_pace_min_km, hr_zone_distribution).
+Activity dicts may arrive in two formats:
+- Flat columns from the DB (avg_hr, max_hr, avg_pace_min_km, etc.)
+- Nested dicts from the file store (heart_rate.avg, pace.avg_min_per_km, etc.)
+The accessors below try flat keys first, then fall back to nested.
 """
 
 from src.agent.tools.registry import Tool, ToolRegistry
@@ -82,10 +84,10 @@ def register_data_tools(registry: ToolRegistry, user_model):
             "activities": [],
         }
         for act in activities:
-            # Extract from nested structure (actual codebase format)
+            # Try flat DB columns first, fall back to nested file-store dicts
             hr_data = act.get("heart_rate", {}) or {}
             pace_data = act.get("pace", {}) or {}
-            zone_data = act.get("zone_distribution", {}) or {}
+            zone_data = act.get("zone_distribution") or act.get("hr_zone_distribution") or {}
 
             entry = {
                 "date": act.get("start_time", "")[:10],
@@ -93,19 +95,24 @@ def register_data_tools(registry: ToolRegistry, user_model):
                 "sub_sport": act.get("sub_sport"),
                 "duration_minutes": round(act.get("duration_seconds", 0) / 60, 1),
                 "distance_km": round(act.get("distance_meters", 0) / 1000, 2) if act.get("distance_meters") else None,
-                "avg_hr": hr_data.get("avg"),
-                "max_hr": hr_data.get("max"),
-                "avg_pace_min_km": pace_data.get("avg_min_per_km") or pace_data.get("avg_min_per_100m"),
+                "avg_hr": act.get("avg_hr") or hr_data.get("avg"),
+                "max_hr": act.get("max_hr") or hr_data.get("max"),
+                "avg_pace_min_km": (
+                    act.get("avg_pace_min_km")
+                    or pace_data.get("avg_min_per_km")
+                    or pace_data.get("avg_min_per_100m")
+                ),
                 "trimp": act.get("trimp"),
                 "hr_zones": zone_data if zone_data else None,
                 "calories": act.get("calories"),
             }
 
-            # Add power data if available
+            # Add power data if available (flat first, then nested)
             power_data = act.get("power", {}) or {}
-            if power_data.get("avg_watts"):
-                entry["avg_watts"] = power_data["avg_watts"]
-                entry["normalized_watts"] = power_data.get("normalized_watts")
+            avg_watts = act.get("avg_watts") or power_data.get("avg_watts")
+            if avg_watts:
+                entry["avg_watts"] = avg_watts
+                entry["normalized_watts"] = act.get("normalized_watts") or power_data.get("normalized_watts")
 
             result["activities"].append(entry)
 

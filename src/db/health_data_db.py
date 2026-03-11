@@ -1,6 +1,6 @@
 """Read-only DB layer for health data from Apple Health, Health Connect, and Garmin.
 
-Tables: health_activities, garmin_activities, health_daily_metrics, garmin_daily_stats.
+Tables: activities (with source column), health_daily_metrics (with source column).
 
 Usage::
 
@@ -34,30 +34,45 @@ def list_health_activities(
     after: str | None = None,
     before: str | None = None,
 ) -> list[dict]:
-    """Query health_activities table. Returns newest first.
+    """Query activities table WHERE source IN ('apple_health', 'health_connect').
 
-    Columns: id, user_id, provider_type, activity_type, start_time, end_time,
-    duration_seconds, distance_meters, avg_heart_rate, max_heart_rate,
-    calories, training_load_trimp, source_name, external_id, raw_data, created_at.
+    The activities table uses columns: sport, start_time, duration_seconds,
+    distance_meters, avg_hr, max_hr, trimp, source, garmin_activity_id.
+
+    Results are mapped to the legacy field names for backward compatibility:
+    activity_type ← sport, avg_heart_rate ← avg_hr, max_heart_rate ← max_hr,
+    training_load_trimp ← trimp, provider_type ← source.
     """
     query = (
         get_supabase()
-        .table("health_activities")
+        .table("activities")
         .select("*")
         .eq("user_id", user_id)
+        .in_("source", ["apple_health", "health_connect"])
         .order("start_time", desc=True)
         .limit(limit)
     )
     if activity_type:
-        query = query.eq("activity_type", activity_type)
+        query = query.eq("sport", activity_type)
     if provider_type:
-        query = query.eq("provider_type", provider_type)
+        query = query.eq("source", provider_type)
     if after:
         query = query.gte("start_time", after)
     if before:
         query = query.lt("start_time", before)
 
-    return list(query.execute().data)
+    rows = query.execute().data
+    return [
+        {
+            **r,
+            "activity_type": r.get("sport"),
+            "avg_heart_rate": r.get("avg_hr"),
+            "max_heart_rate": r.get("max_hr"),
+            "training_load_trimp": r.get("trimp"),
+            "provider_type": r.get("source"),
+        }
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -72,28 +87,40 @@ def list_garmin_activities(
     after: str | None = None,
     before: str | None = None,
 ) -> list[dict]:
-    """Query garmin_activities table. Returns newest first.
+    """Query activities table WHERE source = 'garmin'. Returns newest first.
 
-    Columns: id, user_id, garmin_activity_id, type, start_time, duration,
-    distance, avg_hr, max_hr, avg_speed, max_speed, elevation_gain,
-    calories, training_effect, vo2max_running, raw_data, created_at.
+    The activities table uses columns: sport, start_time, duration_seconds,
+    distance_meters, avg_hr, max_hr, trimp, source, garmin_activity_id.
+
+    Results are mapped to the legacy field names for backward compatibility:
+    type ← sport, duration ← duration_seconds, distance ← distance_meters.
     """
     query = (
         get_supabase()
-        .table("garmin_activities")
+        .table("activities")
         .select("*")
         .eq("user_id", user_id)
+        .eq("source", "garmin")
         .order("start_time", desc=True)
         .limit(limit)
     )
     if activity_type:
-        query = query.eq("type", activity_type)
+        query = query.eq("sport", activity_type)
     if after:
         query = query.gte("start_time", after)
     if before:
         query = query.lt("start_time", before)
 
-    return list(query.execute().data)
+    rows = query.execute().data
+    return [
+        {
+            **r,
+            "type": r.get("sport"),
+            "duration": r.get("duration_seconds"),
+            "distance": r.get("distance_meters"),
+        }
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -130,41 +157,7 @@ def list_daily_metrics(
 
 
 # ---------------------------------------------------------------------------
-# Garmin daily stats
-# ---------------------------------------------------------------------------
-
-
-def list_garmin_daily_stats(
-    user_id: str,
-    days: int = 14,
-    after: str | None = None,
-    before: str | None = None,
-) -> list[dict]:
-    """Query garmin_daily_stats table. Returns newest first.
-
-    Columns: id, user_id, date, steps, total_distance_meters, active_calories,
-    resting_calories, stress_avg, stress_max, body_battery_high, body_battery_low,
-    resting_heart_rate, sleep_duration_minutes, sleep_score, hrv_weekly_avg,
-    intensity_minutes, floors_climbed, raw_data, created_at.
-    """
-    resolved_after = after or (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
-
-    query = (
-        get_supabase()
-        .table("garmin_daily_stats")
-        .select("*")
-        .eq("user_id", user_id)
-        .gte("date", resolved_after)
-        .order("date", desc=True)
-    )
-    if before:
-        query = query.lt("date", before)
-
-    return list(query.execute().data)
-
-
-# ---------------------------------------------------------------------------
-# Merged daily metrics (Garmin + Health, unified schema)
+# Merged daily metrics (single table with source column)
 # ---------------------------------------------------------------------------
 
 
@@ -172,61 +165,32 @@ def get_merged_daily_metrics(
     user_id: str,
     days: int = 14,
 ) -> list[dict]:
-    """Merge Garmin daily stats and Health daily metrics into a unified list.
+    """Query health_daily_metrics and return a unified view.
 
-    Garmin data is the baseline; Health data overlays on conflict (non-None wins).
-    Field mapping:
-    - Garmin ``hrv_weekly_avg`` → unified ``hrv``
-    - Health ``hrv_avg`` → unified ``hrv``
-
-    Returns list of dicts sorted newest-first with keys:
-    date, sleep_minutes, sleep_score, hrv, resting_hr, stress,
-    body_battery_high, body_battery_low, recovery_score, steps, source.
+    All sources (garmin, apple_health, health_connect) are now in one table
+    distinguished by the ``source`` column. Returns list of dicts sorted
+    newest-first with keys: date, sleep_minutes, sleep_score, hrv,
+    resting_hr, stress, body_battery_high, body_battery_low, recovery_score,
+    steps, source.
     """
-    garmin_rows = list_garmin_daily_stats(user_id, days=days)
-    health_rows = list_daily_metrics(user_id, days=days)
+    rows = list_daily_metrics(user_id, days=days)
 
-    by_date: dict[str, dict] = {}
-
-    # Garmin as baseline
-    for r in garmin_rows:
-        date = r.get("date", "")[:10]
-        by_date[date] = {
-            "date": date,
+    return [
+        {
+            "date": r.get("date", "")[:10],
             "sleep_minutes": r.get("sleep_duration_minutes"),
             "sleep_score": r.get("sleep_score"),
-            "hrv": r.get("hrv_weekly_avg"),
+            "hrv": r.get("hrv_avg"),
             "resting_hr": r.get("resting_heart_rate"),
             "stress": r.get("stress_avg"),
             "body_battery_high": r.get("body_battery_high"),
             "body_battery_low": r.get("body_battery_low"),
-            "recovery_score": None,
+            "recovery_score": r.get("recovery_score"),
             "steps": r.get("steps"),
-            "source": "garmin",
+            "source": r.get("source", "unknown"),
         }
-
-    # Health overlay (wins on conflict when non-None)
-    for r in health_rows:
-        date = r.get("date", "")[:10]
-        existing = by_date.get(date, {})
-        by_date[date] = {
-            "date": date,
-            "sleep_minutes": r.get("sleep_duration_minutes") if r.get("sleep_duration_minutes") is not None else existing.get("sleep_minutes"),
-            "sleep_score": r.get("sleep_score") if r.get("sleep_score") is not None else existing.get("sleep_score"),
-            "hrv": r.get("hrv_avg") if r.get("hrv_avg") is not None else existing.get("hrv"),
-            "resting_hr": r.get("resting_heart_rate") if r.get("resting_heart_rate") is not None else existing.get("resting_hr"),
-            "stress": r.get("stress_avg") if r.get("stress_avg") is not None else existing.get("stress"),
-            "body_battery_high": r.get("body_battery_high") if r.get("body_battery_high") is not None else existing.get("body_battery_high"),
-            "body_battery_low": r.get("body_battery_low") if r.get("body_battery_low") is not None else existing.get("body_battery_low"),
-            "recovery_score": r.get("recovery_score") if r.get("recovery_score") is not None else existing.get("recovery_score"),
-            "steps": r.get("steps") if r.get("steps") is not None else existing.get("steps"),
-            "source": "health" if any(
-                r.get(k) is not None
-                for k in ("sleep_duration_minutes", "sleep_score", "hrv_avg", "resting_heart_rate", "stress_avg")
-            ) else existing.get("source", "garmin"),
-        }
-
-    return sorted(by_date.values(), key=lambda m: m.get("date", ""), reverse=True)
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -260,86 +224,35 @@ def get_health_activity_summary(user_id: str, days: int = 28) -> dict:
 
 
 def get_cross_source_load_summary(user_id: str, days: int = 28) -> dict:
-    """Aggregate training load across all three activity sources with deduplication.
+    """Aggregate training load across all activity sources.
 
-    Priority: activities (agent) > health_activities > garmin_activities.
-    Any garmin_activity_id already present in the agent table causes matching
-    rows in health_activities (external_id) and garmin_activities (garmin_activity_id)
-    to be dropped before merging.
+    All activities now live in the consolidated ``activities`` table with a
+    ``source`` column (garmin, apple_health, health_connect, manual).
+    No deduplication is needed since there is only one table.
 
     Returns dict with total_sessions, total_minutes, total_trimp,
     sports_seen (list), sessions_by_sport (dict), sessions_by_source (dict).
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    agent_rows = list_activities(user_id, limit=1000, after=cutoff)
-    health_rows = list_health_activities(user_id, limit=1000, after=cutoff)
-    garmin_rows = list_garmin_activities(user_id, limit=1000, after=cutoff)
-
-    # Build the set of garmin_activity_ids already covered by the agent table.
-    covered_garmin_ids: set[str] = {
-        str(r["garmin_activity_id"])
-        for r in agent_rows
-        if r.get("garmin_activity_id")
-    }
-
-    # Filter out health_activities that duplicate an agent-owned Garmin activity.
-    filtered_health = [
-        r for r in health_rows
-        if not (r.get("external_id") and str(r["external_id"]) in covered_garmin_ids)
-    ]
-
-    # Filter out garmin_activities that duplicate an agent-owned Garmin activity.
-    filtered_garmin = [
-        r for r in garmin_rows
-        if not (r.get("garmin_activity_id") and str(r["garmin_activity_id"]) in covered_garmin_ids)
-    ]
-
-    # Normalise each source into a common shape for aggregation.
-    def _norm_agent(r: dict) -> dict:
-        return {
-            "source": "agent",
-            "sport": r.get("sport") or "unknown",
-            "duration_seconds": r.get("duration_seconds") or 0,
-            "trimp": r.get("trimp") or 0,
-        }
-
-    def _norm_health(r: dict) -> dict:
-        return {
-            "source": "health",
-            "sport": r.get("activity_type") or "unknown",
-            "duration_seconds": r.get("duration_seconds") or 0,
-            "trimp": r.get("training_load_trimp") or 0,
-        }
-
-    def _norm_garmin(r: dict) -> dict:
-        return {
-            "source": "garmin",
-            "sport": r.get("type") or "unknown",
-            "duration_seconds": r.get("duration") or 0,
-            "trimp": 0,  # garmin_activities has training_effect, not TRIMP
-        }
-
-    unified = (
-        [_norm_agent(r) for r in agent_rows]
-        + [_norm_health(r) for r in filtered_health]
-        + [_norm_garmin(r) for r in filtered_garmin]
-    )
-
-    total_minutes = sum(r["duration_seconds"] for r in unified) / 60
-    total_trimp = sum(r["trimp"] for r in unified)
+    rows = list_activities(user_id, limit=1000, after=cutoff)
 
     sessions_by_sport: dict[str, int] = {}
     sessions_by_source: dict[str, int] = {}
-    for r in unified:
-        sport = r["sport"]
-        source = r["source"]
+    total_duration = 0
+    total_trimp = 0
+
+    for r in rows:
+        sport = r.get("sport") or "unknown"
+        source = r.get("source") or "unknown"
+        total_duration += r.get("duration_seconds") or 0
+        total_trimp += r.get("trimp") or 0
         sessions_by_sport[sport] = sessions_by_sport.get(sport, 0) + 1
         sessions_by_source[source] = sessions_by_source.get(source, 0) + 1
 
     return {
-        "total_sessions": len(unified),
-        "total_minutes": round(total_minutes, 1),
+        "total_sessions": len(rows),
+        "total_minutes": round(total_duration / 60, 1),
         "total_trimp": round(total_trimp, 1),
         "sports_seen": sorted(sessions_by_sport.keys()),
         "sessions_by_sport": sessions_by_sport,

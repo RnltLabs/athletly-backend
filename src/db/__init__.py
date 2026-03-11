@@ -42,7 +42,6 @@ from src.db.health_data_db import (
     get_health_activity_summary,
     list_daily_metrics,
     list_garmin_activities,
-    list_garmin_daily_stats,
     list_health_activities,
 )
 from src.db.proactive_queue_db import (
@@ -101,7 +100,6 @@ __all__ = [
     "list_health_activities",
     "list_garmin_activities",
     "list_daily_metrics",
-    "list_garmin_daily_stats",
     "get_health_activity_summary",
     "get_cross_source_load_summary",
     # proactive_queue_db
