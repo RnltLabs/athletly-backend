@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     max_consecutive_errors: int = 3
     compression_threshold: int = 40
     compression_keep_rounds: int = 4
-    daily_token_budget: int = 500_000  # Max tokens per user per day
+    daily_token_budget: int = 2_000_000  # Max tokens per user per day
 
     # -- User / multi-tenancy -------------------------------------------------
     agenticsports_user_id: str = ""  # Set for Supabase mode; leave empty for file-based
