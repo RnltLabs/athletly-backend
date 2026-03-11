@@ -396,7 +396,7 @@ git clone https://github.com/athletly/athletly-backend.git
 cd athletly-backend
 uv sync
 cp .env.example .env   # fill in required keys (see below)
-uvicorn src.api.main:app --reload
+uv run python -m uvicorn src.api.main:app --reload
 ```
 
 ### Environment Variables
