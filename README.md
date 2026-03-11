@@ -18,7 +18,7 @@
 
 ## Key Features
 
-- **Code Computes, LLM Reasons** — TRIMP, HR zones, pace metrics computed in Python. The LLM only interprets verified numbers.
+- **Code Computes, LLM Reasons** — The agent defines metrics (TRIMP, HR zones, pace) as formulas at runtime via `define_metric`. A safe expression engine (`CalcEngine`) evaluates them — no hardcoded sport logic, no LLM-hallucinated math.
 - **Belief-Driven Memory** — Every piece of athlete knowledge has confidence scores, pgvector embeddings, and outcome tracking. Stale beliefs auto-archive.
 - **Multi-User Isolation** — Supabase RLS + Redis distributed locks. Each athlete's data is fully isolated.
 - **Real-Time Streaming** — SSE-based responses with live tool call visibility (thinking, tool_call, tool_result, message events).
@@ -40,11 +40,11 @@ graph TD
     E --> E2["Memory · Health · Config"]
     E --> E3["Products · Notifications · Research"]
 
-    E1 --> F["Metrics Engine"]
+    E1 --> F["CalcEngine\nFormula Evaluator"]
     E2 --> G["Belief Store\npgvector"]
     E1 --> H["Context Builder"]
 
-    F -->|"TRIMP · HR Zones · Pace"| H
+    F -->|"agent-defined formulas"| H
     G -->|"confidence · embeddings"| H
     H -->|"last session · 7d · 28d"| C
 
@@ -452,7 +452,7 @@ uv run pytest tests/ -m integration   # requires API keys
 
 | Decision | Rationale |
 |---|---|
-| **Code computes, LLM reasons** | LLMs hallucinate numbers. `math.exp()` is always correct. |
+| **Code computes, LLM reasons** | Agent defines formulas via tools, `CalcEngine` evaluates them safely. No hardcoded sport logic, no LLM-hallucinated math. |
 | **Single agent, not a swarm** | One coach who knows you well > five generic assistants. |
 | **23 tools, no router** | LLM autonomously selects the right tools each turn. |
 | **Belief-driven memory** | Confidence decays on contradiction, strengthens on confirmation. |
@@ -467,7 +467,7 @@ uv run pytest tests/ -m integration   # requires API keys
 |---|---|---|
 | **Tools** | 23 domain-specific | Generic (shell, web) |
 | **Memory** | Beliefs + pgvector + confidence | Markdown files |
-| **Math** | Python-computed, correct | LLM-computed, approximate |
+| **Math** | Agent-defined formulas, engine-evaluated | LLM-computed, approximate |
 | **Persistence** | Supabase + RLS multi-user | File-based, single-user |
 | **Streaming** | SSE with tool visibility | Request-response |
 | **Strength** | Deep domain reasoning | Broad platform coverage |
