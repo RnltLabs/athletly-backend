@@ -150,7 +150,7 @@ async def garmin_sync(
 async def garmin_disconnect(
     user_id: Annotated[str, Depends(get_user_id)],
 ) -> dict:
-    """Delete stored Garmin tokens for the current user.
+    """Delete stored Garmin tokens and clear sync cooldown for the current user.
 
     Returns:
         ``{"status": "disconnected"}``
@@ -158,4 +158,18 @@ async def garmin_disconnect(
     from src.db.provider_tokens_db import delete_token
 
     delete_token(user_id, "garmin")
+
+    # Clear the sync cooldown so the user can sync immediately after reconnecting
+    try:
+        settings = get_settings()
+        client = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1,
+        )
+        await client.delete(f"garmin_sync:{user_id}")
+        await client.aclose()
+    except Exception:
+        logger.debug("Redis unavailable when clearing cooldown on disconnect; skipping")
+
     return {"status": "disconnected"}
