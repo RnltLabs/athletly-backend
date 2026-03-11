@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 PER_TOOL_BUDGET: dict[str, int] = {
     "get_activities": 1500,
     "analyze_training_load": 800,
-    "web_search": 1200,
+    "web_search": 2000,
     "create_training_plan": 2000,
     "get_health_activity_summary": 1200,
     "get_cross_source_load_summary": 1000,

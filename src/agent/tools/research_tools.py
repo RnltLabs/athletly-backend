@@ -57,11 +57,12 @@ def register_research_tools(registry: ToolRegistry):
     registry.register(Tool(
         name="web_search",
         description=(
-            "Search the web for training methodologies, race information, sports science, "
-            "or any external knowledge. Returns search results with titles, snippets, and URLs. "
-            "Use this when you need information beyond your built-in knowledge, "
-            "e.g., specific race details, latest training research, or local event info. "
-            "If search is unavailable, rely on your built-in sports science knowledge."
+            "Search the web for real-time information: race dates, events, training "
+            "methodologies, sports science, or any external knowledge. Returns search "
+            "results with titles, snippets, and URLs. Use this when the athlete asks "
+            "about specific events, dates, or facts you might not know. "
+            "Note: Requires SERP_API_KEY or BRAVE_SEARCH_API_KEY to be configured. "
+            "If unavailable, use your built-in knowledge and be transparent about it."
         ),
         handler=web_search,
         parameters={
@@ -69,7 +70,11 @@ def register_research_tools(registry: ToolRegistry):
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query (be specific: 'marathon base phase training 16 weeks')",
+                    "description": (
+                        "Search query — be specific and include year for events. "
+                        "Examples: 'Heidelberger Halbmarathon 2026 Datum', "
+                        "'marathon base phase training 16 weeks'"
+                    ),
                 },
             },
             "required": ["query"],
