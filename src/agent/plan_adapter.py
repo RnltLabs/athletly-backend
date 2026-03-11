@@ -58,8 +58,9 @@ def _extract_days(agent_plan: dict) -> dict:
     if day_keys:
         return {k.lower(): v for k, v in agent_plan.items() if k.lower() in VALID_DAYS}
 
-    # Fallback: look for a "sessions" list and distribute across days
-    sessions = agent_plan.get("sessions", [])
+    # Use the shared session extractor to handle all LLM schema variants
+    from src.agent.plan_evaluator import extract_sessions_from_plan
+    sessions = extract_sessions_from_plan(agent_plan)
     if sessions:
         return _distribute_sessions_to_days(sessions)
 
@@ -101,7 +102,7 @@ def _distribute_sessions_to_days(sessions: list[dict]) -> dict:
     days: dict = {d: {"sessions": []} for d in VALID_DAYS}
 
     for session in sessions:
-        day = (session.get("day") or "").lower().strip()
+        day = (session.get("day") or session.get("d") or "").lower().strip()
         if day in days:
             days[day]["sessions"].append(session)
         else:

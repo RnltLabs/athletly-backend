@@ -344,10 +344,12 @@ def register_planning_tools(registry: ToolRegistry, user_model):
         if not plans:
             return {"plans": [], "message": "No historical plans found."}
 
+        from src.agent.plan_evaluator import extract_sessions_from_plan
+
         summaries = []
         for p in plans:
             plan_data = p.get("plan_data", {})
-            sessions = plan_data.get("sessions", [])
+            sessions = extract_sessions_from_plan(plan_data)
             summaries.append({
                 "id": p.get("id"),
                 "created_at": p.get("created_at"),
@@ -356,10 +358,10 @@ def register_planning_tools(registry: ToolRegistry, user_model):
                 "session_count": len(sessions),
                 "week_start": plan_data.get("week_start"),
                 "sports": list(set(
-                    s.get("sport", "unknown") for s in sessions
+                    s.get("sport") or s.get("sp") or "unknown" for s in sessions
                 )),
                 "total_duration_min": sum(
-                    s.get("total_duration_minutes") or s.get("duration_minutes", 0)
+                    s.get("total_duration_minutes") or s.get("duration_minutes") or s.get("dur_min") or s.get("dur") or 0
                     for s in sessions
                 ),
             })

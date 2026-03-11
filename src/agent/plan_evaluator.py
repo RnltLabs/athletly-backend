@@ -16,10 +16,13 @@ so every plan receives a real quality evaluation.
 """
 
 import json
+import logging
 from dataclasses import dataclass, field
 
 from src.agent.json_utils import extract_json
 from src.agent.llm import chat_completion
+
+logger = logging.getLogger(__name__)
 
 
 # Threshold for accepting a plan without regeneration
@@ -186,6 +189,122 @@ using the percentages shown above.
 """
 
 
+def extract_sessions_from_plan(plan: dict) -> list[dict]:
+    """Extract a flat list of sessions from any LLM-generated plan structure.
+
+    LLMs drift from the prescribed schema over multiple iterations, producing
+    varied top-level keys and nesting patterns.  This function handles all
+    observed variants:
+
+        1. plan["sessions"]          — canonical flat list
+        2. plan["days"] (list)       — list of day objects, each with nested sessions
+        3. plan["days"] (dict)       — day-name keyed dict with session lists
+        4. plan["plan"] (list)       — same as days but under "plan" key
+        5. plan["s"] (list)          — abbreviated sessions list
+        6. Deeply nested combos      — e.g. plan["days"][i]["s"], plan["plan"][i]["sessions"]
+
+    Returns a list of session dicts.  Each session is guaranteed to have at
+    least "sport" (or "sp") and "type" (or "t"/"ty") keys so callers can
+    format them for display.
+    """
+    # 1. Canonical: flat "sessions" list
+    sessions = plan.get("sessions", [])
+    if sessions and isinstance(sessions, list) and isinstance(sessions[0], dict):
+        return sessions
+
+    # Helper: extract sessions from a list of day/date objects
+    def _sessions_from_day_list(day_list: list) -> list[dict]:
+        result = []
+        for day_obj in day_list:
+            if not isinstance(day_obj, dict):
+                continue
+            # Day object might itself be a session (has "sport"/"sp")
+            if day_obj.get("sport") or day_obj.get("sp"):
+                result.append(day_obj)
+                continue
+            # Look for nested session lists under various keys
+            for key in ("sessions", "s"):
+                nested = day_obj.get(key, [])
+                if isinstance(nested, list):
+                    for s in nested:
+                        if isinstance(s, dict):
+                            # Inherit date/day from parent if missing
+                            enriched = {**s}
+                            if not enriched.get("day") and not enriched.get("d"):
+                                enriched.setdefault("day", day_obj.get("day", day_obj.get("d", day_obj.get("date", day_obj.get("dt", "?")))))
+                            if not enriched.get("date") and not enriched.get("dt"):
+                                enriched.setdefault("date", day_obj.get("date", day_obj.get("dt", "")))
+                            result.append(enriched)
+        return result
+
+    # 2-4. Try "days", "plan", "s" as list of day objects
+    for key in ("days", "plan", "s"):
+        candidate = plan.get(key)
+        if isinstance(candidate, list) and candidate:
+            extracted = _sessions_from_day_list(candidate)
+            if extracted:
+                return extracted
+
+    # 5. "days" as dict (day_name -> {sessions: [...]})
+    days_dict = plan.get("days")
+    if isinstance(days_dict, dict):
+        result = []
+        for day_name, day_data in days_dict.items():
+            if isinstance(day_data, dict):
+                for s in day_data.get("sessions", day_data.get("s", [])):
+                    if isinstance(s, dict):
+                        s_copy = {**s, "day": day_name}
+                        result.append(s_copy)
+        if result:
+            return result
+
+    # 6. Last resort: scan all list-valued top-level keys for session-like dicts
+    for key, value in plan.items():
+        if isinstance(value, list) and value and isinstance(value[0], dict):
+            if value[0].get("sport") or value[0].get("sp") or value[0].get("type") or value[0].get("t"):
+                return value
+
+    logger.warning(
+        "extract_sessions_from_plan found 0 sessions. Plan keys: %s",
+        list(plan.keys()),
+    )
+    return []
+
+
+def _format_session_line(s: dict) -> str:
+    """Format a single session dict into a human-readable evaluation line.
+
+    Handles both canonical and abbreviated key names.
+    """
+    day = s.get("day") or s.get("d") or s.get("date") or s.get("dt") or "?"
+    sport = s.get("sport") or s.get("sp") or s.get("s") or "?"
+    stype = s.get("type") or s.get("t") or s.get("ty") or "?"
+    dur = (
+        s.get("total_duration_minutes")
+        or s.get("duration_minutes")
+        or s.get("dur_min")
+        or s.get("dur")
+        or s.get("duration")
+        or "?"
+    )
+
+    targets = ""
+    steps = s.get("steps") or s.get("st") or []
+    if steps and isinstance(steps, list):
+        target_parts = []
+        for step in steps:
+            if isinstance(step, dict):
+                tgt = step.get("targets") or step.get("tg") or step.get("trg")
+                if tgt:
+                    target_parts.append(str(tgt))
+        if target_parts:
+            targets = f" | targets: {'; '.join(target_parts[:2])}"
+    elif s.get("targets"):
+        targets = f" | targets: {s['targets']}"
+
+    return f"  - {day}: {sport} {stype} ({dur}min){targets}"
+
+
 def _build_evaluation_prompt(
     plan: dict,
     profile: dict,
@@ -196,26 +315,9 @@ def _build_evaluation_prompt(
     goal = profile.get("goal", {})
     constraints = profile.get("constraints", {})
 
-    # Format plan sessions concisely
-    sessions = plan.get("sessions", [])
-    session_lines = []
-    for s in sessions:
-        targets = ""
-        if s.get("steps"):
-            target_parts = []
-            for step in s["steps"]:
-                if isinstance(step, dict) and step.get("targets"):
-                    target_parts.append(str(step["targets"]))
-            if target_parts:
-                targets = f" | targets: {'; '.join(target_parts[:2])}"
-        elif s.get("targets"):
-            targets = f" | targets: {s['targets']}"
-
-        dur = s.get("total_duration_minutes") or s.get("duration_minutes", "?")
-        session_lines.append(
-            f"  - {s.get('day', '?')}: {s.get('sport', '?')} {s.get('type', '?')} "
-            f"({dur}min){targets}"
-        )
+    # Extract sessions from any plan structure variant
+    sessions = extract_sessions_from_plan(plan)
+    session_lines = [_format_session_line(s) for s in sessions]
 
     # Format beliefs
     beliefs_text = ""
