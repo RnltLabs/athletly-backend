@@ -9,10 +9,52 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import logging
+
 from src.agent.llm import chat_completion
 from src.agent.json_utils import extract_json
 from src.agent.tools.registry import Tool, ToolRegistry
 from src.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+def _unwrap_plan(plan: dict) -> dict:
+    """Unwrap nested plan structures that LLMs sometimes produce.
+
+    Gemini occasionally wraps the actual plan in a `{"result": "```json ...```"}`
+    envelope. This function detects and unwraps such wrappers so downstream
+    code always receives a proper plan dict.
+    """
+    # Case 1: {"result": "<json string>"} wrapper
+    if list(plan.keys()) == ["result"] and isinstance(plan.get("result"), str):
+        raw = plan["result"]
+        try:
+            inner = extract_json(raw)
+            if isinstance(inner, dict):
+                logger.info("Unwrapped plan from 'result' string wrapper")
+                return _unwrap_plan(inner)  # recurse in case of double-wrap
+        except (ValueError, TypeError):
+            pass
+
+    # Case 2: Plan nested under a single top-level key like "plan" or "training_plan"
+    # but only if the inner value is a dict with session-like content
+    for wrapper_key in ("plan", "training_plan", "weekly_plan"):
+        inner = plan.get(wrapper_key)
+        if (
+            isinstance(inner, dict)
+            and len(plan) <= 3  # wrapper + maybe metadata keys
+            and any(k in inner for k in ("sessions", "days", "s", "plan"))
+        ):
+            logger.info("Unwrapped plan from '%s' dict wrapper", wrapper_key)
+            # Preserve any metadata keys from the outer wrapper
+            result = {**inner}
+            for k, v in plan.items():
+                if k != wrapper_key and k not in result:
+                    result[k] = v
+            return result
+
+    return plan
 
 
 def _build_recovery_planning_context(user_id: str | None) -> str | None:
@@ -202,6 +244,7 @@ def register_planning_tools(registry: ToolRegistry, user_model):
         )
 
         plan = extract_json(response.choices[0].message.content.strip())
+        plan = _unwrap_plan(plan)
         plan["_generated_at"] = datetime.now().isoformat()
         if macrocycle_week is not None:
             plan["_macrocycle_week"] = macrocycle_week

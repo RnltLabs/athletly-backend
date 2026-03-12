@@ -442,12 +442,19 @@ class AgentLoop:
             if not response.choices:
                 consecutive_errors += 1
                 logger.warning(
-                    "LLM returned empty choices (round %d, errors: %d), retrying...",
-                    round_num, consecutive_errors,
+                    "LLM returned empty choices (round %d, errors: %d, msgs: %d), retrying...",
+                    round_num, consecutive_errors, len(self._messages),
                 )
-                if consecutive_errors >= 3:
+
+                # Context may be too large — trim older tool results before retrying
+                if consecutive_errors == 2 and len(self._messages) > 20:
+                    self._compress_history()
+                    logger.info("Compressed history after empty choices (msgs now: %d)", len(self._messages))
+
+                if consecutive_errors >= 5:
                     result.response_text = "Es tut mir leid, ich habe gerade technische Schwierigkeiten. Bitte versuche es nochmal."
-                    return result
+                    break  # fall through to _save_turn below
+                time.sleep(0.3 * consecutive_errors)  # brief backoff
                 continue
 
             message = response.choices[0].message

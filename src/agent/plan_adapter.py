@@ -7,8 +7,27 @@ normalising values before persistence.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 VALID_DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 VALID_INTENSITIES = frozenset({"low", "moderate", "high"})
+
+
+def _unwrap_agent_plan(plan: dict) -> dict:
+    """Unwrap LLM wrapper structures before adapting to weekly format."""
+    # {"result": "<json string>"} wrapper
+    if list(plan.keys()) == ["result"] and isinstance(plan.get("result"), str):
+        from src.agent.json_utils import extract_json
+        try:
+            inner = extract_json(plan["result"])
+            if isinstance(inner, dict):
+                logger.info("plan_adapter: unwrapped 'result' string wrapper")
+                return _unwrap_agent_plan(inner)
+        except (ValueError, TypeError):
+            pass
+    return plan
 
 
 def adapt_plan_to_weekly_format(agent_plan: dict) -> dict:
@@ -31,6 +50,8 @@ def adapt_plan_to_weekly_format(agent_plan: dict) -> dict:
     Raises:
         ValueError: if a session is missing required fields or has invalid values.
     """
+    # Unwrap any {"result": "..."} wrappers from LLM drift
+    agent_plan = _unwrap_agent_plan(agent_plan)
     raw_days = _extract_days(agent_plan)
     result: dict = {}
 

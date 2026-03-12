@@ -233,7 +233,7 @@ async def _lookup_push_token(user_id: str) -> str | None:
             return result.data.get("token")
         return None
     except Exception as exc:
-        logger.error("Failed to look up push token for user %s: %s", user_id, exc)
+        logger.info("Failed to look up push token for user %s: %s", user_id, exc)
         return None
 
 

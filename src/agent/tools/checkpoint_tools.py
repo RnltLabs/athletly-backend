@@ -18,6 +18,13 @@ from src.agent.tools.registry import Tool, ToolRegistry
 def register_checkpoint_tools(registry: ToolRegistry, user_model=None) -> None:
     """Register checkpoint/replanning tools into the registry."""
 
+    def _resolve_user_id() -> str:
+        """Resolve user_id from user_model (multi-tenant API) or settings (CLI)."""
+        if user_model and hasattr(user_model, "user_id") and user_model.user_id:
+            return user_model.user_id
+        from src.config import get_settings
+        return get_settings().agenticsports_user_id
+
     def propose_plan_change(
         action_type: str,
         description: str,
@@ -29,11 +36,9 @@ def register_checkpoint_tools(registry: ToolRegistry, user_model=None) -> None:
         HARD checkpoint: blocks until user confirms (e.g., major plan restructure)
         SOFT checkpoint: proceeds after timeout (e.g., minor schedule adjustment)
         """
-        from src.config import get_settings
         from src.db.pending_actions_db import create_pending_action
 
-        settings = get_settings()
-        user_id = settings.agenticsports_user_id
+        user_id = _resolve_user_id()
         if not user_id:
             return {"status": "error", "message": "No user_id configured."}
 
@@ -104,14 +109,12 @@ def register_checkpoint_tools(registry: ToolRegistry, user_model=None) -> None:
 
     def get_pending_confirmations() -> dict:
         """Get the status of pending and recently resolved actions."""
-        from src.config import get_settings
         from src.db.pending_actions_db import (
             get_pending_for_user,
             get_recently_resolved,
         )
 
-        settings = get_settings()
-        user_id = settings.agenticsports_user_id
+        user_id = _resolve_user_id()
         if not user_id:
             return {"status": "error", "message": "No user_id configured."}
 

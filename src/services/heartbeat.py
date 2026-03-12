@@ -365,7 +365,7 @@ async def _check_triggers_for_user(user_id: str) -> list[dict]:
 
 
 async def _fetch_last_interaction(user_id: str) -> str | None:
-    """Query the sessions table for the user's most recent ``updated_at``.
+    """Query the sessions table for the user's most recent ``last_active``.
 
     Returns an ISO timestamp string, or ``None`` if no sessions exist.
     """
@@ -375,16 +375,16 @@ async def _fetch_last_interaction(user_id: str) -> str | None:
         client = await get_async_supabase()
         result = await (
             client.table("sessions")
-            .select("updated_at")
+            .select("last_active")
             .eq("user_id", user_id)
-            .order("updated_at", desc=True)
+            .order("last_active", desc=True)
             .limit(1)
             .execute()
         )
 
         rows: list[dict] = result.data or []
-        if rows and rows[0].get("updated_at"):
-            return str(rows[0]["updated_at"])
+        if rows and rows[0].get("last_active"):
+            return str(rows[0]["last_active"])
         return None
     except Exception as exc:
         logger.error("Failed to fetch last interaction for user %s: %s", user_id, exc)

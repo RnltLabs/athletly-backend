@@ -113,6 +113,31 @@ def evaluate_plan(
     Returns:
         PlanEvaluation with score, criteria, issues, and suggestions.
     """
+    # Unwrap malformed plan structures before evaluation
+    plan = _unwrap_plan_for_eval(plan)
+
+    # Pre-check: if no sessions can be extracted, return early with actionable feedback
+    sessions = extract_sessions_from_plan(plan)
+    if not sessions:
+        logger.warning(
+            "evaluate_plan: no sessions found in plan (keys: %s). "
+            "Returning structural failure score.",
+            list(plan.keys()),
+        )
+        return PlanEvaluation(
+            score=20,
+            criteria_scores={},
+            issues=[
+                "Plan structure is malformed — no sessions could be extracted. "
+                f"Plan keys found: {list(plan.keys())}. "
+                "Regenerate with the standard schema: {\"sessions\": [...]}."
+            ],
+            suggestions=[
+                "Use the canonical plan format with a top-level 'sessions' array.",
+                "Each session needs: day, date, sport, type, total_duration_minutes, steps.",
+            ],
+        )
+
     from src.db.agent_config_db import get_eval_criteria
 
     try:
@@ -132,14 +157,70 @@ def evaluate_plan(
     )
 
     text = response.choices[0].message.content.strip()
-    result = extract_json(text)
+    try:
+        result = extract_json(text)
+    except ValueError:
+        logger.warning("evaluate_plan: could not parse evaluator response")
+        return PlanEvaluation(
+            score=50,
+            criteria_scores={},
+            issues=["Evaluation response was malformed — could not parse scores."],
+            suggestions=["Try saving the plan as-is or regenerate."],
+        )
+
+    score = result.get("overall_score", 0)
+
+    # Guard against all-zero scores (indicates evaluator couldn't parse the plan)
+    all_criteria_zero = (
+        result.get("criteria")
+        and isinstance(result["criteria"], dict)
+        and all(v == 0 for v in result["criteria"].values())
+    )
+    if score == 0 and all_criteria_zero:
+        logger.warning("evaluate_plan: evaluator returned all-zero scores, likely structural issue")
+        return PlanEvaluation(
+            score=30,
+            criteria_scores=result.get("criteria", {}),
+            issues=[
+                "Evaluator could not parse the plan structure (all scores = 0). "
+                "Regenerate with the standard 'sessions' array format."
+            ],
+            suggestions=["Use create_training_plan with focus parameter to regenerate."],
+        )
 
     return PlanEvaluation(
-        score=result.get("overall_score", 0),
+        score=score,
         criteria_scores=result.get("criteria", {}),
         issues=result.get("issues", []),
         suggestions=result.get("suggestions", []),
     )
+
+
+def _unwrap_plan_for_eval(plan: dict) -> dict:
+    """Unwrap nested plan wrappers before evaluation.
+
+    Handles LLM drift patterns like {"result": "```json ...```"}.
+    """
+    # Unwrap {"result": "<json string>"} wrappers
+    if list(plan.keys()) == ["result"] and isinstance(plan.get("result"), str):
+        try:
+            inner = extract_json(plan["result"])
+            if isinstance(inner, dict):
+                logger.info("evaluate_plan: unwrapped 'result' string wrapper")
+                return _unwrap_plan_for_eval(inner)
+        except (ValueError, TypeError):
+            pass
+
+    # Unwrap {"plan": {...}} wrappers
+    for wrapper_key in ("plan", "training_plan", "weekly_plan"):
+        inner = plan.get(wrapper_key)
+        if isinstance(inner, dict) and any(
+            k in inner for k in ("sessions", "days", "s")
+        ):
+            logger.info("evaluate_plan: unwrapped '%s' dict wrapper", wrapper_key)
+            return inner
+
+    return plan
 
 
 def _build_dynamic_system_prompt(criteria: list[dict]) -> str:
@@ -202,11 +283,15 @@ def extract_sessions_from_plan(plan: dict) -> list[dict]:
         4. plan["plan"] (list)       — same as days but under "plan" key
         5. plan["s"] (list)          — abbreviated sessions list
         6. Deeply nested combos      — e.g. plan["days"][i]["s"], plan["plan"][i]["sessions"]
+        7. {"result": "json string"} — LLM wrapper with embedded JSON
 
     Returns a list of session dicts.  Each session is guaranteed to have at
     least "sport" (or "sp") and "type" (or "t"/"ty") keys so callers can
     format them for display.
     """
+    # 0. Unwrap {"result": "<json string>"} wrappers first
+    plan = _unwrap_plan_for_eval(plan)
+
     # 1. Canonical: flat "sessions" list
     sessions = plan.get("sessions", [])
     if sessions and isinstance(sessions, list) and isinstance(sessions[0], dict):
