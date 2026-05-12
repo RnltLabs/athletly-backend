@@ -47,25 +47,52 @@ def chat_completion(
         litellm.ModelResponse (OpenAI-compatible response object).
     """
     resolved_model = model or MODEL
+    is_anthropic = "anthropic" in resolved_model or "claude" in resolved_model
 
-    # Build final message list
+    # Build final message list. For Anthropic, wrap the system prompt in a
+    # content-blocks structure carrying cache_control so the (large) static
+    # coaching prompt is cached for 5 minutes. This cuts token cost ~90%
+    # and excludes cached input tokens from the per-minute rate limit.
     final_messages = list(messages)
     if system_prompt:
-        final_messages = [{"role": "system", "content": system_prompt}] + final_messages
+        if is_anthropic:
+            final_messages = [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": system_prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            ] + final_messages
+        else:
+            final_messages = [
+                {"role": "system", "content": system_prompt}
+            ] + final_messages
 
     kwargs: dict = {
         "model": resolved_model,
         "messages": final_messages,
         "temperature": temperature,
-        "drop_params": True,  # Provider compatibility -- drop unsupported params
+        "drop_params": True,
     }
 
     if tools:
-        kwargs["tools"] = tools
+        # For Anthropic, mark the last tool with cache_control so the whole
+        # tools block is cached (tools always come right after system).
+        if is_anthropic and tools:
+            cached_tools = [dict(t) for t in tools]
+            cached_tools[-1] = {
+                **cached_tools[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
+            kwargs["tools"] = cached_tools
+        else:
+            kwargs["tools"] = tools
 
-    # Gemini 2.5 "thinking" models need an explicit thinking budget
-    # when tools + large system prompts are combined, otherwise they
-    # return empty responses with zero completion tokens.
     if "gemini-2.5" in resolved_model:
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
 

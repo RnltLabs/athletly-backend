@@ -205,7 +205,7 @@ class TestGarminAuthenticate:
         mock_garmin.get_full_name.return_value = DISPLAY_NAME
 
         with (
-            patch("src.services.garmin_sync.store_token") as mock_store,
+            patch("src.services.providers.garmin.store_token") as mock_store,
             patch.dict("sys.modules", {"garminconnect": MagicMock(Garmin=MagicMock(return_value=mock_garmin))}),
         ):
             result = GarminSyncService.authenticate(USER_ID, GARMIN_EMAIL, GARMIN_PASSWORD)
@@ -254,11 +254,11 @@ class TestGarminSyncActivities:
 
         with (
             patch(
-                "src.services.garmin_sync.GarminSyncService._restore_session",
+                "src.services.providers.garmin.GarminProvider._restore_session",
                 return_value=(mock_garmin, _token_row()),
             ),
             patch("src.db.client.get_supabase", return_value=mock_supabase),
-            patch("src.services.garmin_sync.update_last_sync"),
+            patch("src.services.providers.garmin.update_last_sync"),
         ):
             result = GarminSyncService.sync_activities(USER_ID, days=7)
 
@@ -280,11 +280,11 @@ class TestGarminSyncActivities:
 
         with (
             patch(
-                "src.services.garmin_sync.GarminSyncService._restore_session",
+                "src.services.providers.garmin.GarminProvider._restore_session",
                 return_value=(mock_garmin, _token_row()),
             ),
             patch("src.db.client.get_supabase", return_value=mock_supabase),
-            patch("src.services.garmin_sync.update_last_sync"),
+            patch("src.services.providers.garmin.update_last_sync"),
         ):
             result = GarminSyncService.sync_activities(USER_ID)
 
@@ -296,7 +296,7 @@ class TestGarminSyncActivities:
         from src.services.garmin_sync import GarminSyncService
 
         with patch(
-            "src.services.garmin_sync.GarminSyncService._restore_session",
+            "src.services.providers.garmin.GarminProvider._restore_session",
             side_effect=ValueError("Garmin session expired: token invalid"),
         ):
             result = GarminSyncService.sync_activities(USER_ID)
@@ -327,11 +327,11 @@ class TestGarminSyncDailyStats:
 
         with (
             patch(
-                "src.services.garmin_sync.GarminSyncService._restore_session",
+                "src.services.providers.garmin.GarminProvider._restore_session",
                 return_value=(mock_garmin, _token_row()),
             ),
             patch("src.db.client.get_supabase", return_value=mock_supabase),
-            patch("src.services.garmin_sync.update_last_sync"),
+            patch("src.services.providers.garmin.update_last_sync"),
         ):
             result = GarminSyncService.sync_daily_stats(USER_ID, days=3)
 
@@ -344,7 +344,7 @@ class TestGarminSyncDailyStats:
         from src.services.garmin_sync import GarminSyncService
 
         with patch(
-            "src.services.garmin_sync.GarminSyncService._restore_session",
+            "src.services.providers.garmin.GarminProvider._restore_session",
             side_effect=ValueError("No Garmin connection found"),
         ):
             result = GarminSyncService.sync_daily_stats(USER_ID)
@@ -370,7 +370,7 @@ class TestGarminCheckConnection:
         token_row["provider_user_id"] = DISPLAY_NAME
 
         with patch(
-            "src.services.garmin_sync.GarminSyncService._restore_session",
+            "src.services.providers.garmin.GarminProvider._restore_session",
             return_value=(MagicMock(), token_row),
         ):
             result = GarminSyncService.check_connection(USER_ID)
@@ -385,7 +385,7 @@ class TestGarminCheckConnection:
         from src.services.garmin_sync import GarminSyncService
 
         with patch(
-            "src.services.garmin_sync.GarminSyncService._restore_session",
+            "src.services.providers.garmin.GarminProvider._restore_session",
             side_effect=ValueError("No Garmin connection found"),
         ):
             result = GarminSyncService.check_connection(USER_ID)

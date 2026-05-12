@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # -- Garmin sync ----------------------------------------------------------
     garmin_sync_cooldown_seconds: int = 900  # 15 min between syncs
 
+    # -- Strava OAuth app -----------------------------------------------------
+    strava_client_id: str = ""
+    strava_client_secret: str = ""
+    strava_test_access_token: str = ""   # bootstrap; consumed by `athctl init`
+    strava_test_refresh_token: str = ""  # bootstrap; consumed by `athctl init`
+
     # -- Tool output budget (tokens) ------------------------------------------
     tool_output_budget_default: int = 2000
 

@@ -361,15 +361,23 @@ class UserModel:
     def embed_belief(self, belief: dict) -> list[float] | None:
         """Generate embedding vector via Gemini Embedding API and store in belief.
 
-        Returns the embedding vector or None if the API call fails.
+        Returns the embedding vector or None if the API call fails / is disabled.
+        Embeddings are optional - belief storage and dedup work without them.
+        Set ATHLETLY_EMBEDDINGS_DISABLED=1 to skip entirely (e.g. when the
+        Gemini key is unavailable).
         """
+        import os
+
+        if os.environ.get("ATHLETLY_EMBEDDINGS_DISABLED") == "1":
+            return None
+        if not os.environ.get("GEMINI_API_KEY"):
+            return None
         try:
             client = get_client()
             response = client.models.embed_content(
                 model=EMBEDDING_MODEL,
                 contents=belief["text"],
             )
-            # The API returns embeddings as a list or nested structure
             embedding = response.embeddings[0].values
             belief["embedding"] = list(embedding)
             return belief["embedding"]
@@ -386,10 +394,21 @@ class UserModel:
         Returns list of (belief, similarity_score) tuples sorted by similarity descending.
         Falls back to returning all active beliefs if < 10 beliefs exist (Mem0 fallback pattern).
         """
+        import os
+
         active = self.get_active_beliefs()
 
         # Fallback: if few beliefs, return all (no need for embedding search)
         if len(active) < 10:
+            return [(b, 1.0) for b in active]
+
+        # Embeddings can be disabled via env or missing Gemini key. In that
+        # case fall back to returning all active beliefs - the caller gets
+        # the same set, just without similarity ranking.
+        if (
+            os.environ.get("ATHLETLY_EMBEDDINGS_DISABLED") == "1"
+            or not os.environ.get("GEMINI_API_KEY")
+        ):
             return [(b, 1.0) for b in active]
 
         # Embed candidate

@@ -38,6 +38,9 @@ TODO-*.md
 tests/*.json
 tests/*.md
 
+# Agent trace files (additive JSONL traces written by AgentLoop)
+logs/
+
 # IDE
 .vscode/
 .idea/

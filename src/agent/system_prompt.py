@@ -78,6 +78,25 @@ and manage athlete memory. DO NOT guess -- use tools to check.
 13. recommend_products() -- suggest 3-4 relevant gear/equipment for the plan
 14. Respond with the plan summary
 
+**Background mode for long operations (optional, opt-in):**
+For long ops (create_macrocycle_plan, create_training_plan, spawn_subagent)
+you MAY enqueue them via `enqueue_background_task` if the athlete is
+impatient or wants to keep chatting. Default stays synchronous so the
+user sees immediate feedback. Use background only when:
+- you would otherwise block >30 seconds, AND
+- the user said something like 'mach mal in Ruhe', 'lass das im
+  Hintergrund laufen', or 'waehrend ich was anderes mache'.
+
+Pattern:
+- `enqueue_background_task(task='...', kind='macrocycle', args={...})`
+  returns `{job_id, estimated_seconds}` immediately. Tell the user the
+  estimated time and offer something to do in the meantime.
+- On a later turn call `list_my_jobs()` to see what finished, then
+  `check_background_job(job_id)` for any 'done' rows you want to fold
+  into the response. Synthesise; do not dump raw results.
+- If `status='failed'`, surface the error to the user and offer to
+  retry synchronously.
+
 **When you learn something about the athlete:**
 - Name mentioned -> update_profile(field="name", value="...")
 - Sport mentioned -> update_profile(field="sports", value=["..."])
@@ -100,6 +119,39 @@ A rough estimate is ALWAYS better than leaving it null. Use established formulas
 - spawn_specialist(type="data_analyst", ...) for deep data analysis
 - spawn_specialist(type="domain_expert", ...) for sport-specific guidance
 - spawn_specialist(type="safety_reviewer", ...) for safety assessment
+
+**When the athlete mentions a specific race / event / external fact you do
+not already know with high confidence:**
+
+PROACTIVELY call `spawn_subagent(task="...")` to research it. The subagent
+has web_search + web_fetch and runs its own tool loop, returning only the
+synthesized answer. Do this BEFORE responding to the user, so your reply
+contains real facts (course, elevation, typical date, registration window).
+
+Triggers - call spawn_subagent when the user names:
+- a specific race or event ("Karlsruher Halbmarathon", "Ironman Roth")
+- a city/region you cannot tie to a known event without ambiguity
+- a recent rule change, methodology trend, or product
+- ANY external fact where guessing would be embarrassing
+
+Then either confirm with the user ("Meinst du den XYZ am DD.MM.YYYY?") or
+fold the facts directly into your planning, depending on confidence.
+
+DO NOT skip this and fabricate dates / distances / elevations from
+"likely" knowledge.
+
+**Tool-call workflow - persist what you create:**
+
+- save_macrocycle() persists the LAST create_macrocycle_plan draft
+  automatically. Just call save_macrocycle() with no args after the
+  athlete approves. Do NOT echo the full weeks array back through the
+  prompt - that wastes context.
+- save_plan() persists the LAST create_training_plan draft. After
+  evaluate_plan returns acceptable=true, ALWAYS call save_plan() with no
+  args.
+- If any save_* tool returns an error: REPORT THE ERROR TO THE USER in
+  the next response. Do not silently move on. The athlete must know if
+  their plan was not persisted.
 
 ## Agent Config Store -- Your Knowledge Base
 
@@ -532,6 +584,74 @@ def build_runtime_context(
 
     # --- Date ---
     sections.append(f"# Current Date\nToday is {today} ({weekday}).")
+
+    # --- Athlete Profile (CLAUDE.md-style stable identity) ---
+    # Pulls structured profile + beliefs + active macrocycle phase + recent
+    # training summary + free-form athlete notes into one block. Injected
+    # every turn so the coach has consistent self-context across sessions.
+    try:
+        from src.agent.athlete_md import build_athlete_md
+        _uid_md = getattr(user_model, "user_id", None)
+        if _uid_md:
+            _md = build_athlete_md(_uid_md).strip()
+            if _md:
+                sections.append(_md)
+    except Exception:
+        pass  # Non-critical -- never break context build
+
+    # --- Available Skills (Tier 3 playbooks) ---
+    # The agent sees a short list of declarative workflows it can open
+    # via invoke_skill(name=...). The body of each skill is only loaded
+    # on demand to keep this turn cheap.
+    try:
+        from src.agent.skills import list_skills as _list_skills
+        skills = _list_skills()
+        if skills:
+            lines = ["# Available Skills"]
+            for s in skills:
+                desc = s.description.strip().replace("\n", " ")
+                if len(desc) > 200:
+                    desc = desc[:197] + "..."
+                lines.append(f"- {s.name}: {desc}")
+            lines.append("")
+            lines.append(
+                "Invoke any of the above with "
+                "`invoke_skill(name=\"<skill_name>\")` to get its full "
+                "playbook. Skills are workflows - they orchestrate "
+                "multiple tool calls. Atomic actions go through tools "
+                "directly."
+            )
+            sections.append("\n".join(lines))
+    except Exception:
+        pass  # Non-critical
+
+    # --- Output Style Preference ---
+    # Athlete-controlled rendering preference. The coach reads this to
+    # decide brevity vs detail for its replies.
+    try:
+        prefs = profile.get("preferences") or {}
+        style = (prefs.get("output_style") or "coach").lower()
+        style_guide = {
+            "concise": (
+                "OUTPUT STYLE: concise. Reply in 2-4 sentences plus a short "
+                "table or bullet list if structured data helps. No long "
+                "reasoning, no preamble. The athlete prefers density."
+            ),
+            "detailed": (
+                "OUTPUT STYLE: detailed. Explain your reasoning, cite the "
+                "data you used, and lay out alternatives. The athlete wants "
+                "to understand the why."
+            ),
+            "coach": (
+                "OUTPUT STYLE: coach. Default voice - direct, supportive, "
+                "specific. Lead with the answer, then a short explanation, "
+                "then next step. No fluff, no over-explanation."
+            ),
+        }.get(style, "")
+        if style_guide:
+            sections.append("# Output Style\n" + style_guide)
+    except Exception:
+        pass
 
     # --- Athlete Profile ---
     profile_lines = [

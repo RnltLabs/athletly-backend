@@ -1,0 +1,27 @@
+[project]
+name = "athctl"
+version = "0.1.0"
+description = "Test-harness CLI for the Athletly backend (Garmin/Strava providers, chat, snapshots)."
+requires-python = ">=3.12"
+authors = [
+    { name = "Roman Reinelt" },
+]
+dependencies = [
+    "click>=8.1",
+    "rich>=13",
+    "python-dotenv>=1",
+    # The CLI imports modules from the Athletly backend (src.services.providers,
+    # src.db.client, src.config). When installed editable from the backend repo
+    # those imports resolve naturally because the backend's pyproject.toml
+    # exposes the `src` package. We therefore do NOT redeclare them here.
+]
+
+[project.scripts]
+athctl = "athctl.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["athctl"]

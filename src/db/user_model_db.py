@@ -567,9 +567,19 @@ class UserModelDB:
         """Generate a 768-dimension embedding via Gemini Embedding API.
 
         Returns a plain list of floats suitable for pgvector, or ``None``
-        on failure (non-fatal -- the belief is still stored without an
-        embedding).
+        on failure / when disabled. Belief storage is non-blocking: a
+        belief without an embedding still works for exact-text dedup and
+        manual retrieval, only similarity ranking degrades.
+
+        Disable explicitly with ``ATHLETLY_EMBEDDINGS_DISABLED=1`` or
+        implicitly by not setting ``GEMINI_API_KEY``.
         """
+        import os
+
+        if os.environ.get("ATHLETLY_EMBEDDINGS_DISABLED") == "1":
+            return None
+        if not os.environ.get("GEMINI_API_KEY"):
+            return None
         try:
             from src.agent.llm import get_client
 

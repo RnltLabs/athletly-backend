@@ -248,17 +248,65 @@ def register_planning_tools(registry: ToolRegistry, user_model):
         plan["_generated_at"] = datetime.now().isoformat()
         if macrocycle_week is not None:
             plan["_macrocycle_week"] = macrocycle_week
+
+        # Cache the draft so save_plan() can save without the agent
+        # re-echoing the full plan dict through context.
+        try:
+            user_model.meta = {**user_model.meta, "_last_plan_draft": plan}
+            user_model.save()
+        except Exception as exc:
+            logger.debug("Failed to cache plan draft: %s", exc)
+
         return plan
 
     registry.register(Tool(
         name="create_training_plan",
         description=(
-            "Generate a structured weekly training plan based on athlete profile, "
-            "goals, and recent training data. The plan includes specific sessions "
-            "with sport, type, duration, and intensity targets. "
-            "Optionally pass focus (e.g., 'base building') or feedback from "
-            "a previous evaluation to improve the plan. "
-            "IMPORTANT: After creating a plan, ALWAYS use evaluate_plan to check quality."
+            "Generate a structured weekly training plan via a specialized coach "
+            "sub-agent. Pulls in the athlete profile, active beliefs, last 50 "
+            "activities, relevant past episodes, current recovery status from "
+            "health data, and (if specified) the matching macrocycle week, then "
+            "calls an LLM with the coach persona to produce a JSON plan of "
+            "concrete sessions (sport, type, duration, intensity targets).\n\n"
+            "WHEN TO USE:\n"
+            "- Athlete asks for next week's plan, a new training week, or 'what "
+            "should I do this week?'.\n"
+            "- An existing plan was rejected by evaluate_plan and you have feedback "
+            "to address - pass the feedback string here for the regenerated plan.\n"
+            "- Athlete circumstances changed mid-cycle (injury, schedule change, "
+            "race added) and the old plan is no longer fit for purpose.\n"
+            "- After save_macrocycle: generate the first weekly plan grounded in "
+            "the new multi-week structure by passing macrocycle_week=1.\n\n"
+            "WHEN NOT TO USE:\n"
+            "- Athlete wants the BIG picture (multiple weeks, race build, season "
+            "structure): use create_macrocycle_plan instead.\n"
+            "- Athlete wants tweaks to a specific session, not a fresh weekly plan: "
+            "use the session-level adjust tools, not a full regen.\n"
+            "- You just want to see the current plan: use get_current_plan.\n\n"
+            "WORKFLOW (this is the canonical sequence, do not skip steps):\n"
+            "  1. create_training_plan(...) - returns plan dict.\n"
+            "  2. evaluate_plan(plan) - returns score, acceptable, issues, suggestions.\n"
+            "  3. If acceptable=true (score >= 70): save_plan() with no args (uses "
+            "cached draft).\n"
+            "  4. If not acceptable: create_training_plan(feedback=<issues>) and "
+            "loop. Max 2 retries before surfacing the issues to the athlete.\n\n"
+            "EXAMPLES:\n"
+            "- create_training_plan() - baseline week from profile + recent data.\n"
+            "- create_training_plan(focus='base building, low intensity') for an "
+            "intentional base block.\n"
+            "- create_training_plan(focus='taper week', macrocycle_week=15) when "
+            "week 15 of the active macrocycle is a taper.\n"
+            "- create_training_plan(feedback='Too many hard days back-to-back, "
+            "missing recovery between intervals') after evaluate_plan flagged it.\n"
+            "- create_training_plan(sport_distribution={'running': 3, 'cycling': 2, "
+            "'swimming': 1}) for an explicit multi-sport split.\n\n"
+            "SIDE EFFECT: the generated plan is cached in user_model.meta as "
+            "'_last_plan_draft' so that save_plan() called with no arguments will "
+            "persist it. Do not echo the full plan dict back through context - call "
+            "save_plan() to commit.\n\n"
+            "IMPORTANT: This tool only DRAFTS. Nothing is saved until save_plan() is "
+            "called. Always call evaluate_plan after creation; never save an "
+            "unevaluated plan."
         ),
         handler=create_training_plan,
         parameters={
@@ -317,10 +365,39 @@ def register_planning_tools(registry: ToolRegistry, user_model):
     registry.register(Tool(
         name="evaluate_plan",
         description=(
-            "Have a training plan independently reviewed by a sports science persona. "
-            "Returns a quality score (0-100), specific issues found, and improvement "
-            "suggestions. Use this AFTER create_training_plan. If score < 70, "
-            "regenerate the plan with the feedback."
+            "Have a training plan independently reviewed by a separate evaluator "
+            "persona, scored against the athlete's agent-defined eval criteria "
+            "(see define_eval_criteria). Returns a numeric score (0-100), an "
+            "acceptable boolean, per-criterion sub-scores, a list of issues, and "
+            "concrete suggestions to improve.\n\n"
+            "WHEN TO USE:\n"
+            "- IMMEDIATELY after every successful create_training_plan call. This "
+            "is non-optional in the create -> evaluate -> save loop.\n"
+            "- When the athlete asks 'is this plan good?' about an existing plan "
+            "you have in hand - pass the plan dict directly.\n"
+            "- Before save_plan: a plan must pass evaluation (acceptable=true) "
+            "before persistence.\n\n"
+            "WHEN NOT TO USE:\n"
+            "- For evaluating a single session in isolation (the criteria are "
+            "plan-level: balance, progression, recovery distribution).\n"
+            "- To re-run on a plan you already evaluated and accepted - the result "
+            "is deterministic enough that re-evaluation wastes tokens.\n\n"
+            "DECISION RULES:\n"
+            "- acceptable=true AND score >= 70 -> call save_plan() immediately.\n"
+            "- acceptable=false OR score < 70 -> regenerate with "
+            "create_training_plan(feedback=<concatenate issues + suggestions>). "
+            "Max 2 retry loops, then surface the remaining issues to the athlete.\n\n"
+            "DEFAULT BEHAVIOR: if no eval_criteria are defined for the user, the "
+            "plan is auto-accepted with score=100. The agent is expected to "
+            "define_eval_criteria during onboarding or first-plan-creation so "
+            "evaluation has teeth.\n\n"
+            "EXAMPLE:\n"
+            "  draft = create_training_plan(focus='build phase')\n"
+            "  eval = evaluate_plan(plan=draft)\n"
+            "  if eval['acceptable']: save_plan()\n"
+            "  else: create_training_plan(feedback=' '.join(eval['issues']))\n\n"
+            "Returns {score, acceptable, criteria (dict of per-criterion scores), "
+            "issues (list of strings), suggestions (list of strings)}."
         ),
         handler=evaluate_plan,
         parameters={
@@ -336,8 +413,26 @@ def register_planning_tools(registry: ToolRegistry, user_model):
         category="planning",
     ))
 
-    def save_plan(plan: dict) -> dict:
-        """Save a training plan."""
+    def save_plan(plan: dict | None = None) -> dict:
+        """Save a training plan.
+
+        If *plan* is omitted, uses the cached draft from the most recent
+        ``create_training_plan`` call. This lets the agent persist a plan
+        with a single ``save_plan()`` call after evaluation passes,
+        without re-echoing the whole plan through context.
+        """
+        if plan is None or not isinstance(plan, dict) or not plan:
+            plan = (user_model.meta or {}).get("_last_plan_draft")
+            if not plan:
+                return {
+                    "error": (
+                        "No plan provided and no draft is cached. Call "
+                        "create_training_plan first, then save_plan() to "
+                        "persist the draft."
+                    )
+                }
+            # Use a copy so popping _evaluation does not mutate cache.
+            plan = dict(plan)
         if _settings.use_supabase:
             from src.db import store_plan
             evaluation = plan.pop("_evaluation", None)
@@ -359,8 +454,35 @@ def register_planning_tools(registry: ToolRegistry, user_model):
     registry.register(Tool(
         name="save_plan",
         description=(
-            "Save a finalized training plan to disk. Only use this AFTER the plan "
-            "has passed evaluation (score >= 70). Returns the file path."
+            "Persist the current training plan draft as the new active plan. "
+            "Archives any previously active plan automatically. This is the "
+            "commit step in the create -> evaluate -> save workflow.\n\n"
+            "WHEN TO USE:\n"
+            "- IMMEDIATELY after evaluate_plan returns acceptable=true. Do not "
+            "wait for further user confirmation unless the user explicitly asked "
+            "to review first.\n"
+            "- After regeneration loop converges on an acceptable plan.\n\n"
+            "WHEN NOT TO USE:\n"
+            "- Before evaluate_plan has run and returned acceptable=true. Saving "
+            "an unevaluated plan bypasses quality control - do not do it.\n"
+            "- If the athlete is still editing the plan in conversation: wait for "
+            "them to confirm before saving.\n"
+            "- To save a plan from many turns ago: it is no longer the cached "
+            "draft and the agent would need to pass it explicitly.\n\n"
+            "CALLING CONVENTION (CRITICAL - read this):\n"
+            "- save_plan() with NO arguments: persists the most recent draft "
+            "cached by create_training_plan in user_model.meta. This is the "
+            "preferred form - it costs ZERO context tokens because you do not "
+            "have to echo the whole plan dict back.\n"
+            "- save_plan(plan=<dict>): persists the provided plan, overriding "
+            "the cache. Only use this if you genuinely need to save a different "
+            "plan (e.g., one passed in from elsewhere) - normally avoid.\n\n"
+            "If no plan is provided AND no draft is cached, returns "
+            "{'error': '...'}. Diagnose: call create_training_plan first.\n\n"
+            "EXAMPLE FLOW:\n"
+            "  create_training_plan(focus='base') -> {plan dict, cached}\n"
+            "  evaluate_plan(plan=<from step 1>) -> {acceptable: true, score: 82}\n"
+            "  save_plan() -> {saved: true, id: '...'} - draft committed from cache."
         ),
         handler=save_plan,
         parameters={
@@ -368,10 +490,13 @@ def register_planning_tools(registry: ToolRegistry, user_model):
             "properties": {
                 "plan": {
                     "type": "object",
-                    "description": "The finalized training plan to save",
+                    "description": (
+                        "OPTIONAL - explicit plan dict. Omit to use the "
+                        "cached draft from the last create_training_plan."
+                    ),
+                    "nullable": True,
                 },
             },
-            "required": ["plan"],
         },
         category="planning",
     ))

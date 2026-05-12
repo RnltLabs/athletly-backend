@@ -31,6 +31,7 @@ dependencies = [
     "httpx>=0.27",
     # -- Garmin sync (interim, unofficial API via Garth OAuth) -----------------
     "garminconnect>=0.2",
+    "anthropic>=0.101.0",
 ]
 
 [build-system]

@@ -127,6 +127,10 @@ def create_app() -> FastAPI:
     from src.api.routers.onboarding import router as onboarding_router
     app.include_router(onboarding_router, prefix="/api/onboarding", tags=["onboarding"])
 
+    # Push token registration — mobile app upserts its Expo push token here.
+    from src.api.routers.push import router as push_router
+    app.include_router(push_router, prefix="/push", tags=["push"])
+
     # -- Health endpoint ------------------------------------------------------
 
     @app.get("/health", tags=["meta"])

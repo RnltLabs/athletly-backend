@@ -23,18 +23,28 @@ Gaps addressed:
 import asyncio
 import json
 import logging
+import os
 import queue
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
+from src.agent.hooks import (
+    HookContext,
+    install_builtin_hooks,
+    run_post_hooks,
+    run_pre_hooks,
+)
 from src.agent.llm import MODEL, chat_completion
 from src.agent.tools.registry import ToolRegistry, get_default_tools, get_restricted_tools
 from src.agent.tools.truncation import execute_with_budget
 from src.agent.system_prompt import STATIC_SYSTEM_PROMPT, build_runtime_context
 from src.config import get_settings
+
+# Register built-in hooks once at module import.
+install_builtin_hooks()
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +59,10 @@ TOOL_CALL_SUMMARY_THRESHOLD = 8  # Inject summary reminder after N consecutive t
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 SESSIONS_DIR = DATA_DIR / "sessions"
+
+# JSONL trace files (additive to Supabase / JSONL session storage).
+# Used by athctl trace tail/replay/diff.
+TRACES_DIR = Path(__file__).parent.parent.parent / "logs" / "traces"
 
 
 # -- Types -------------------------------------------------------------------
@@ -164,6 +178,7 @@ class AgentLoop:
         startup_context: str | None = None,
         context: str = "coach",
         max_rounds: int | None = None,
+        trace_to_file: bool = False,
     ):
         self.user_model = user_model
         self.tools = tool_registry or get_default_tools(user_model, context=context)
@@ -171,6 +186,12 @@ class AgentLoop:
         self.startup_context = startup_context
         self.context = context
         self._max_rounds = max_rounds or MAX_TOOL_ROUNDS
+
+        # JSONL trace appender (additive to existing session persistence).
+        # Enabled via constructor flag OR env var ATHLETLY_TRACE_AGENT=1.
+        self._trace_to_file = trace_to_file or (
+            os.environ.get("ATHLETLY_TRACE_AGENT", "").strip() in {"1", "true", "TRUE", "yes"}
+        )
 
         # Detect persistence mode
         self._settings = get_settings()
@@ -190,6 +211,35 @@ class AgentLoop:
         self._session_id: str | None = None
         self._session_file: Path | None = None  # file-based mode only
         self._turns_this_session: int = 0
+
+    # -- JSONL Trace File (athctl trace) -----------------------------------
+
+    def _append_trace_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+        """Append a single JSONL event to logs/traces/{session_id}.jsonl.
+
+        Additive to existing on_progress callbacks and session message
+        persistence. Only writes when ``self._trace_to_file`` is True and
+        a session has started. Failures are swallowed (logged) so the
+        agent loop is never blocked by trace I/O.
+
+        Event schema::
+
+            {"ts": iso8601, "type": "llm_call|tool_call|tool_result|response", "data": {...}}
+        """
+        if not self._trace_to_file or not self._session_id:
+            return
+        try:
+            TRACES_DIR.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "type": event_type,
+                "data": data or {},
+            }
+            path = TRACES_DIR / f"{self._session_id}.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            logger.warning("Failed to append trace event %s", event_type, exc_info=True)
 
     # -- Session Persistence (Gap 1) ----------------------------------------
 
@@ -442,6 +492,13 @@ class AgentLoop:
         # -- THE LOOP --
         for round_num in range(self._max_rounds):
 
+            # Trace: LLM call about to start (additive to on_progress)
+            self._append_trace_event("llm_call", {
+                "round": round_num,
+                "message_count": len(self._messages),
+                "model": MODEL,
+            })
+
             # Call LLM with conversation history + tools via LiteLLM
             response = chat_completion(
                 messages=self._messages,
@@ -581,26 +638,80 @@ class AgentLoop:
                             f"{tool_name}({json.dumps(tool_args, ensure_ascii=False)[:200]})",
                         )
 
+                    # Trace: tool call about to execute
+                    self._append_trace_event("tool_call", {
+                        "tool": tool_name,
+                        "args": tool_args,
+                        "round": round_num,
+                    })
+
                     result.tool_calls_made += 1
                     tool_start = time.time()
 
-                    # Execute the tool (with budget-aware truncation)
-                    try:
-                        tool_result = execute_with_budget(
-                            self.tools, tool_name, tool_args,
+                    # Build hook context for this tool invocation.
+                    hook_ctx = HookContext(
+                        user_id=self._user_id,
+                        session_id=self._session_id,
+                        user_model=self.user_model,
+                        tool_name=tool_name,
+                    )
+
+                    # Pre-hook: may block the tool call or rewrite its args.
+                    pre_decision = run_pre_hooks(tool_name, tool_args, hook_ctx)
+                    if pre_decision.action == "block":
+                        tool_result = {
+                            "blocked": True,
+                            "reason": pre_decision.reason or "Pre-hook blocked this call.",
+                        }
+                        if self.on_progress:
+                            self.on_progress(
+                                "tool_error",
+                                f"{tool_name} blocked: {pre_decision.reason}",
+                            )
+                        self._append_trace_event("tool_result", {
+                            "tool": tool_name,
+                            "ok": False,
+                            "blocked": True,
+                            "reason": pre_decision.reason,
+                        })
+                    else:
+                        effective_args = (
+                            {**tool_args, **pre_decision.replace_args}
+                            if pre_decision.replace_args
+                            else tool_args
                         )
-                        consecutive_errors = 0
+                        # Execute the tool (with budget-aware truncation).
+                        try:
+                            tool_result = execute_with_budget(
+                                self.tools, tool_name, effective_args,
+                            )
+                            consecutive_errors = 0
 
-                        if self.on_progress:
-                            preview = json.dumps(tool_result, ensure_ascii=False)[:200]
-                            self.on_progress("tool_result", f"{tool_name} -> {preview}")
+                            if self.on_progress:
+                                preview = json.dumps(tool_result, ensure_ascii=False)[:200]
+                                self.on_progress("tool_result", f"{tool_name} -> {preview}")
 
-                    except Exception as e:
-                        tool_result = {"error": str(e)}
-                        consecutive_errors += 1
+                            self._append_trace_event("tool_result", {
+                                "tool": tool_name,
+                                "ok": True,
+                                "result_preview": json.dumps(tool_result, ensure_ascii=False, default=str)[:500],
+                            })
 
-                        if self.on_progress:
-                            self.on_progress("tool_error", f"{tool_name} -> Error: {e}")
+                            # Post-hook: cascading effects after the tool result.
+                            run_post_hooks(tool_name, effective_args, tool_result, hook_ctx)
+
+                        except Exception as e:
+                            tool_result = {"error": str(e)}
+                            consecutive_errors += 1
+
+                            if self.on_progress:
+                                self.on_progress("tool_error", f"{tool_name} -> Error: {e}")
+
+                            self._append_trace_event("tool_result", {
+                                "tool": tool_name,
+                                "ok": False,
+                                "error": str(e),
+                            })
 
                     # Check if tool already sent a push notification
                     if isinstance(tool_result, dict) and tool_result.get("_sent_in_turn"):
@@ -676,6 +787,13 @@ class AgentLoop:
         # Persist agent response (Gap 1)
         self._save_turn("model", result.response_text, {
             "tool_calls": result.tool_calls_made,
+            "duration_ms": result.total_duration_ms,
+        })
+
+        # Trace: final response (after the loop completes)
+        self._append_trace_event("response", {
+            "text_preview": (result.response_text or "")[:500],
+            "tool_calls_made": result.tool_calls_made,
             "duration_ms": result.total_duration_ms,
         })
 
