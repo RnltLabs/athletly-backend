@@ -134,20 +134,14 @@ class UserModelDB:
         self._from_profile_row(row)
 
     def _load_beliefs(self) -> None:
-        """Fetch all active beliefs and populate self.beliefs."""
-        try:
-            result = (
-                self._db.table("beliefs")
-                .select("*")
-                .eq("user_id", self.user_id)
-                .eq("active", True)
-                .execute()
-            )
-        except Exception:
-            logger.exception("Failed to load beliefs for user %s", self.user_id)
-            return
+        """Compat stub - beliefs table has been replaced by athlete_journal.
 
-        self.beliefs = [self._from_belief_row(r) for r in (result.data or [])]
+        Kept as a no-op so existing call sites that expect ``self.beliefs``
+        as an attribute (now always empty) do not crash. Belief-style
+        soft facts now live as bullets in the journal's "Open Threads"
+        or "What I know about my training" sections.
+        """
+        self.beliefs = []
 
     @classmethod
     def load_or_create(cls, user_id: str) -> "UserModelDB":
@@ -346,36 +340,46 @@ class UserModelDB:
             embedding=embedding,
         )
 
+        # Beliefs table is gone - route soft facts to the athlete journal
+        # as a bullet under "What I know about my training" instead.
         try:
-            result = self._db.table("beliefs").insert(row).execute()
-            belief = self._from_belief_row(result.data[0])
+            from src.agent.athlete_journal import append_to_section
+            append_to_section(
+                self.user_id,
+                "What I know about my training",
+                f"[{category}] {text}",
+            )
         except Exception:
-            logger.exception("Failed to insert belief for user %s", self.user_id)
-            # Fall back to an in-memory-only belief so the caller still gets a dict.
-            belief = {
-                "id": str(uuid.uuid4()),
-                "text": text,
-                "category": category if category in BELIEF_CATEGORIES else "preference",
-                "confidence": max(0.0, min(1.0, confidence)),
-                "stability": stability,
-                "durability": durability,
-                "source": source,
-                "source_ref": source_ref,
-                "first_observed": _now_iso(),
-                "last_confirmed": _now_iso(),
-                "valid_from": valid_from or _today_iso(),
-                "valid_until": valid_until,
-                "learned_at": _now_iso(),
-                "archived_at": None,
-                "active": True,
-                "superseded_by": None,
-                "embedding": None,
-                "utility": 0.0,
-                "outcome_count": 0,
-                "last_outcome": None,
-                "outcome_history": [],
-            }
+            logger.exception(
+                "Failed to append belief-text to journal for user %s",
+                self.user_id,
+            )
 
+        # Return a stub dict so existing callers do not crash. This is an
+        # in-memory-only placeholder; the actual persistence happened above.
+        belief = {
+            "id": str(uuid.uuid4()),
+            "text": text,
+            "category": category if category in BELIEF_CATEGORIES else "preference",
+            "confidence": max(0.0, min(1.0, confidence)),
+            "stability": stability,
+            "durability": durability,
+            "source": source,
+            "source_ref": source_ref,
+            "first_observed": _now_iso(),
+            "last_confirmed": _now_iso(),
+            "valid_from": valid_from or _today_iso(),
+            "valid_until": valid_until,
+            "learned_at": _now_iso(),
+            "archived_at": None,
+            "active": True,
+            "superseded_by": None,
+            "embedding": None,
+            "utility": 0.0,
+            "outcome_count": 0,
+            "last_outcome": None,
+            "outcome_history": [],
+        }
         self.beliefs.append(belief)
         self.meta["updated_at"] = _now_iso()
         return belief

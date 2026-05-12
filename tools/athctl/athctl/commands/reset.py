@@ -6,7 +6,7 @@ would mint a new user every time).
 
 The cuts:
 
-- ``reset profile``    : profiles + beliefs only
+- ``reset profile``    : profiles + athlete_journal only
 - ``reset plans``      : plans + pending_actions
 - ``reset sessions``   : sessions + session_messages
 - ``reset activities`` : activities + health_daily_metrics
@@ -132,15 +132,15 @@ def reset() -> None:
 # ---------------------------------------------------------------------------
 
 
-@reset.command("profile", help="Wipe profile + beliefs for the active user.")
+@reset.command("profile", help="Wipe profile + athlete journal for the active user.")
 @click.option("--yes", "skip_confirm", is_flag=True, default=False, help="Skip confirmation.")
 def reset_profile(skip_confirm: bool) -> None:
-    """Wipe the profile row and all beliefs for the active user."""
+    """Wipe the profile row + athlete journal for the active user."""
     uid = require_active_user()
-    if not _confirm_or_abort(f"Wipe profile + beliefs for {uid}?", skip_confirm):
+    if not _confirm_or_abort(f"Wipe profile + athlete_journal for {uid}?", skip_confirm):
         return
     results: dict[str, Any] = {}
-    _delete_table("beliefs", uid, results)
+    _delete_table("athlete_journal", uid, results)
     _delete_table("profiles", uid, results)
     _emit_results("profile", uid, results)
 
@@ -195,7 +195,7 @@ FULL_TABLES_IN_ORDER: list[str] = [
     "plans",
     "activities",
     "health_daily_metrics",
-    "beliefs",
+    "athlete_journal",
     "sessions",
     "profiles",
 ]

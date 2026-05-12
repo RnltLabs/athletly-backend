@@ -290,6 +290,20 @@ def init(name: str | None, reuse_existing: bool) -> None:  # noqa: ARG001
         data={"step": "profiles.insert", "status": "ok"},
     )
 
+    # 2b. Seed the athlete journal (single source of truth for identity).
+    try:
+        from src.agent.athlete_journal import ensure_journal_exists
+        ensure_journal_exists(new_uid, name=name or "Athlete")
+        emit(
+            "[green]Seeded empty athlete journal[/green]",
+            data={"step": "athlete_journal.seed", "status": "ok"},
+        )
+    except Exception as exc:
+        emit(
+            f"[yellow]Could not seed journal:[/yellow] {exc}",
+            data={"step": "athlete_journal.seed", "status": "error", "error": str(exc)},
+        )
+
     # 3. Clone Garmin tokens
     clone = _clone_garmin_tokens(new_uid)
     summary["garmin_clone"] = clone

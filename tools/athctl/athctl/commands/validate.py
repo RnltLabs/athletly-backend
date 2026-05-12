@@ -141,18 +141,15 @@ def _athlete_context(uid: str) -> dict:
     """Build a minimal athlete context dict for the judge."""
     client = get_supabase()
     profile = client.table("profiles").select("*").eq("user_id", uid).execute()
-    beliefs = (
-        client.table("beliefs")
-        .select("text, category, confidence")
+    journal = (
+        client.table("athlete_journal")
+        .select("content")
         .eq("user_id", uid)
-        .eq("active", True)
-        .order("confidence", desc=True)
-        .limit(15)
         .execute()
     )
     return {
         "profile": profile.data[0] if profile.data else {},
-        "beliefs": beliefs.data or [],
+        "journal": (journal.data[0].get("content") if journal.data else "") or "",
     }
 
 

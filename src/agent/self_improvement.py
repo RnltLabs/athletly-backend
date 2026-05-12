@@ -9,13 +9,15 @@ This module implements the trigger points that fire it:
 
 1. **After every plan save**: auto-evaluate the plan, flag low scores
    so the coach can revise next turn.
-2. **Daily heartbeat check**: compute plan compliance, update beliefs
-   when adherence is consistently low or fitness drifts off projection.
+2. **Daily heartbeat check**: compute plan compliance, append a flag
+   to the journal's Open Threads section when adherence is consistently
+   low or fitness drifts off projection.
 3. **After every Garmin sync**: trajectory-check the goal projection
-   and surface anomalies (HRV crash, RHR spike, missed-key-session).
+   and surface anomalies (HRV crash, RHR spike, missed-key-session) by
+   appending to the journal's Open Threads section.
 
-Each trigger is intentionally narrow. The "intelligence" lives in
-beliefs and update_profile calls, not in a giant orchestration prompt.
+Each trigger is intentionally narrow. The "intelligence" lives in the
+athlete journal, not in a giant orchestration prompt.
 """
 
 from __future__ import annotations
@@ -72,12 +74,13 @@ def post_save_plan_evaluation(
         from src.agent.plan_evaluator import evaluate_plan
 
         profile = ctx.user_model.project_profile()
-        beliefs = ctx.user_model.get_active_beliefs(min_confidence=0.6)
+        # Beliefs table is gone; preferences now live in the athlete
+        # journal. The plan evaluator gracefully handles beliefs=[].
         eval_result = evaluate_plan(
             plan=plan_data,
             profile=profile,
             user_id=ctx.user_id,
-            beliefs=beliefs,
+            beliefs=[],
         )
         # evaluate_plan returns a PlanEvaluation TypedDict or dataclass
         if hasattr(eval_result, "__dict__"):
@@ -142,7 +145,7 @@ def heartbeat_self_improvement_tick(user_id: str) -> dict:
 def _check_plan_compliance(user_id: str) -> dict | None:
     """Compare last 7 days of activities to planned sessions.
 
-    Flags a belief when compliance < 60% three weeks in a row.
+    Appends an Open Threads entry to the journal when compliance < 60%.
     """
     from src.db.client import get_supabase
 
@@ -179,21 +182,20 @@ def _check_plan_compliance(user_id: str) -> dict | None:
 
     if compliance < 0.6:
         try:
-            client.table("beliefs").insert({
-                "user_id": user_id,
-                "text": (
-                    f"Plan compliance last 7 days: "
-                    f"{completed_count}/{expected} sessions completed "
-                    f"({compliance*100:.0f}%). Consider lighter plan or "
-                    "investigate barriers."
+            from src.agent.athlete_journal import append_to_section
+
+            today = date.today().isoformat()
+            append_to_section(
+                user_id,
+                "Open Threads",
+                (
+                    f"{today}: Plan compliance low "
+                    f"({completed_count}/{expected} = {compliance*100:.0f}%) "
+                    f"in the last 7 days. Check barriers or lighten plan."
                 ),
-                "category": "fitness",
-                "confidence": 0.85,
-                "source": "self_improvement",
-                "active": True,
-            }).execute()
+            )
         except Exception:
-            logger.exception("could not insert compliance belief")
+            logger.exception("could not append compliance flag to journal")
         return {
             "type": "compliance_low",
             "completed": completed_count,
@@ -206,8 +208,8 @@ def _check_plan_compliance(user_id: str) -> dict | None:
 def _check_trajectory_anomaly(user_id: str) -> dict | None:
     """Detect recent HRV / RHR anomaly suggesting accumulated fatigue.
 
-    Compares last 3 days to prior 7. Flags belief if HRV drops >15%
-    or RHR rises >7%.
+    Compares last 3 days to prior 7. Appends an Open Threads entry to
+    the journal if HRV drops >15% or RHR rises >7%.
     """
     from src.db.client import get_supabase
 
@@ -256,20 +258,16 @@ def _check_trajectory_anomaly(user_id: str) -> dict | None:
     if not flags:
         return None
 
-    text = (
-        "Recovery anomaly: "
+    today = date.today().isoformat()
+    entry = (
+        f"{today}: Recovery anomaly - "
         + "; ".join(flags)
         + ". Consider lighter intensity or extra recovery day."
     )
     try:
-        client.table("beliefs").insert({
-            "user_id": user_id,
-            "text": text,
-            "category": "fitness",
-            "confidence": 0.85,
-            "source": "self_improvement",
-            "active": True,
-        }).execute()
+        from src.agent.athlete_journal import append_to_section
+
+        append_to_section(user_id, "Open Threads", entry)
     except Exception:
-        logger.exception("could not insert anomaly belief")
+        logger.exception("could not append recovery anomaly to journal")
     return {"type": "recovery_anomaly", "flags": flags}

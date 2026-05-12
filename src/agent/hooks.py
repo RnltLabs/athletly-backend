@@ -150,21 +150,9 @@ def _post_update_profile_cascade(
         logger.exception("goal-change cascade failed")
 
 
-def _post_belief_added_dedup(args: dict, result: Any, ctx: HookContext) -> None:
-    """Best-effort dedup: invalidate older beliefs that now contradict.
-
-    Stub for future implementation. Currently just logs.
-    """
-    if not isinstance(result, dict) or not result.get("added"):
-        return
-    # Future: semantic similarity + invalidate-older
-    return
-
-
 def install_builtin_hooks() -> None:
     """Register all built-in hooks. Called once at agent startup."""
     register_post_hook("update_profile", _post_update_profile_cascade)
-    register_post_hook("add_belief", _post_belief_added_dedup)
 
     # Self-improvement: auto-evaluate every saved plan.
     try:

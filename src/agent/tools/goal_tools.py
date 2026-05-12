@@ -1,18 +1,20 @@
 """Tools for managing the athlete's goal in one atomic operation.
 
 ``update_goal`` is the right way to change the target event/date/time.
-It writes the new values to the profile, logs the old->new transition
-with reasoning into ``goal_history``, and lets downstream hooks
-cascade (archive the active macrocycle so the coach knows to rebuild).
+It writes the new goal as a markdown block into the athlete journal's
+``Current Goal`` section, appends a timeline entry to ``Goal Timeline``,
+archives the active macrocycle, and also updates the structured profile
+columns as a query cache.
 
-Using ``update_profile(field="goal.event", ...)`` field-by-field works
-but loses two things: the structured history and a single point of
-audit. Use this tool whenever the goal actually changes.
+Using ``update_journal_section`` directly works but loses the timeline
+log and the macrocycle archive cascade. Use this tool whenever the goal
+actually changes.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import date as _date_cls
 
 from src.agent.tools.registry import Tool, ToolRegistry
 from src.config import get_settings
@@ -28,59 +30,145 @@ def register_goal_tools(registry: ToolRegistry, user_model) -> None:
         or _settings.agenticsports_user_id
     )
 
+    def _read_current_goal_from_journal() -> dict:
+        """Parse the 'Current Goal' section of the journal back to fields."""
+        from src.agent.athlete_journal import parse_sections, read_journal
+
+        doc = read_journal(_user_id)
+        sections = parse_sections(doc)
+        body = sections.get("Current Goal", "") or ""
+
+        result: dict[str, str | None] = {
+            "event": None,
+            "target_date": None,
+            "target_time": None,
+        }
+        for raw in body.splitlines():
+            line = raw.strip()
+            if not line.lower().startswith("**"):
+                continue
+            # Patterns: **Event:** ..., **Date:** ..., **Target time:** ...
+            try:
+                label, _, value = line.partition(":")
+                label = label.strip("* ").lower()
+                value = value.strip().rstrip("*").strip()
+            except Exception:
+                continue
+            if label == "event":
+                result["event"] = value or None
+            elif label == "date":
+                # Body shape: "2027-05-17 (in 245 days)"
+                result["target_date"] = value.split(" ", 1)[0] or None
+            elif label.startswith("target time"):
+                result["target_time"] = value or None
+        return result
+
+    def _render_current_goal_md(
+        event: str | None,
+        target_date: str | None,
+        target_time: str | None,
+        event_facts: str | None,
+        source: str | None,
+    ) -> str:
+        """Render a clean markdown block for the Current Goal section."""
+        lines: list[str] = []
+        if event:
+            lines.append(f"**Event:** {event}")
+        if target_date:
+            try:
+                days = (
+                    _date_cls.fromisoformat(target_date) - _date_cls.today()
+                ).days
+                lines.append(f"**Date:** {target_date} (in {days} days)")
+            except Exception:
+                lines.append(f"**Date:** {target_date}")
+        if target_time:
+            lines.append(f"**Target time:** {target_time}")
+        if event_facts and event_facts.strip():
+            lines.append(f"**Course facts:** {event_facts.strip()}")
+        if source and source.strip():
+            lines.append(f"**Source:** {source.strip()}")
+        return "\n".join(lines)
+
     def update_goal(
         event: str | None = None,
         target_date: str | None = None,
         target_time: str | None = None,
+        event_facts: str | None = None,
+        source: str | None = None,
         reasoning: str = "",
     ) -> dict:
         """Update the athlete's goal atomically and log the change.
 
         Args:
-            event: New target event name (e.g. "Karlsruher Halbmarathon").
-            target_date: New target date (YYYY-MM-DD).
-            target_time: New target time (HH:MM:SS).
-            reasoning: One-paragraph rationale from the conversation - WHY
-                the athlete made this change. Stored for later self-reflection.
+            event: Target event name (e.g. "Karlsruher Halbmarathon").
+            target_date: Target date (YYYY-MM-DD).
+            target_time: Target finish time (HH:MM:SS) when applicable.
+            event_facts: Course details, elevation, distance, etc.
+            source: Where the facts came from (e.g. "official site",
+                "spawn_subagent research 2026-05-12").
+            reasoning: One-sentence rationale - WHY the athlete changed.
 
         Returns:
             ``{"status": "ok", "old_goal": {...}, "new_goal": {...}}`` or error.
         """
+        from src.agent.athlete_journal import (
+            append_to_section,
+            update_section,
+        )
         from src.db.client import get_supabase
 
         client = get_supabase()
 
-        # Load current goal from profile
-        try:
-            res = (
-                client.table("profiles")
-                .select("goal_event, goal_target_date, goal_target_time")
-                .eq("user_id", _user_id)
-                .execute()
-            )
-        except Exception as exc:
-            return {"error": f"Could not load current goal: {exc}"}
-        old_row = res.data[0] if res.data else {}
-        old_goal = {
-            "event": old_row.get("goal_event"),
-            "target_date": old_row.get("goal_target_date"),
-            "target_time": old_row.get("goal_target_time"),
-        }
-
+        old_goal = _read_current_goal_from_journal()
         new_goal = {
             "event": event if event is not None else old_goal["event"],
-            "target_date": target_date if target_date is not None else old_goal["target_date"],
-            "target_time": target_time if target_time is not None else old_goal["target_time"],
+            "target_date": (
+                target_date if target_date is not None else old_goal["target_date"]
+            ),
+            "target_time": (
+                target_time if target_time is not None else old_goal["target_time"]
+            ),
         }
 
-        if new_goal == old_goal:
+        if new_goal == old_goal and not event_facts and not source:
             return {
                 "status": "noop",
                 "message": "New goal identical to current goal - nothing to do.",
                 "current_goal": old_goal,
             }
 
-        # Update profile + persist via user_model to keep in-memory + DB in sync
+        # 1. Rewrite the Current Goal section.
+        new_md = _render_current_goal_md(
+            event=new_goal["event"],
+            target_date=new_goal["target_date"],
+            target_time=new_goal["target_time"],
+            event_facts=event_facts,
+            source=source,
+        )
+        try:
+            update_section(_user_id, "Current Goal", new_md)
+        except Exception as exc:
+            return {"error": f"Could not update journal Current Goal: {exc}"}
+
+        # 2. Append to Goal Timeline.
+        today = _date_cls.today().isoformat()
+        timeline_parts: list[str] = [today + ":"]
+        if new_goal["event"]:
+            timeline_parts.append(new_goal["event"])
+        if new_goal["target_date"]:
+            timeline_parts.append(f"on {new_goal['target_date']}")
+        if new_goal["target_time"]:
+            timeline_parts.append(f"target {new_goal['target_time']}")
+        timeline_entry = " ".join(timeline_parts).strip()
+        if reasoning.strip():
+            timeline_entry = f"{timeline_entry}. Reasoning: {reasoning.strip()}"
+        try:
+            append_to_section(_user_id, "Goal Timeline", timeline_entry)
+        except Exception as exc:
+            logger.warning("Failed to append Goal Timeline entry: %s", exc)
+
+        # 3. Profile cache - keep query-friendly columns in sync.
         try:
             if event is not None:
                 user_model.update_structured_core("goal.event", event)
@@ -89,20 +177,9 @@ def register_goal_tools(registry: ToolRegistry, user_model) -> None:
             if target_time is not None:
                 user_model.update_structured_core("goal.target_time", target_time)
         except Exception as exc:
-            return {"error": f"Failed to persist new goal: {exc}"}
+            logger.warning("Failed to update profile goal cache: %s", exc)
 
-        # Audit log row
-        try:
-            client.table("goal_history").insert({
-                "user_id": _user_id,
-                "old_goal": old_goal,
-                "new_goal": new_goal,
-                "reasoning": reasoning.strip() or None,
-            }).execute()
-        except Exception as exc:
-            logger.warning("Failed to write goal_history row: %s", exc)
-
-        # Archive active macrocycle - the goal moved, the old plan is stale
+        # 4. Archive any active macrocycle - the goal moved.
         archived_macrocycle_id: str | None = None
         try:
             arch = (
@@ -132,40 +209,54 @@ def register_goal_tools(registry: ToolRegistry, user_model) -> None:
     registry.register(Tool(
         name="update_goal",
         description=(
-            "Atomically change the athlete's target goal (event, target_date, "
-            "and/or target_time) and log the change for future reflection. "
-            "Use this whenever the athlete commits to a NEW target instead of "
-            "amending the existing one.\n\n"
+            "Atomically change the athlete's target goal and log the change. "
+            "The journal's 'Current Goal' section is rewritten, the 'Goal "
+            "Timeline' section gets a new bullet, any active macrocycle is "
+            "archived, and profile columns are updated as a query cache.\n\n"
             "WHAT IT DOES:\n"
-            "1. Reads the current goal from profile.\n"
-            "2. Writes new goal_event / goal_target_date / goal_target_time.\n"
-            "3. Logs old -> new + your captured reasoning to goal_history.\n"
-            "4. Archives any active macrocycle (the old plan no longer matches).\n\n"
+            "1. Rewrites journal 'Current Goal' with event + date + target "
+            "time + course facts + source.\n"
+            "2. Appends a 'YYYY-MM-DD: <event> on <date> target <time>. "
+            "Reasoning: ...' bullet to 'Goal Timeline'.\n"
+            "3. Updates profile.goal_event/goal_target_date/goal_target_time "
+            "as a queryability cache.\n"
+            "4. Archives any active macrocycle (the old plan no longer "
+            "matches the new target).\n\n"
             "WHEN TO USE:\n"
-            "- Athlete picks a different target race ('I want to do Karlsruhe "
-            "instead of Heidelberg').\n"
-            "- Target time changes ('I want sub-1:30 now, not sub-1:35').\n"
+            "- Athlete commits to a NEW target ('I want Karlsruhe instead "
+            "of Heidelberg').\n"
+            "- Target time changes ('sub 1:30 now, not sub 1:35').\n"
             "- Date shifts ('postponed to next year').\n\n"
             "WHEN NOT TO USE:\n"
-            "- Just adding a soft fitness goal to an existing target: use "
-            "add_belief for context, keep the primary goal stable.\n"
-            "- Athlete mentions a far-future dream goal but no commitment "
-            "yet: ask first, then update only after a clear yes.\n\n"
-            "ALWAYS pass *reasoning*: a one-sentence summary of WHY the "
-            "athlete changed the goal. The agent will read this later when "
-            "wondering 'why did we abandon the old plan?'.\n\n"
-            "AFTER calling update_goal you typically:\n"
-            "1. create_macrocycle_plan(...) with the new target.\n"
-            "2. save_macrocycle() to persist.\n"
-            "3. create_training_plan(macrocycle_week=1).\n"
-            "4. save_plan() and report the new structure to the athlete.\n\n"
+            "- Just musing about a future goal - confirm commitment first.\n"
+            "- Tweaking the journal 'Current Goal' wording: use "
+            "update_journal_section directly instead (it does not archive "
+            "the macrocycle).\n\n"
+            "ALWAYS pass *event_facts* and *source* when they are known. "
+            "Course details and the verification source live in the "
+            "journal and the coach will rely on them later for plan "
+            "design. ALWAYS pass *reasoning*: one sentence on WHY the "
+            "athlete changed - captured into Goal Timeline for future "
+            "reflection.\n\n"
+            "TYPICAL FLOW:\n"
+            "1. spawn_subagent(task='Find date, distance, elevation, "
+            "course for <event>') to verify facts.\n"
+            "2. Confirm with the user: 'Du meinst den XYZ am DD.MM., ja?'\n"
+            "3. update_goal(event=..., target_date=..., target_time=..., "
+            "event_facts='21.1km, 180m elevation, flat closing 5km', "
+            "source='official site, fetched 2026-05-12 via spawn_subagent', "
+            "reasoning='Athlete chose Karlsruhe for flatter course and "
+            "later date allowing more base building.')\n"
+            "4. create_macrocycle_plan(...) -> save_macrocycle() -> "
+            "create_training_plan(macrocycle_week=1) -> save_plan().\n\n"
             "EXAMPLE:\n"
             "  update_goal(\n"
             "    event='Karlsruher Halbmarathon',\n"
             "    target_date='2027-05-17',\n"
             "    target_time='1:35:00',\n"
-            "    reasoning='Athlete chose Karlsruhe over Heidelberg for "
-            "a flatter course and later date allowing more base building.'\n"
+            "    event_facts='21.1km road, 180m elevation, urban, late May',\n"
+            "    source='Athlete confirmed after spawn_subagent research',\n"
+            "    reasoning='Flatter course than Heidelberg, more base time.'\n"
             "  )"
         ),
         handler=update_goal,
@@ -174,24 +265,41 @@ def register_goal_tools(registry: ToolRegistry, user_model) -> None:
             "properties": {
                 "event": {
                     "type": "string",
-                    "description": "New target event name. Omit to keep current.",
+                    "description": "Target event name. Omit to keep current.",
                     "nullable": True,
                 },
                 "target_date": {
                     "type": "string",
-                    "description": "New target date YYYY-MM-DD. Omit to keep current.",
+                    "description": "Target date YYYY-MM-DD. Omit to keep current.",
                     "nullable": True,
                 },
                 "target_time": {
                     "type": "string",
-                    "description": "New target time HH:MM:SS. Omit to keep current.",
+                    "description": "Target finish time HH:MM:SS. Omit to keep current.",
+                    "nullable": True,
+                },
+                "event_facts": {
+                    "type": "string",
+                    "description": (
+                        "Course details, distance, elevation, surface, "
+                        "weather window, etc. Goes into 'Current Goal'."
+                    ),
+                    "nullable": True,
+                },
+                "source": {
+                    "type": "string",
+                    "description": (
+                        "Where the facts came from: 'official site', "
+                        "'spawn_subagent research YYYY-MM-DD', 'athlete "
+                        "told me directly'. Goes into 'Current Goal'."
+                    ),
                     "nullable": True,
                 },
                 "reasoning": {
                     "type": "string",
                     "description": (
                         "Why the athlete is making this change. Captured "
-                        "verbatim into goal_history for future reflection."
+                        "into 'Goal Timeline' for future reflection."
                     ),
                 },
             },

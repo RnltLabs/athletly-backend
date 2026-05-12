@@ -87,8 +87,10 @@ def register_profile_md_tools(registry: ToolRegistry, user_model) -> None:
 
         return {"status": "ok", "athlete_md": new_value or ""}
 
-    registry.register(Tool(
-        name="edit_athlete_memory",
+    # DEPRECATED: edit_athlete_memory is replaced by journal tools
+    # (update_journal_section / append_to_journal). NOT registered anymore.
+    _DISABLED_edit_athlete_memory = lambda: registry.register(Tool(
+        name="edit_athlete_memory_disabled",
         description=(
             "Read, append, or rewrite the athlete's free-form memory notes - "
             "a small markdown document the coach sees every turn under "

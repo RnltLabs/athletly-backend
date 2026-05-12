@@ -49,38 +49,36 @@ def profile() -> None:
 
 
 # ---------------------------------------------------------------------------
-# beliefs
+# journal (replaces former 'beliefs' command - single source of truth)
 # ---------------------------------------------------------------------------
 
 
-@state.command("beliefs", help="List beliefs sorted by confidence.")
-@click.option("--min-confidence", type=float, default=0.0, help="Filter threshold.")
-@click.option("--category", default=None, help="Filter by category.")
-def beliefs(min_confidence: float, category: str | None) -> None:
+@state.command("journal", help="Print the athlete journal (identity + goals + notes).")
+@click.option("--section", default=None, help="Show only this section (case-insensitive).")
+def journal(section: str | None) -> None:
     uid = require_active_user()
     client = get_supabase()
-    q = client.table("beliefs").select("*").eq("user_id", uid)
-    if category:
-        q = q.eq("category", category)
-    if min_confidence > 0:
-        q = q.gte("confidence", min_confidence)
-    res = q.order("confidence", desc=True).execute()
-    rows = res.data or []
-    emit(f"{len(rows)} beliefs", data={"user_id": uid, "beliefs": rows})
-
-    table = Table()
-    table.add_column("conf", justify="right")
-    table.add_column("category", style="cyan")
-    table.add_column("text", overflow="fold")
-    table.add_column("source", style="dim")
-    for r in rows:
-        table.add_row(
-            f"{r.get('confidence', 0):.2f}",
-            str(r.get("category", "")),
-            str(r.get("text", ""))[:120],
-            str(r.get("source", "")),
+    res = client.table("athlete_journal").select("content").eq("user_id", uid).execute()
+    if not res.data:
+        emit("No journal yet. Run `athctl init` to seed one.", data={"user_id": uid, "journal": ""})
+        return
+    content = res.data[0].get("content") or ""
+    if section:
+        from src.agent.athlete_journal import parse_sections
+        parsed = parse_sections(content)
+        match = next(
+            (v for k, v in parsed.items() if k.lower() == section.lower()),
+            None,
         )
-    console.print(table)
+        if match is None:
+            emit(
+                f"Section {section!r} not found. Available: "
+                f"{[k for k in parsed.keys() if k != '_title']}",
+            )
+            return
+        emit(match, data={"user_id": uid, "section": section, "body": match})
+        return
+    emit(content, data={"user_id": uid, "journal": content})
 
 
 # ---------------------------------------------------------------------------

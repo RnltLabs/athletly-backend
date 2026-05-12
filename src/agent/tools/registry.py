@@ -180,10 +180,10 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     from src.agent.tools.session_tools import register_session_tools
     from src.agent.tools.episode_read_tools import register_episode_read_tools
     from src.agent.tools.plan_adjust_tools import register_plan_adjust_tools
-    from src.agent.tools.profile_md_tools import register_profile_md_tools
     from src.agent.tools.goal_tools import register_goal_tools
     from src.agent.tools.background_tools import register_background_tools
     from src.agent.tools.skill_tools import register_skill_tools
+    from src.agent.tools.journal_tools import register_journal_tools
 
     # Resolve user_id from user_model for tools that need it
     from src.config import get_settings as _get_settings
@@ -218,6 +218,7 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_goal_tools(registry, user_model)
     register_background_tools(registry, user_model)
     register_skill_tools(registry, user_model)
+    register_journal_tools(registry, user_model)
 
     if context == "onboarding":
         from src.agent.tools.onboarding_tools import register_onboarding_tools

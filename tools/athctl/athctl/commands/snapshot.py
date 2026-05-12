@@ -45,26 +45,21 @@ def _profile_section(client, uid: str) -> str:
     return _section("Profile", lines)
 
 
-def _beliefs_section(client, uid: str) -> str:
+def _journal_section(client, uid: str) -> str:
+    """Embed the full athlete journal markdown as a sub-block."""
     res = (
-        client.table("beliefs")
-        .select("*")
+        client.table("athlete_journal")
+        .select("content")
         .eq("user_id", uid)
-        .order("confidence", desc=True)
         .execute()
     )
-    rows = res.data or []
-    if not rows:
-        return _section("Beliefs", [])
-    lines = ["| Conf | Category | Statement | Source |", "|---|---|---|---|"]
-    for r in rows:
-        lines.append(
-            f"| {r.get('confidence', 0):.2f} "
-            f"| {r.get('category', '')} "
-            f"| {(r.get('text') or '')[:140]} "
-            f"| {r.get('source', '')} |"
-        )
-    return _section(f"Beliefs ({len(rows)})", lines)
+    if not res.data:
+        return _section("Athlete Journal", ["_(empty - no journal yet)_"])
+    content = (res.data[0].get("content") or "").strip()
+    if not content:
+        return _section("Athlete Journal", [])
+    # Embed the journal as-is (it already has its own ## headings).
+    return f"## Athlete Journal (single source of truth)\n\n{content}\n"
 
 
 def _providers_section(uid: str) -> str:
@@ -235,7 +230,7 @@ def _write_snapshot(out_path: str | None) -> None:
         f"_Generated: {datetime.now(timezone.utc).isoformat()}_",
         "",
         _profile_section(client, uid),
-        _beliefs_section(client, uid),
+        _journal_section(client, uid),
         _providers_section(uid),
         _plan_section(uid),
         _activities_section(client, uid),
