@@ -155,31 +155,32 @@ def register_notification_tools(registry: ToolRegistry, user_id: str) -> None:
 
         return {"spawned": True, "task_id": task_id, "active_tasks": active_count + 1}
 
-    registry.register(Tool(
-        name="spawn_background_task",
-        description=(
-            "Spawn a background sub-agent to carry out a long-running task "
-            "asynchronously (e.g. deep data analysis, plan regeneration). "
-            "The task runs independently — results are delivered via notification. "
-            "Use for work that would exceed the current turn's budget."
-        ),
-        handler=spawn_background_task,
-        parameters={
-            "type": "object",
-            "properties": {
-                "instruction": {
-                    "type": "string",
-                    "description": "Natural-language instruction for the sub-agent",
-                },
-                "max_iterations": {
-                    "type": "integer",
-                    "description": "Maximum tool-call rounds (default 15, max 30)",
-                },
-            },
-            "required": ["instruction"],
-        },
-        category="meta",
-    ))
+    # DEPRECATED: spawn_background_task replaced by enqueue_background_task. NOT registered.
+    # registry.register(Tool(
+    #     name="spawn_background_task",
+    #     description=(
+    #         "Spawn a background sub-agent to carry out a long-running task "
+    #         "asynchronously (e.g. deep data analysis, plan regeneration). "
+    #         "The task runs independently - results are delivered via notification. "
+    #         "Use for work that would exceed the current turn's budget."
+    #     ),
+    #     handler=spawn_background_task,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "instruction": {
+    #                 "type": "string",
+    #                 "description": "Natural-language instruction for the sub-agent",
+    #             },
+    #             "max_iterations": {
+    #                 "type": "integer",
+    #                 "description": "Maximum tool-call rounds (default 15, max 30)",
+    #             },
+    #         },
+    #         "required": ["instruction"],
+    #     },
+    #     category="meta",
+    # ))
 
 
 # ---------------------------------------------------------------------------

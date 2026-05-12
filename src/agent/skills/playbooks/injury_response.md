@@ -3,10 +3,10 @@ name: injury_response
 description: Handle an injury or pain report from the athlete - assess severity, immediately reduce upcoming load if needed, capture the constraint as a long-term belief, and offer a recovery-focused adjustment to the plan.
 when_to_use: Athlete reports pain, soreness beyond DOMS, recurring discomfort, a fall, an acute incident, or a medical diagnosis. Triggers regardless of whether the athlete uses the word "injury".
 required_tools:
-  - add_belief
-  - edit_athlete_memory
-  - plan_adjust
-  - spawn_specialist
+  - append_to_journal
+  - update_journal_section
+  - adjust_plan
+  - spawn_subagent
 ---
 
 # Injury Response Workflow
@@ -38,13 +38,13 @@ Based on the answers, place the report into one of three buckets:
 | **Persistent niggle** | recurring discomfort, dull ache after sessions, lasting >3 days | Reduce volume 30-50%, switch high-impact to low-impact, monitor 7-10 days. Add cross-training (cycling, swimming, strength). |
 | **Normal soreness** | DOMS-like, fades within 48h, no functional limit | No change. Reassure. Maybe one extra easy day. |
 
-If unclear, use `spawn_specialist(type="safety_reviewer", task=...,
-context={profile, recent_activities, injury_report})` for a structured
-second opinion before recommending changes.
+If unclear, use `spawn_subagent(task="safety review: ...",
+tools_scope="readonly", context={profile, recent_activities, injury_report})`
+for a structured second opinion before recommending changes.
 
 ## Step 3: Adjust the plan
 
-Use `plan_adjust` (if available) or describe specific session swaps:
+Use `adjust_plan` (if available) or describe specific session swaps:
 
 - High-impact running -> easy cycling or swimming
 - Hard intervals -> moderate steady
@@ -53,20 +53,19 @@ Use `plan_adjust` (if available) or describe specific session swaps:
 
 The athlete must approve before any actual plan-row mutation.
 
-## Step 4: Capture as long-term belief
+## Step 4: Capture in the journal
 
 Two writes (different purposes):
 
-1. `add_belief(
-     text="<location> pain reported <date>, severity <X/10>, suspected <cause>",
-     category="physical",
-     confidence=0.9
+1. `append_to_journal(
+     section="Open Threads",
+     content="<location> pain reported <date>, severity <X/10>, suspected <cause>"
    )`
-   Time-bound belief - will be invalidated when athlete reports clear.
+   Time-bound note. Remove with remove_from_journal when athlete reports clear.
 
-2. `edit_athlete_memory(
-     action="append",
-     content="Anfaellig fuer <body part> bei <trigger> - bitte beim Plan beruecksichtigen"
+2. `update_journal_section(
+     section="Identity",
+     content="...Anfaellig fuer <body part> bei <trigger>; im Plan beruecksichtigen..."
    )`
    ONLY if it's a chronic / recurring issue, not a one-off. This stays
    in the long-term identity.
@@ -86,9 +85,9 @@ The proactive heartbeat will surface this for re-check.
   empathy is unhelpful.
 - Skipping the assessment questions and jumping to "rest 2 days".
   Athletes need to FEEL heard.
-- Adding to athlete_md for a one-off bruise. Reserve that column for
-  CHRONIC or RECURRING constraints.
-- Forgetting to remove / invalidate the belief later when the athlete
-  reports recovery.
+- Adding to the Identity section for a one-off bruise. Reserve that
+  section for CHRONIC or RECURRING constraints.
+- Forgetting to remove / invalidate the Open Threads note later when
+  the athlete reports recovery.
 - Diagnosing. You are NOT a doctor. Suggest professional consultation
   for anything in the Red Flag bucket.

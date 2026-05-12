@@ -46,14 +46,14 @@ def register_data_tools(registry: ToolRegistry, user_model):
         category="data",
     ))
 
-    # Visionplan alias
-    registry.register(Tool(
-        name="get_user_profile",
-        description="Alias for get_athlete_profile. " + _athlete_profile_description,
-        handler=get_athlete_profile,
-        parameters={},
-        category="data",
-    ))
+    # DEPRECATED: get_user_profile replaced by get_athlete_profile. NOT registered.
+    # _DISABLED_get_user_profile_registration = lambda: registry.register(Tool(
+    #     name="get_user_profile",
+    #     description="Alias for get_athlete_profile. " + _athlete_profile_description,
+    #     handler=get_athlete_profile,
+    #     parameters={},
+    #     category="data",
+    # ))
 
     def get_activities(limit: int = 10, sport: str = None, days: int = None) -> dict:
         """Get recent training activities."""
@@ -239,25 +239,26 @@ def register_data_tools(registry: ToolRegistry, user_model):
                     continue
             return {"plans": plans, "count": len(plans)}
 
-    registry.register(Tool(
-        name="get_past_plans",
-        description=(
-            "Get a list of previously generated training plans with their dates, "
-            "phases, session counts, and evaluation scores. Useful for understanding "
-            "training history and progression."
-        ),
-        handler=get_past_plans,
-        parameters={
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum plans to return (default 5)",
-                },
-            },
-        },
-        category="data",
-    ))
+    # DEPRECATED: get_past_plans replaced by get_plan_history. NOT registered.
+    # registry.register(Tool(
+    #     name="get_past_plans",
+    #     description=(
+    #         "Get a list of previously generated training plans with their dates, "
+    #         "phases, session counts, and evaluation scores. Useful for understanding "
+    #         "training history and progression."
+    #     ),
+    #     handler=get_past_plans,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "limit": {
+    #                 "type": "integer",
+    #                 "description": "Maximum plans to return (default 5)",
+    #             },
+    #         },
+    #     },
+    #     category="data",
+    # ))
 
     def get_beliefs(category: str = None, min_confidence: float = 0.0) -> dict:
         """Get current beliefs about the athlete."""
@@ -280,33 +281,34 @@ def register_data_tools(registry: ToolRegistry, user_model):
             ],
         }
 
-    registry.register(Tool(
-        name="get_beliefs",
-        description=(
-            "Get recorded beliefs about the athlete (scheduling, fitness, constraints, "
-            "physical, motivation, history, preference, personality). "
-            "Beliefs are things the coach has learned about the athlete through conversation. "
-            "Use this to recall what you know before giving advice."
-        ),
-        handler=get_beliefs,
-        parameters={
-            "type": "object",
-            "properties": {
-                "category": {
-                    "type": "string",
-                    "description": "Filter by category. Omit for all categories.",
-                    "nullable": True,
-                    "enum": ["scheduling", "fitness", "constraint", "physical",
-                             "motivation", "history", "preference", "personality"],
-                },
-                "min_confidence": {
-                    "type": "number",
-                    "description": "Minimum confidence threshold (0.0-1.0, default 0.0)",
-                },
-            },
-        },
-        category="data",
-    ))
+    # DEPRECATED: get_beliefs - beliefs table dropped. NOT registered.
+    # registry.register(Tool(
+    #     name="get_beliefs",
+    #     description=(
+    #         "Get recorded beliefs about the athlete (scheduling, fitness, constraints, "
+    #         "physical, motivation, history, preference, personality). "
+    #         "Beliefs are things the coach has learned about the athlete through conversation. "
+    #         "Use this to recall what you know before giving advice."
+    #     ),
+    #     handler=get_beliefs,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "category": {
+    #                 "type": "string",
+    #                 "description": "Filter by category. Omit for all categories.",
+    #                 "nullable": True,
+    #                 "enum": ["scheduling", "fitness", "constraint", "physical",
+    #                          "motivation", "history", "preference", "personality"],
+    #             },
+    #             "min_confidence": {
+    #                 "type": "number",
+    #                 "description": "Minimum confidence threshold (0.0-1.0, default 0.0)",
+    #             },
+    #         },
+    #     },
+    #     category="data",
+    # ))
 
 
 def _parse_datetime(dt_str: str):

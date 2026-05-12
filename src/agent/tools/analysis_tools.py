@@ -196,28 +196,20 @@ def register_analysis_tools(registry: ToolRegistry):
         except Exception as exc:
             return {"status": "error", "message": f"Classification failed: {exc}"}
 
-    registry.register(Tool(
-        name="classify_activity",
-        description=(
-            "Classify an unknown or uncategorized activity by setting its sport type. "
-            "Use this when you detect an activity with type 'unknown', 'other', or "
-            "'uncategorized'. After classifying, consider defining sport-specific "
-            "configs if this is a new sport for the athlete."
-        ),
-        handler=classify_activity,
-        parameters={
-            "type": "object",
-            "properties": {
-                "activity_id": {
-                    "type": "string",
-                    "description": "UUID of the health_activity to classify.",
-                },
-                "sport": {
-                    "type": "string",
-                    "description": "The correct sport type (e.g., 'running', 'cycling', 'swimming').",
-                },
-            },
-            "required": ["activity_id", "sport"],
-        },
-        category="analysis",
-    ))
+    # DEPRECATED: classify_activity - Garmin provides sport-type already. NOT registered.
+    # registry.register(Tool(
+    #     name="classify_activity",
+    #     description=(
+    #         "Classify an unknown or uncategorized activity by setting its sport type."
+    #     ),
+    #     handler=classify_activity,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "activity_id": {"type": "string"},
+    #             "sport": {"type": "string"},
+    #         },
+    #         "required": ["activity_id", "sport"],
+    #     },
+    #     category="analysis",
+    # ))

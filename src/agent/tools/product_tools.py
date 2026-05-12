@@ -89,58 +89,23 @@ def register_product_tools(registry: ToolRegistry, user_model) -> None:
             ],
         }
 
-    registry.register(Tool(
-        name="recommend_products",
-        description=(
-            "Recommend 3-4 products (gear, equipment, nutrition, recovery) "
-            "relevant to the athlete's training context. Products are enriched "
-            "with real data (image, price, URL) and saved for display in the app. "
-            "Use after creating a training plan, when a new sport is added, "
-            "or when the athlete asks about equipment."
-        ),
-        handler=recommend_products,
-        parameters={
-            "type": "object",
-            "properties": {
-                "products": {
-                    "type": "array",
-                    "description": "List of 3-4 product recommendations",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {
-                                "type": "string",
-                                "description": "Product name (e.g. 'Nike Pegasus 41')",
-                            },
-                            "category": {
-                                "type": "string",
-                                "description": "Product category (e.g. 'shoes', 'watch', 'recovery', 'nutrition')",
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "Why this product fits the athlete's training",
-                            },
-                            "search_query": {
-                                "type": "string",
-                                "description": "Search query for product lookup API",
-                            },
-                        },
-                        "required": ["name", "reason"],
-                    },
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Optional: training session ID to link recommendations to",
-                },
-                "plan_id": {
-                    "type": "string",
-                    "description": "Optional: training plan ID to link recommendations to",
-                },
-            },
-            "required": ["products"],
-        },
-        category="planning",
-    ))
+    # DEPRECATED: recommend_products - monetization stub, not active. NOT registered.
+    # registry.register(Tool(
+    #     name="recommend_products",
+    #     description=(
+    #         "Recommend 3-4 products (gear, equipment, nutrition, recovery) "
+    #         "relevant to the athlete's training context."
+    #     ),
+    #     handler=recommend_products,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "products": {"type": "array", "items": {"type": "object"}},
+    #         },
+    #         "required": ["products"],
+    #     },
+    #     category="planning",
+    # ))
 
 
 async def _enrich_products(

@@ -191,23 +191,18 @@ def register_memory_tools(registry: ToolRegistry, user_model):
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
-    registry.register(Tool(
-        name="consolidate_episodes",
-        description=(
-            "Consolidate weekly training reflections into monthly review summaries. "
-            "Identifies recurring patterns and promotes them to journal entries. "
-            "Call without arguments to auto-detect months needing consolidation, "
-            "or specify a month (YYYY-MM) to consolidate a specific month."
-        ),
-        handler=consolidate_episodes,
-        parameters={
-            "type": "object",
-            "properties": {
-                "month": {
-                    "type": "string",
-                    "description": "Month to consolidate (YYYY-MM format). Leave empty for auto-detect.",
-                },
-            },
-        },
-        category="memory",
-    ))
+    # DEPRECATED: consolidate_episodes - background-service tool. NOT registered.
+    # registry.register(Tool(
+    #     name="consolidate_episodes",
+    #     description=(
+    #         "Consolidate weekly training reflections into monthly review summaries."
+    #     ),
+    #     handler=consolidate_episodes,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "month": {"type": "string"},
+    #         },
+    #     },
+    #     category="memory",
+    # ))

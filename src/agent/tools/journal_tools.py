@@ -43,20 +43,18 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
         """Return the full athlete journal markdown for the active user."""
         return {"content": read_journal(_user_id)}
 
-    registry.register(Tool(
-        name="read_athlete_journal",
-        description=(
-            "Read the full athlete journal markdown. RARELY needed - "
-            "the runtime context already injects the journal as your "
-            "'# Athlete Profile' block, so you already see it. Use this "
-            "tool only when you specifically need the raw text (e.g. to "
-            "diff before and after a section update).\n\n"
-            "Returns {\"content\": \"# Athlete Name\\n\\n## Identity\\n...\"}"
-        ),
-        handler=read_athlete_journal,
-        parameters={"type": "object", "properties": {}},
-        category="memory",
-    ))
+    # DEPRECATED: read_athlete_journal - journal already in system prompt. NOT registered.
+    # registry.register(Tool(
+    #     name="read_athlete_journal",
+    #     description=(
+    #         "Read the full athlete journal markdown. RARELY needed - "
+    #         "the runtime context already injects the journal as your "
+    #         "'# Athlete Profile' block, so you already see it."
+    #     ),
+    #     handler=read_athlete_journal,
+    #     parameters={"type": "object", "properties": {}},
+    #     category="memory",
+    # ))
 
     # -- update_journal_section -------------------------------------------
 

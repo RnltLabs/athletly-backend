@@ -102,35 +102,8 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
         )
         return {"status": "success", "metric": row}
 
-    registry.register(Tool(
-        name="define_metric",
-        description=(
-            "Persist a custom metric formula (CalcEngine sandboxed math: +,-,*,/,"
-            "**,abs,min,max,sqrt,log,exp,etc.) evaluable later via calc_metric. "
-            "Use to invent measurements the backend lacks (custom load index, "
-            "recovery score, polarization ratio) or for trigger-rule inputs. "
-            "Avoid for one-off math or fields already provided. Dedup: similar "
-            "existing metrics return {'status':'duplicate'}; use update_config "
-            "to amend. Requires Supabase; persists per user."
-        ),
-        handler=define_metric,
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Unique metric name (snake_case)"},
-                "formula": {"type": "string", "description": "Safe math expression string"},
-                "description": {"type": "string", "description": "Human-readable description"},
-                "unit": {"type": "string", "description": "Unit of the result (e.g., 'bpm', 'W/kg')"},
-                "variables": {
-                    "type": "object",
-                    "description": "Variable name → description/type hints (for documentation)",
-                    "nullable": True,
-                },
-            },
-            "required": ["name", "formula"],
-        },
-        category="config",
-    ))
+    # MERGED into define_config(config_type="metric", ...). NOT registered standalone.
+    # define_metric is kept as an internal helper used by define_config.
 
     # ------------------------------------------------------------------
     # define_eval_criteria
@@ -188,34 +161,8 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
         )
         return {"status": "success", "criteria": row}
 
-    registry.register(Tool(
-        name="define_eval_criteria",
-        description=(
-            "Persist an evaluate_plan scoring criterion. Without criteria, "
-            "evaluate_plan auto-accepts (score=100); define 3-7 early in "
-            "onboarding to capture what 'good' means for this athlete. weight: "
-            "1.0 baseline, 0.5 nice-to-have, 3.0+ safety-critical. formula: "
-            "optional CalcEngine expr returning 0-100; if omitted, evaluator "
-            "scores qualitatively from description. Same name updates existing; "
-            "similar name logs warning only. Persists per user in Supabase."
-        ),
-        handler=define_eval_criteria,
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Unique criterion name"},
-                "description": {"type": "string", "description": "What this criterion measures"},
-                "weight": {"type": "number", "description": "Relative weight (default 1.0)"},
-                "formula": {
-                    "type": "string",
-                    "description": "Optional scoring formula",
-                    "nullable": True,
-                },
-            },
-            "required": ["name"],
-        },
-        category="config",
-    ))
+    # MERGED into define_config(config_type="eval_criteria", ...). NOT registered standalone.
+    # define_eval_criteria is kept as an internal helper used by define_config.
 
     # ------------------------------------------------------------------
     # define_session_schema
@@ -261,31 +208,8 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
         )
         return {"status": "success", "session_schema": row}
 
-    registry.register(Tool(
-        name="define_session_schema",
-        description=(
-            "Define the structural template for a sport's training sessions so "
-            "create_training_plan produces well-formed sessions. Schema is a "
-            "free-form dict (typical keys: required_fields, optional_fields, "
-            "session_types, intensity_zones, sport_specific). Use when a new or "
-            "niche sport enters (CrossFit, skimo, rowing). Avoid for session "
-            "instances (those are activities) or minor variants (extend "
-            "existing). Same sport name updates; persists per user in Supabase."
-        ),
-        handler=define_session_schema,
-        parameters={
-            "type": "object",
-            "properties": {
-                "sport": {"type": "string", "description": "Sport name (e.g., 'running', 'cycling')"},
-                "schema": {
-                    "type": "object",
-                    "description": "Schema object describing session structure for this sport",
-                },
-            },
-            "required": ["sport", "schema"],
-        },
-        category="config",
-    ))
+    # MERGED into define_config(config_type="session_schema", ...). NOT registered standalone.
+    # define_session_schema is kept as an internal helper used by define_config.
 
     # ------------------------------------------------------------------
     # define_periodization
@@ -341,37 +265,8 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
         )
         return {"status": "success", "periodization_model": row}
 
-    registry.register(Tool(
-        name="define_periodization",
-        description=(
-            "Persist a reusable periodization model (phase sequence: base/build/"
-            "peak/taper, polarized blocks, etc.) referenced by name in "
-            "create_macrocycle_plan. phases: ordered list; each MUST have 'name' "
-            "and 'weeks' (int); recommended 'focus' and 'intensity_distribution' "
-            "(low/moderate/high summing to 100). Use only if reused across "
-            "macrocycles. Avoid for one-off cycles or single phases. Invalid "
-            "phases reject the save. Persists per user in Supabase."
-        ),
-        handler=define_periodization,
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Unique periodization model name (e.g., 'marathon_16_week')"},
-                "phases": {
-                    "type": "array",
-                    "description": (
-                        "Ordered list of training phases. Each phase: "
-                        "{\"name\": \"Base\", \"weeks\": 4, \"focus\": \"aerobic endurance\", "
-                        "\"intensity_distribution\": {\"low\": 80, \"moderate\": 15, \"high\": 5}}"
-                    ),
-                    "items": {"type": "object"},
-                },
-                "description": {"type": "string", "description": "Human-readable description of the model"},
-            },
-            "required": ["name", "phases"],
-        },
-        category="config",
-    ))
+    # MERGED into define_config(config_type="periodization", ...). NOT registered standalone.
+    # define_periodization is kept as an internal helper used by define_config.
 
     # ------------------------------------------------------------------
     # define_trigger_rule
@@ -428,43 +323,8 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
         )
         return {"status": "success", "trigger_rule": row}
 
-    registry.register(Tool(
-        name="define_trigger_rule",
-        description=(
-            "Persist a proactive trigger: CalcEngine condition + natural-language "
-            "action fired by the agent when condition becomes truthy. Context "
-            "vars: total_sessions_7d, total_minutes_7d, total_trimp_7d, "
-            "days_since_last_session, avg_hrv_7d, avg_sleep_score_7d, "
-            "{sport}_trimp_7d, plus custom define_metric outputs. cooldown_hours "
-            "default 24 (use 72-168 for positive rules, 12-24 for safety). Use "
-            "for patterns the coach should watch unprompted; avoid one-offs. "
-            "Invalid condition rejects save. Persists per user in Supabase."
-        ),
-        handler=define_trigger_rule,
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Unique trigger rule name (e.g., 'high_fatigue_alert')"},
-                "condition": {
-                    "type": "string",
-                    "description": (
-                        "CalcEngine formula that returns truthy when the trigger should fire "
-                        "(e.g., 'total_trimp_7d > 500 and avg_hrv_7d < 40')"
-                    ),
-                },
-                "action": {
-                    "type": "string",
-                    "description": "What to tell the athlete when the trigger fires (natural language)",
-                },
-                "cooldown_hours": {
-                    "type": "integer",
-                    "description": "Hours before the same rule can fire again (default: 24)",
-                },
-            },
-            "required": ["name", "condition", "action"],
-        },
-        category="config",
-    ))
+    # MERGED into define_config(config_type="trigger_rule", ...). NOT registered standalone.
+    # define_trigger_rule is kept as an internal helper used by define_config.
 
     # ------------------------------------------------------------------
     # get_config
@@ -520,14 +380,14 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
         category="config",
     ))
 
-    # Visionplan alias
-    registry.register(Tool(
-        name="get_agent_config",
-        description="Alias for get_config. " + _get_config_description,
-        handler=get_config,
-        parameters=_get_config_parameters,
-        category="config",
-    ))
+    # DEPRECATED: get_agent_config is a duplicate of get_config. NOT registered.
+    # registry.register(Tool(
+    #     name="get_agent_config",
+    #     description="Alias for get_config. " + _get_config_description,
+    #     handler=get_config,
+    #     parameters=_get_config_parameters,
+    #     category="config",
+    # ))
 
     # ------------------------------------------------------------------
     # update_config
@@ -570,30 +430,143 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
 
         return {"status": "success", "updated": row}
 
+    # MERGED into define_config: re-calling define_config with same (config_type, name)
+    # upserts the entry. NOT registered standalone.
+    # update_config is kept as an internal helper for legacy callers.
+
+    # ------------------------------------------------------------------
+    # define_config (unified tool replacing 5 define_* + update_config)
+    # ------------------------------------------------------------------
+
+    # Map user-facing config_type strings to (internal_handler, db_config_type).
+    # The 5 internal handlers above (define_metric, define_eval_criteria,
+    # define_session_schema, define_periodization, define_trigger_rule) stay
+    # available as Python callables for backwards compatibility.
+    _DEFINE_CONFIG_TYPES = frozenset({
+        "metric",
+        "eval_criteria",
+        "periodization",
+        "session_schema",
+        "trigger_rule",
+    })
+
+    def define_config(
+        config_type: str,
+        name: str,
+        definition: dict,
+        description: str = "",
+    ) -> dict:
+        """Define or update an agent-runtime config entry.
+
+        Routes to the correct internal define_* helper based on config_type
+        and upserts on (user_id, config_type, name). Same call replaces
+        existing entries.
+        """
+        if config_type not in _DEFINE_CONFIG_TYPES:
+            return {
+                "status": "error",
+                "error": (
+                    f"Invalid config_type '{config_type}'. "
+                    f"Use one of: {sorted(_DEFINE_CONFIG_TYPES)}"
+                ),
+            }
+
+        if not name or not name.strip():
+            return {"status": "error", "error": "name must not be empty"}
+
+        if not isinstance(definition, dict):
+            return {"status": "error", "error": "definition must be an object"}
+
+        try:
+            if config_type == "metric":
+                return define_metric(
+                    name=name,
+                    formula=definition.get("formula", ""),
+                    description=definition.get("description", description),
+                    unit=definition.get("unit", ""),
+                    variables=definition.get("variables"),
+                )
+
+            if config_type == "eval_criteria":
+                return define_eval_criteria(
+                    name=name,
+                    description=definition.get("description", description),
+                    weight=definition.get("weight", 1.0),
+                    formula=definition.get("formula", ""),
+                )
+
+            if config_type == "session_schema":
+                # For session_schema 'name' is the sport identifier.
+                schema = definition.get("schema", definition)
+                return define_session_schema(sport=name, schema=schema)
+
+            if config_type == "periodization":
+                return define_periodization(
+                    name=name,
+                    phases=definition.get("phases", []),
+                    description=definition.get("description", description),
+                )
+
+            if config_type == "trigger_rule":
+                return define_trigger_rule(
+                    name=name,
+                    condition=definition.get("condition", ""),
+                    action=definition.get("action", ""),
+                    cooldown_hours=definition.get("cooldown_hours", 24),
+                )
+        except Exception as exc:
+            logger.exception("define_config dispatch failed")
+            return {"status": "error", "error": str(exc)}
+
+        # Should be unreachable (covered by validation above).
+        return {"status": "error", "error": f"Unhandled config_type: {config_type}"}
+
     registry.register(Tool(
-        name="update_config",
+        name="define_config",
         description=(
-            "Partially update an existing configuration entry by name. Only the fields "
-            "provided in updates will be changed. Formulas are re-validated before saving. "
-            "config_type must be one of: metric_definitions, eval_criteria, session_schemas, "
-            "periodization_models, proactive_trigger_rules."
+            "Define or update an agent-runtime config entry. Upserts on "
+            "(config_type, name): same call replaces an existing entry. "
+            "Valid config_type values: 'metric' (custom CalcEngine formula "
+            "evaluable via calculate_metric; definition keys: formula, "
+            "description, unit, variables), 'eval_criteria' (evaluate_plan "
+            "scoring criterion; keys: description, weight, formula), "
+            "'periodization' (reusable macrocycle phase sequence; keys: "
+            "phases [list of {name, weeks, focus, intensity_distribution}], "
+            "description), 'session_schema' (per-sport session template; "
+            "name=sport; keys: schema), 'trigger_rule' (proactive condition "
+            "+ action; keys: condition CalcEngine formula, action text, "
+            "cooldown_hours). The definition object shape varies per type. "
+            "Persists per user in Supabase."
         ),
-        handler=update_config,
+        handler=define_config,
         parameters={
             "type": "object",
             "properties": {
                 "config_type": {
                     "type": "string",
-                    "description": "Type of config to update",
-                    "enum": sorted(_VALID_CONFIG_TYPES),
+                    "description": "Kind of config entry to define.",
+                    "enum": sorted(_DEFINE_CONFIG_TYPES),
                 },
-                "name": {"type": "string", "description": "Name of the config entry to update"},
-                "updates": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Unique key within the config_type "
+                        "(for session_schema this is the sport name)."
+                    ),
+                },
+                "definition": {
                     "type": "object",
-                    "description": "Fields to update (only provided fields change)",
+                    "description": (
+                        "Type-specific definition body. See description for "
+                        "the keys expected per config_type."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional human-readable explanation.",
                 },
             },
-            "required": ["config_type", "name", "updates"],
+            "required": ["config_type", "name", "definition"],
         },
         category="config",
     ))

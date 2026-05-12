@@ -1,12 +1,17 @@
-"""Tests for config tools — define_metric, define_eval_criteria, get_config.
+"""Tests for config tools: define_config, get_config.
+
+After the tool-surface refactor the 5 define_* tools were merged into a
+single define_config(config_type=..., name=..., definition={...}) entry
+point. The Python helpers (define_metric, define_eval_criteria, ...) stay
+available as internal helpers and are exercised here via define_config.
 
 Supabase is never called: all DB interactions are mocked at the import level.
 Tests verify:
-- Formula validation gates (invalid formula → error, valid → proceed)
+- Formula validation gates (invalid formula -> error, valid -> proceed)
 - get_config rejects unknown config_type
 - get_config returns structured success dict when Supabase is configured
-- define_metric stores metric on valid formula
-- define_eval_criteria with optional formula field
+- define_config(config_type='metric', ...) stores metric on valid formula
+- define_config(config_type='eval_criteria', ...) with optional formula field
 """
 
 from __future__ import annotations
@@ -63,25 +68,27 @@ class TestDefineMetric:
     def test_define_metric_validates_formula_bad(self):
         """An invalid formula must return status=error before touching DB."""
         registry = _make_registry_no_supabase()
-        result = registry.execute("define_metric", {
+        result = registry.execute("define_config", {
+            "config_type": "metric",
             "name": "bad_metric",
-            "formula": "__import__('os')",
+            "definition": {"formula": "__import__('os')"},
         })
         assert result["status"] == "error"
         assert "formula" in result["error"].lower() or "invalid" in result["error"].lower()
 
     def test_define_metric_no_supabase(self):
-        """Valid formula but Supabase not configured → error."""
+        """Valid formula but Supabase not configured -> error."""
         registry = _make_registry_no_supabase()
-        result = registry.execute("define_metric", {
+        result = registry.execute("define_config", {
+            "config_type": "metric",
             "name": "speed",
-            "formula": "distance / time",
+            "definition": {"formula": "distance / time"},
         })
         assert result["status"] == "error"
         assert "supabase" in result["error"].lower()
 
     def test_define_metric_success(self):
-        """Valid formula + Supabase configured → calls upsert and returns success."""
+        """Valid formula + Supabase configured -> calls upsert and returns success."""
         registry, _ = _make_registry_with_supabase()
 
         fake_row = {
@@ -94,10 +101,13 @@ class TestDefineMetric:
             "src.db.agent_config_db.upsert_metric_definition",
             return_value=fake_row,
         ):
-            result = registry.execute("define_metric", {
+            result = registry.execute("define_config", {
+                "config_type": "metric",
                 "name": "trimp",
-                "formula": "duration * hr_ratio * 0.64",
-                "unit": "au",
+                "definition": {
+                    "formula": "duration * hr_ratio * 0.64",
+                    "unit": "au",
+                },
             })
 
         assert result["status"] == "success"
@@ -105,9 +115,10 @@ class TestDefineMetric:
 
     def test_define_metric_empty_formula_rejected(self):
         registry = _make_registry_no_supabase()
-        result = registry.execute("define_metric", {
+        result = registry.execute("define_config", {
+            "config_type": "metric",
             "name": "bad",
-            "formula": "",
+            "definition": {"formula": ""},
         })
         assert result["status"] == "error"
 
@@ -121,11 +132,14 @@ class TestDefineMetric:
             "src.db.agent_config_db.upsert_metric_definition",
             return_value=fake_row,
         ):
-            result = registry.execute("define_metric", {
+            result = registry.execute("define_config", {
+                "config_type": "metric",
                 "name": "pace",
-                "formula": "time / distance",
-                "description": "Minutes per km",
-                "unit": "min/km",
+                "definition": {
+                    "formula": "time / distance",
+                    "description": "Minutes per km",
+                    "unit": "min/km",
+                },
             })
 
         assert result["status"] == "success"
@@ -138,21 +152,23 @@ class TestDefineMetric:
 
 class TestDefineEvalCriteria:
     def test_define_eval_criteria_invalid_formula(self):
-        """Optional formula that is invalid → error."""
+        """Optional formula that is invalid -> error."""
         registry = _make_registry_no_supabase()
-        result = registry.execute("define_eval_criteria", {
+        result = registry.execute("define_config", {
+            "config_type": "eval_criteria",
             "name": "volume",
-            "formula": "open('/etc/passwd')",
+            "definition": {"formula": "open('/etc/passwd')"},
         })
         assert result["status"] == "error"
         assert "formula" in result["error"].lower() or "invalid" in result["error"].lower()
 
     def test_define_eval_criteria_no_formula(self):
-        """No formula provided (empty string) → skips validation, hits Supabase check."""
+        """No formula provided -> skips validation, hits Supabase check."""
         registry = _make_registry_no_supabase()
-        # No formula → should reach the Supabase check
-        result = registry.execute("define_eval_criteria", {
+        result = registry.execute("define_config", {
+            "config_type": "eval_criteria",
             "name": "consistency",
+            "definition": {},
         })
         # use_supabase=False, so fails there
         assert result["status"] == "error"
@@ -167,10 +183,13 @@ class TestDefineEvalCriteria:
             "src.db.agent_config_db.upsert_eval_criteria",
             return_value=fake_row,
         ):
-            result = registry.execute("define_eval_criteria", {
+            result = registry.execute("define_config", {
+                "config_type": "eval_criteria",
                 "name": "volume",
-                "weight": 2.0,
-                "description": "Total training load",
+                "definition": {
+                    "weight": 2.0,
+                    "description": "Total training load",
+                },
             })
 
         assert result["status"] == "success"

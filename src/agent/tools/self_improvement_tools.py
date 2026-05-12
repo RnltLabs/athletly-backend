@@ -187,31 +187,23 @@ def register_self_improvement_tools(registry: ToolRegistry, user_model) -> None:
             "sample_computations": comparisons[:5],
         }
 
-    registry.register(Tool(
-        name="evaluate_formula_accuracy",
-        description=(
-            "Evaluate the accuracy of an agent-defined metric formula by comparing "
-            "computed values against provider-reported values (Garmin Training Effect, "
-            "VO2max, etc.). Use this to self-check whether your formulas produce "
-            "reasonable results. Returns accuracy stats and recommendations."
-        ),
-        handler=evaluate_formula_accuracy,
-        parameters={
-            "type": "object",
-            "properties": {
-                "metric_name": {
-                    "type": "string",
-                    "description": "Name of the metric definition to evaluate.",
-                },
-                "days": {
-                    "type": "integer",
-                    "description": "Number of days to look back (default 28).",
-                },
-            },
-            "required": ["metric_name"],
-        },
-        category="analysis",
-    ))
+    # DEPRECATED: evaluate_formula_accuracy - meta-tool, rare use. NOT registered.
+    # registry.register(Tool(
+    #     name="evaluate_formula_accuracy",
+    #     description=(
+    #         "Evaluate the accuracy of an agent-defined metric formula."
+    #     ),
+    #     handler=evaluate_formula_accuracy,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "metric_name": {"type": "string"},
+    #             "days": {"type": "integer"},
+    #         },
+    #         "required": ["metric_name"],
+    #     },
+    #     category="analysis",
+    # ))
 
     def review_all_formulas() -> dict:
         """Summary review of all agent-defined metric formulas."""
@@ -261,15 +253,13 @@ def register_self_improvement_tools(registry: ToolRegistry, user_model) -> None:
             ),
         }
 
-    registry.register(Tool(
-        name="review_all_formulas",
-        description=(
-            "Review all agent-defined metric formulas for validity. "
-            "Checks each formula against CalcEngine's whitelist and reports "
-            "which are valid and which need fixing. Use this periodically "
-            "to ensure all your metric definitions are working correctly."
-        ),
-        handler=review_all_formulas,
-        parameters={},
-        category="analysis",
-    ))
+    # DEPRECATED: review_all_formulas - meta-tool, rare use. NOT registered.
+    # registry.register(Tool(
+    #     name="review_all_formulas",
+    #     description=(
+    #         "Review all agent-defined metric formulas for validity."
+    #     ),
+    #     handler=review_all_formulas,
+    #     parameters={},
+    #     category="analysis",
+    # ))

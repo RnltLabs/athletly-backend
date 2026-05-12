@@ -91,15 +91,16 @@ def register_skill_tools(registry: ToolRegistry, user_model) -> None:
             ],
         }
 
-    registry.register(Tool(
-        name="list_skills_detail",
-        description=(
-            "List all currently loaded skills with full descriptions. "
-            "Usually unnecessary - the system prompt already shows the "
-            "skill list under '# Available Skills'. Use this only if "
-            "you forgot what's available or want the required_tools list."
-        ),
-        handler=list_skills_detail,
-        parameters={"type": "object", "properties": {}},
-        category="meta",
-    ))
+    # DEPRECATED: list_skills_detail - skills shown in system prompt already. NOT registered.
+    # registry.register(Tool(
+    #     name="list_skills_detail",
+    #     description=(
+    #         "List all currently loaded skills with full descriptions. "
+    #         "Usually unnecessary - the system prompt already shows the "
+    #         "skill list under '# Available Skills'. Use this only if "
+    #         "you forgot what's available or want the required_tools list."
+    #     ),
+    #     handler=list_skills_detail,
+    #     parameters={"type": "object", "properties": {}},
+    #     category="meta",
+    # ))

@@ -126,40 +126,41 @@ def register_health_tools(registry: ToolRegistry, user_id: str = None) -> None:
 
         return {"count": len(cleaned), "activities": cleaned}
 
-    registry.register(Tool(
-        name="get_health_data",
-        description=(
-            "Get training activities from health providers (Apple Health, Garmin, "
-            "Health Connect). Use this to see ALL training beyond FIT imports. "
-            "Returns sport, duration, distance, HR, TRIMP per activity."
-        ),
-        handler=get_health_data,
-        parameters={
-            "type": "object",
-            "properties": {
-                "days": {
-                    "type": "integer",
-                    "description": "Look-back window in days (default 28).",
-                },
-                "activity_type": {
-                    "type": "string",
-                    "description": "Filter by sport/activity type (e.g. 'running'). Omit for all.",
-                    "nullable": True,
-                },
-                "provider": {
-                    "type": "string",
-                    "description": "Filter by provider: 'apple_health', 'garmin', 'health_connect'. Omit for all.",
-                    "nullable": True,
-                },
-                "source": {
-                    "type": "string",
-                    "description": "'health' (health_activities only), 'garmin' (garmin_activities only), or 'all' (merged, deduplicated). Default 'all'.",
-                    "enum": ["health", "garmin", "all"],
-                },
-            },
-        },
-        category="data",
-    ))
+    # DEPRECATED: get_health_data replaced by get_daily_metrics + get_activities. NOT registered.
+    # registry.register(Tool(
+    #     name="get_health_data",
+    #     description=(
+    #         "Get training activities from health providers (Apple Health, Garmin, "
+    #         "Health Connect). Use this to see ALL training beyond FIT imports. "
+    #         "Returns sport, duration, distance, HR, TRIMP per activity."
+    #     ),
+    #     handler=get_health_data,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "days": {
+    #                 "type": "integer",
+    #                 "description": "Look-back window in days (default 28).",
+    #             },
+    #             "activity_type": {
+    #                 "type": "string",
+    #                 "description": "Filter by sport/activity type (e.g. 'running'). Omit for all.",
+    #                 "nullable": True,
+    #             },
+    #             "provider": {
+    #                 "type": "string",
+    #                 "description": "Filter by provider: 'apple_health', 'garmin', 'health_connect'. Omit for all.",
+    #                 "nullable": True,
+    #             },
+    #             "source": {
+    #                 "type": "string",
+    #                 "description": "'health' (health_activities only), 'garmin' (garmin_activities only), or 'all' (merged, deduplicated). Default 'all'.",
+    #                 "enum": ["health", "garmin", "all"],
+    #             },
+    #         },
+    #     },
+    #     category="data",
+    # ))
 
     def get_daily_metrics(days: int = 14) -> dict:
         """Get daily health metrics (sleep, HRV, stress, body battery, recovery)."""

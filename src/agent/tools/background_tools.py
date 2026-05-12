@@ -332,33 +332,24 @@ def register_background_tools(registry: ToolRegistry, user_model) -> None:
             "failed": failed,
         }
 
-    registry.register(Tool(
-        name="list_my_jobs",
-        description=(
-            "List the user's recent background jobs (pending + done + "
-            "failed). Returns a grouped summary so you can decide what to "
-            "surface back to the user.\n\n"
-            "CALL THIS AT THE START OF A TURN if:\n"
-            "- You previously enqueued background work and have not yet "
-            "harvested it.\n"
-            "- The user asks something like 'was ist mit dem Plan?', 'ist "
-            "das schon fertig?', 'hast du das gefunden?' - the answer "
-            "likely lives in a job result.\n\n"
-            "After calling list_my_jobs, call check_background_job(job_id) "
-            "on any 'done' entries you want to fold into the response, then "
-            "address them in your reply to the user. Don't dump the raw "
-            "list - synthesise."
-        ),
-        handler=list_my_jobs,
-        parameters={
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "description": "Max rows to return (default 10, max 50).",
-                    "nullable": True,
-                },
-            },
-        },
-        category="meta",
-    ))
+    # DEPRECATED: list_my_jobs - check_background_job with ID is sufficient. NOT registered.
+    # registry.register(Tool(
+    #     name="list_my_jobs",
+    #     description=(
+    #         "List the user's recent background jobs (pending + done + "
+    #         "failed). Returns a grouped summary so you can decide what to "
+    #         "surface back to the user."
+    #     ),
+    #     handler=list_my_jobs,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "limit": {
+    #                 "type": "integer",
+    #                 "description": "Max rows to return (default 10, max 50).",
+    #                 "nullable": True,
+    #             },
+    #         },
+    #     },
+    #     category="meta",
+    # ))

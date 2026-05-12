@@ -43,31 +43,23 @@ def register_session_tools(registry: ToolRegistry, user_id: str) -> None:
             logger.error("search_session_history failed: %s", exc)
             return {"error": str(exc), "results": []}
 
-    registry.register(Tool(
-        name="search_session_history",
-        description=(
-            "Search the history of past coaching sessions by keyword. "
-            "Use this to recall what was discussed previously — e.g. past goals, "
-            "injuries, plans, or athlete preferences mentioned in earlier sessions. "
-            "Returns a list of matching session summaries with dates and tags."
-        ),
-        handler=search_session_history,
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Keyword or phrase to search for in session summaries",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of sessions to return (1-50, default 10)",
-                },
-            },
-            "required": ["query"],
-        },
-        category="memory",
-    ))
+    # DEPRECATED: search_session_history - rarely used. NOT registered.
+    # registry.register(Tool(
+    #     name="search_session_history",
+    #     description=(
+    #         "Search the history of past coaching sessions by keyword."
+    #     ),
+    #     handler=search_session_history,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "query": {"type": "string"},
+    #             "limit": {"type": "integer"},
+    #         },
+    #         "required": ["query"],
+    #     },
+    #     category="memory",
+    # ))
 
 
 # ---------------------------------------------------------------------------

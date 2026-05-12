@@ -69,41 +69,42 @@ def register_meta_tools(registry: ToolRegistry, user_model):
 
         return {"specialist": type, "result": result}
 
-    registry.register(Tool(
-        name="spawn_specialist",
-        description=(
-            "Single-shot LLM call to a specialist persona (no tools). Returns "
-            "structured JSON opinion on a narrow analytic question. Cheaper "
-            "than spawn_subagent (no tool loop). Types: data_analyst (interpret "
-            "training data), domain_expert (sports-science methodology check), "
-            "safety_reviewer (injury/overtraining/youth risk sweep). Use when "
-            "you have data in hand and want a focused lens. Avoid when you need "
-            "external info (use spawn_subagent). CRITICAL: pass everything via "
-            "context dict; specialist sees nothing else."
-        ),
-        handler=spawn_specialist,
-        parameters={
-            "type": "object",
-            "properties": {
-                "type": {
-                    "type": "string",
-                    "description": "Specialist type",
-                    "enum": ["data_analyst", "domain_expert", "safety_reviewer"],
-                },
-                "task": {
-                    "type": "string",
-                    "description": "What you want the specialist to analyze",
-                },
-                "context": {
-                    "type": "object",
-                    "description": "Relevant context for the specialist (profile, data, etc.)",
-                    "nullable": True,
-                },
-            },
-            "required": ["type", "task"],
-        },
-        category="meta",
-    ))
+    # DEPRECATED: spawn_specialist replaced by generic spawn_subagent. NOT registered.
+    # registry.register(Tool(
+    #     name="spawn_specialist",
+    #     description=(
+    #         "Single-shot LLM call to a specialist persona (no tools). Returns "
+    #         "structured JSON opinion on a narrow analytic question. Cheaper "
+    #         "than spawn_subagent (no tool loop). Types: data_analyst (interpret "
+    #         "training data), domain_expert (sports-science methodology check), "
+    #         "safety_reviewer (injury/overtraining/youth risk sweep). Use when "
+    #         "you have data in hand and want a focused lens. Avoid when you need "
+    #         "external info (use spawn_subagent). CRITICAL: pass everything via "
+    #         "context dict; specialist sees nothing else."
+    #     ),
+    #     handler=spawn_specialist,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "type": {
+    #                 "type": "string",
+    #                 "description": "Specialist type",
+    #                 "enum": ["data_analyst", "domain_expert", "safety_reviewer"],
+    #             },
+    #             "task": {
+    #                 "type": "string",
+    #                 "description": "What you want the specialist to analyze",
+    #             },
+    #             "context": {
+    #                 "type": "object",
+    #                 "description": "Relevant context for the specialist (profile, data, etc.)",
+    #                 "nullable": True,
+    #             },
+    #         },
+    #         "required": ["type", "task"],
+    #     },
+    #     category="meta",
+    # ))
 
     # ------------------------------------------------------------------
     # spawn_subagent - generic tool-using subagent (Claude Code pattern)
@@ -300,14 +301,15 @@ def register_meta_tools(registry: ToolRegistry, user_model):
             "belief_count": len(user_model.get_active_beliefs()),
         }
 
-    registry.register(Tool(
-        name="get_session_context",
-        description=(
-            "Get metadata about the current session: athlete name, sports, "
-            "whether onboarding is complete, belief count. "
-            "Use this at the start of a session to understand context."
-        ),
-        handler=get_session_context,
-        parameters={},
-        category="meta",
-    ))
+    # DEPRECATED: get_session_context - context already provided in athlete_md system prompt. NOT registered.
+    # registry.register(Tool(
+    #     name="get_session_context",
+    #     description=(
+    #         "Get metadata about the current session: athlete name, sports, "
+    #         "whether onboarding is complete, belief count. "
+    #         "Use this at the start of a session to understand context."
+    #     ),
+    #     handler=get_session_context,
+    #     parameters={},
+    #     category="meta",
+    # ))

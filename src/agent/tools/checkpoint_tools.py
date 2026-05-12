@@ -64,48 +64,27 @@ def register_checkpoint_tools(registry: ToolRegistry, user_model=None) -> None:
             "message": f"Proposed '{action_type}' — waiting for user confirmation.",
         }
 
-    registry.register(
-        Tool(
-            name="propose_plan_change",
-            description=(
-                "Propose a plan change that needs user confirmation before execution. "
-                "Use HARD checkpoint for major changes (plan restructure, goal change) "
-                "and SOFT for minor adjustments (swap workout days, adjust intensity). "
-                "The user will see the proposal and can confirm or reject it."
-            ),
-            handler=propose_plan_change,
-            parameters={
-                "type": "object",
-                "properties": {
-                    "action_type": {
-                        "type": "string",
-                        "description": (
-                            "Type of change: 'plan_restructure', 'goal_adjustment', "
-                            "'schedule_swap', 'intensity_change', etc."
-                        ),
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Human-readable description of the proposed change.",
-                    },
-                    "preview": {
-                        "type": "object",
-                        "description": "Preview data showing before/after state.",
-                    },
-                    "checkpoint_type": {
-                        "type": "string",
-                        "enum": ["HARD", "SOFT"],
-                        "description": (
-                            "HARD = blocks until confirmed, "
-                            "SOFT = proceeds after timeout."
-                        ),
-                    },
-                },
-                "required": ["action_type", "description"],
-            },
-            category="planning",
-        )
-    )
+    # DEPRECATED: propose_plan_change replaced by adjust_plan. NOT registered.
+    # registry.register(
+    #     Tool(
+    #         name="propose_plan_change",
+    #         description=(
+    #             "Propose a plan change that needs user confirmation before execution."
+    #         ),
+    #         handler=propose_plan_change,
+    #         parameters={
+    #             "type": "object",
+    #             "properties": {
+    #                 "action_type": {"type": "string"},
+    #                 "description": {"type": "string"},
+    #                 "preview": {"type": "object"},
+    #                 "checkpoint_type": {"type": "string", "enum": ["HARD", "SOFT"]},
+    #             },
+    #             "required": ["action_type", "description"],
+    #         },
+    #         category="planning",
+    #     )
+    # )
 
     def get_pending_confirmations() -> dict:
         """Get the status of pending and recently resolved actions."""
@@ -144,17 +123,15 @@ def register_checkpoint_tools(registry: ToolRegistry, user_model=None) -> None:
             ],
         }
 
-    registry.register(
-        Tool(
-            name="get_pending_confirmations",
-            description=(
-                "Check the status of proposed plan changes. Returns pending proposals "
-                "awaiting user decision and recently resolved ones (confirmed/rejected). "
-                "Use this at the start of a conversation to check if the user has "
-                "responded to any previous proposals."
-            ),
-            handler=get_pending_confirmations,
-            parameters={},
-            category="planning",
-        )
-    )
+    # DEPRECATED: get_pending_confirmations - permission-system specific, rare. NOT registered.
+    # registry.register(
+    #     Tool(
+    #         name="get_pending_confirmations",
+    #         description=(
+    #             "Check the status of proposed plan changes."
+    #         ),
+    #         handler=get_pending_confirmations,
+    #         parameters={},
+    #         category="planning",
+    #     )
+    # )

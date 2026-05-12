@@ -67,30 +67,23 @@ def register_calc_tools(registry: ToolRegistry, user_model=None) -> None:
             "formula": formula,
         }
 
-    registry.register(Tool(
-        name="calculate_metric",
-        description=(
-            "Evaluate a previously defined metric formula for a single set of variable "
-            "values. Use get_config('metric_definitions') to see available metrics and "
-            "their required variables. Returns the numeric result."
-        ),
-        handler=calculate_metric,
-        parameters={
-            "type": "object",
-            "properties": {
-                "metric_name": {
-                    "type": "string",
-                    "description": "Name of the metric to calculate (must exist in metric_definitions)",
-                },
-                "variables": {
-                    "type": "object",
-                    "description": "Variable name → numeric value pairs required by the formula",
-                },
-            },
-            "required": ["metric_name", "variables"],
-        },
-        category="analysis",
-    ))
+    # DEPRECATED: calculate_metric - edge case tool. NOT registered.
+    # registry.register(Tool(
+    #     name="calculate_metric",
+    #     description=(
+    #         "Evaluate a previously defined metric formula for a single set of variable values."
+    #     ),
+    #     handler=calculate_metric,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "metric_name": {"type": "string"},
+    #             "variables": {"type": "object"},
+    #         },
+    #         "required": ["metric_name", "variables"],
+    #     },
+    #     category="analysis",
+    # ))
 
     # ------------------------------------------------------------------
     # calculate_bulk_metrics
@@ -121,29 +114,20 @@ def register_calc_tools(registry: ToolRegistry, user_model=None) -> None:
             "failed_count": failed_count,
         }
 
-    registry.register(Tool(
-        name="calculate_bulk_metrics",
-        description=(
-            "Evaluate a previously defined metric formula across multiple records "
-            "(e.g., all activities for the last 30 days). Returns a list of results "
-            "in the same order as the input records. Records that fail (missing "
-            "variables, division by zero) produce null in the output list."
-        ),
-        handler=calculate_bulk_metrics,
-        parameters={
-            "type": "object",
-            "properties": {
-                "metric_name": {
-                    "type": "string",
-                    "description": "Name of the metric (must exist in metric_definitions)",
-                },
-                "records": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "List of variable dicts, one per data point",
-                },
-            },
-            "required": ["metric_name", "records"],
-        },
-        category="analysis",
-    ))
+    # DEPRECATED: calculate_bulk_metrics - edge case tool. NOT registered.
+    # registry.register(Tool(
+    #     name="calculate_bulk_metrics",
+    #     description=(
+    #         "Evaluate a previously defined metric formula across multiple records."
+    #     ),
+    #     handler=calculate_bulk_metrics,
+    #     parameters={
+    #         "type": "object",
+    #         "properties": {
+    #             "metric_name": {"type": "string"},
+    #             "records": {"type": "array", "items": {"type": "object"}},
+    #         },
+    #         "required": ["metric_name", "records"],
+    #     },
+    #     category="analysis",
+    # ))
