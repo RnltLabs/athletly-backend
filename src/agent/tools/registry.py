@@ -214,7 +214,6 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_session_tools(registry, _user_id)
     register_episode_read_tools(registry, user_model)
     register_plan_adjust_tools(registry, user_model)
-    register_profile_md_tools(registry, user_model)
     register_goal_tools(registry, user_model)
     register_background_tools(registry, user_model)
     register_skill_tools(registry, user_model)
