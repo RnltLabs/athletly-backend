@@ -78,35 +78,12 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
     registry.register(Tool(
         name="update_journal_section",
         description=(
-            "Replace the body of a section in the athlete journal. The "
-            "journal is the single source of truth about who the athlete "
-            "is - their identity, current goal, preferences, training "
-            "knowledge.\n\n"
-            "CANONICAL SECTIONS (use these names exactly):\n"
-            "- 'Identity'                       static personal facts: "
-            "name, age, location, sports, lifestyle, constraints.\n"
-            "- 'Current Goal'                   the active target event + "
-            "facts. Replaced completely on each update.\n"
-            "- 'What I know about my training'  performance facts: paces, "
-            "PBs, VO2max estimates.\n"
-            "- 'Preferences'                    how the athlete wants to "
-            "be coached: output style, time of day, surface, etc.\n\n"
-            "WHEN TO USE:\n"
-            "- The athlete shares something that REPLACES previous info "
-            "for that section (new fitness baseline, updated identity).\n"
-            "- The section needs structural cleanup after multiple appends.\n\n"
-            "WHEN NOT TO USE:\n"
-            "- Add a single fact to a list section: use append_to_journal.\n"
-            "- Change just the target_date on a goal: use update_goal "
-            "(atomic, also logs to Goal Timeline + archives macrocycle).\n"
-            "- Annotate a single training activity: use annotate_activity.\n\n"
-            "EXAMPLE:\n"
-            "  update_journal_section(\n"
-            "    section='Identity',\n"
-            "    content='32, lives in Karlsruhe. Multi-sport: running, "
-            "cycling, gym. Trains mornings. Max 90 min weekday, 4h+ "
-            "weekend possible.'\n"
-            "  )"
+            "Replace body of a journal section (source of truth for athlete "
+            "facts). Canonical sections: 'Identity', 'Current Goal', 'What I "
+            "know about my training', 'Preferences'. Use when info REPLACES "
+            "prior section content or section needs cleanup. Avoid for "
+            "appending one fact (use append_to_journal), goal target shifts "
+            "(use update_goal), or per-activity notes (annotate_activity)."
         ),
         handler=update_journal_section,
         parameters={
@@ -141,26 +118,12 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
     registry.register(Tool(
         name="append_to_journal",
         description=(
-            "Add a new bullet to an APPEND-ONLY section of the athlete "
-            "journal. Use for sections that accumulate facts over time:\n\n"
-            "- 'Goal Timeline'  - every goal change (with date + reason).\n"
-            "- 'Open Threads'   - things to check on later (e.g. 'knee "
-            "pain reported 2026-05-12, ask next time').\n"
-            "- 'What we tried'  - coach learnings: what worked, what did "
-            "not.\n\n"
-            "WHEN TO USE:\n"
-            "- New event to add to the timeline.\n"
-            "- New open thread the coach should remember to check.\n"
-            "- A finished experiment / lesson worth recording.\n\n"
-            "WHEN NOT TO USE:\n"
-            "- Replacing an entire section: use update_journal_section.\n"
-            "- Resolving an open thread: use remove_from_journal.\n\n"
-            "EXAMPLE:\n"
-            "  append_to_journal(\n"
-            "    section='Open Threads',\n"
-            "    entry='2026-05-12: Knee pain during easy run, athlete "
-            "felt slower than usual. Check next session.'\n"
-            "  )"
+            "Append a bullet to an append-only journal section. Sections: "
+            "'Goal Timeline' (goal changes w/ date+reason), 'Open Threads' "
+            "(things to check later), 'What we tried' (coach learnings). Use "
+            "for new timeline events, threads, or recorded experiments. Avoid "
+            "for full-section rewrites (use update_journal_section) or thread "
+            "resolution (use remove_from_journal). Entry gets '- ' prefix auto."
         ),
         handler=append_to_journal,
         parameters={
@@ -240,26 +203,12 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
     registry.register(Tool(
         name="annotate_activity",
         description=(
-            "Attach a free-form note to a specific activity. Lets the "
-            "coach record per-session context that may matter later: "
-            "pain, perceived effort, weather, mental state, cut short.\n\n"
-            "WHEN TO USE:\n"
-            "- Athlete reports something about a specific recent session: "
-            "'I had knee pain on yesterday's run'.\n"
-            "- Coach observes something worth recording for trend "
-            "detection: 'completed long run but HR was unusually high'.\n\n"
-            "AFTER calling annotate_activity, you almost always also "
-            "want to:\n"
-            "- append_to_journal(section='Open Threads', ...) if the "
-            "issue needs follow-up next session, or\n"
-            "- update_journal_section('What I know...') if the note "
-            "reveals a lasting fitness fact.\n\n"
-            "EXAMPLE workflow when athlete reports knee pain:\n"
-            "1. annotate_activity(activity_id=..., note='Knee pain "
-            "(L), slower than target pace, lasted ~30min run.')\n"
-            "2. append_to_journal(section='Open Threads',\n"
-            "   entry='2026-05-12: Left knee pain during easy run "
-            "(activity X). Check at next session.')"
+            "Attach a free-form note to a specific activity (pain, RPE, "
+            "weather, cut-short reason). Use when athlete reports something "
+            "about a specific session or coach spots a trend-worthy "
+            "observation. Follow-up: append_to_journal('Open Threads') if "
+            "needs next-session check; update_journal_section('What I know...') "
+            "for a lasting fitness fact. activity_id is the UUID of the row."
         ),
         handler=annotate_activity,
         parameters={

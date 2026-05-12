@@ -5,8 +5,8 @@ when_to_use: Athlete is new or has incomplete core profile (missing name, sports
 required_tools:
   - update_profile
   - update_goal
-  - add_belief
-  - edit_athlete_memory
+  - update_journal_section
+  - append_to_journal
   - spawn_subagent
 ---
 
@@ -44,10 +44,15 @@ fields while making it feel like a normal conversation, not a form.
    - Training days: `update_profile(field="constraints.training_days_per_week", value=N)`
    - Max session: `update_profile(field="constraints.max_session_minutes", value=N)`
 
-4. **Capture extra signals as beliefs** alongside the structured updates.
-   If the athlete says "ich laufe lieber morgens und mag keinen Asphalt",
-   that goes to `edit_athlete_memory(action="append", content="...")` -
-   not into structured columns.
+4. **Capture extra signals in the journal** alongside the structured updates.
+   - Identity / lifestyle / body facts ("32, lebt in Karlsruhe, ein Kind"):
+     `update_journal_section(section="Identity", content="...")` or
+     `append_to_journal(section="Identity", entry="...")`.
+   - Coaching preferences ("laufe lieber morgens, mag keinen Asphalt"):
+     `update_journal_section(section="Preferences", content="...")` or
+     `append_to_journal(section="Preferences", entry="...")`.
+   - Anything that should be checked next session (injury, decision pending):
+     `append_to_journal(section="Open Threads", entry="<date>: ...")`.
 
 5. **Move to next missing field**. Repeat until all four required fields
    are filled.

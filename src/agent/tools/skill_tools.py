@@ -54,24 +54,11 @@ def register_skill_tools(registry: ToolRegistry, user_model) -> None:
     registry.register(Tool(
         name="invoke_skill",
         description=(
-            "Open a skill playbook - a declarative multi-step workflow "
-            "for situations that need orchestration across multiple "
-            "tool calls. Returns the playbook body as markdown; you then "
-            "follow the steps using your normal tools.\n\n"
-            "WHEN TO USE:\n"
-            "- The current situation matches a skill's description (e.g. "
-            "athlete has incomplete profile -> 'onboarding'; athlete "
-            "switches goals -> 'goal_change'; athlete reports injury -> "
-            "'injury_response').\n"
-            "- You want a structured workflow instead of improvising.\n\n"
-            "WHEN NOT TO USE:\n"
-            "- The action is atomic (single tool call). Just call the "
-            "tool directly.\n"
-            "- No skill matches the situation. Use your judgement.\n\n"
-            "Available skills are listed in your runtime context under "
-            "'# Available Skills'. Pick by name. After opening, follow "
-            "the playbook steps - it tells you which tools to call and "
-            "in what order. You can deviate when the situation requires."
+            "Open a skill playbook (declarative multi-step workflow); returns "
+            "markdown body to follow with normal tools. Use when situation "
+            "matches a skill (onboarding, goal_change, injury_response). Avoid "
+            "for atomic actions or when no skill matches. Available skills are "
+            "listed in the system prompt under '# Available Skills'."
         ),
         handler=invoke_skill,
         parameters={

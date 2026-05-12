@@ -15,6 +15,27 @@ from typing import Any, Callable
 _RETRY_HINT = " [Analyze the error and try a different approach.]"
 
 
+# Set of tools that are ALWAYS loaded (description visible to the agent
+# every turn). Everything else is deferred and fetched via tool_search
+# on demand. Keep this list tight - each entry adds tokens to every call.
+CORE_TOOL_NAMES: frozenset[str] = frozenset({
+    # Identity / memory (most-used)
+    "update_journal_section",
+    "append_to_journal",
+    "remove_from_journal",
+    "annotate_activity",
+    # Goal change (used whenever the athlete commits)
+    "update_goal",
+    # Read context (cheap, often needed)
+    "get_activities",
+    "get_athlete_profile",
+    # Skill invocation - opens any other workflow
+    "invoke_skill",
+    # Tool discovery - lets the agent find deferred tools
+    # (the tool_search helper itself is added at request build time)
+})
+
+
 @dataclass
 class Tool:
     """A single tool available to the agent."""
@@ -42,8 +63,15 @@ class ToolRegistry:
         for tool in mcp_tools:
             self._tools[tool.name] = replace(tool, source="mcp")
 
-    def get_openai_tools(self) -> list[dict]:
+    def get_openai_tools(self, *, defer_non_core: bool = False) -> list[dict]:
         """Get tool declarations in OpenAI/LiteLLM format.
+
+        When ``defer_non_core`` is True, every tool NOT in
+        ``CORE_TOOL_NAMES`` gets a top-level ``defer_loading: True`` flag.
+        LiteLLM forwards this to Anthropic's API: deferred tools only have
+        their NAME in the prompt, descriptions are fetched on demand via
+        the ``tool_search`` helper. This cuts the tool-layer token budget
+        by 80%+ for our 61-tool registry.
 
         Returns a list of dicts suitable for the ``tools`` parameter of
         ``litellm.completion()`` / ``openai.chat.completions.create()``.
@@ -58,8 +86,9 @@ class ToolRegistry:
                 },
             }
             if tool.parameters:
-                # Strip nullable (not part of JSON Schema proper) before sending
                 entry["function"]["parameters"] = _clean_parameters(tool.parameters)
+            if defer_non_core and tool.name not in CORE_TOOL_NAMES:
+                entry["defer_loading"] = True
             result.append(entry)
         return result
 

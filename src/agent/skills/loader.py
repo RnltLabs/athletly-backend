@@ -10,8 +10,8 @@ Frontmatter schema (YAML, between leading ``---`` lines):
     required_tools:
       - update_profile
       - update_goal
-      - add_belief
-      - edit_athlete_memory
+      - update_journal_section
+      - append_to_journal
     ---
 
 The body is plain markdown - the playbook itself. ``invoke_skill`` returns

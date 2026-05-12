@@ -484,7 +484,10 @@ class AgentLoop:
         self._save_turn("user", user_message)
 
         # Get tool declarations in OpenAI format for LiteLLM
-        openai_tools = self.tools.get_openai_tools()
+        # Anthropic native tool_search: only CORE_TOOL_NAMES descriptions
+        # are visible in the prompt; everything else is deferred. Saves
+        # ~80% of tool-layer tokens. See registry.CORE_TOOL_NAMES.
+        openai_tools = self.tools.get_openai_tools(defer_non_core=True)
 
         consecutive_errors = 0
         last_content = None  # Track last assistant content for MAX_TOOL_ROUNDS fallback
@@ -558,7 +561,7 @@ class AgentLoop:
                         + "\n\n# IMPORTANT OVERRIDE\n"
                         "Tools are temporarily unavailable. Respond ONLY with "
                         "natural conversational text. Do NOT list, reference, or "
-                        "simulate any tool calls (no update_profile, add_belief, "
+                        "simulate any tool calls (no update_profile, update_journal_section, "
                         "get_activities, etc.). Just answer the athlete directly "
                         "as a coach would in a normal conversation."
                     )
@@ -603,9 +606,20 @@ class AgentLoop:
                 break
             else:
                 # -- MODEL WANTS TO USE TOOLS --
-                # Append the assistant message with tool_calls to history
+                # Filter out Anthropic SERVER-SIDE tools (web_search, tool_search,
+                # code_execution). Their tool_use_id has the ``srvtoolu_`` prefix
+                # and Anthropic handles their results internally - we must NOT echo
+                # them back as tool_result blocks, or the next request fails with
+                # "unexpected tool_use_id". Server tools are billed and run server
+                # side; we only manage CLIENT-side function tools.
+                client_tool_calls = [
+                    tc for tc in tool_calls
+                    if not str(getattr(tc, "id", "") or "").startswith("srvtoolu_")
+                ]
+
+                # Append the assistant message with tool_calls to history.
+                # Only include client-managed function tool_calls.
                 assistant_msg: dict = {"role": "assistant", "content": content or ""}
-                # Serialize tool_calls for the message history
                 assistant_msg["tool_calls"] = [
                     {
                         "id": tc.id,
@@ -615,17 +629,27 @@ class AgentLoop:
                             "arguments": tc.function.arguments,
                         },
                     }
-                    for tc in tool_calls
+                    for tc in client_tool_calls
                 ]
+                # If only server tools fired, the assistant message has no
+                # tool_calls. That is valid - the model will continue without
+                # client-side tool execution. We still record content.
+                if not assistant_msg["tool_calls"]:
+                    assistant_msg.pop("tool_calls")
                 self._messages.append(assistant_msg)
 
                 # Track last content for MAX_TOOL_ROUNDS fallback
                 if content:
                     last_content = content
 
-                # Execute each tool call
+                # No client tools to execute - server tool result is already in
+                # the model's content, loop back for the next LLM call.
+                if not client_tool_calls:
+                    continue
+
+                # Execute each client tool call
                 sent_in_turn = False
-                for tc in tool_calls:
+                for tc in client_tool_calls:
                     tool_name = tc.function.name
                     try:
                         tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}

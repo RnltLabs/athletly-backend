@@ -81,10 +81,20 @@ def chat_completion(
     }
 
     if tools:
-        # For Anthropic, mark the last tool with cache_control so the whole
-        # tools block is cached (tools always come right after system).
         if is_anthropic and tools:
+            # Anthropic native tool_search: deferred tools only expose their
+            # NAME in the prompt, descriptions are fetched on demand via the
+            # tool_search helper. Saves ~80% of tool-layer tokens. Tool
+            # entries that opt into deferral already carry the
+            # `defer_loading: True` flag from get_openai_tools(defer_non_core=True).
             cached_tools = [dict(t) for t in tools]
+            has_deferred = any(t.get("defer_loading") for t in cached_tools)
+            if has_deferred:
+                cached_tools.append({
+                    "type": "tool_search_tool_bm25_20251119",
+                    "name": "tool_search_tool_bm25",
+                })
+            # Cache the whole tools block (stable structure across turns).
             cached_tools[-1] = {
                 **cached_tools[-1],
                 "cache_control": {"type": "ephemeral"},
