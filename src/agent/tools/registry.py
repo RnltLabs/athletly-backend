@@ -26,6 +26,14 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "annotate_activity",
     # Goal change (used whenever the athlete commits)
     "update_goal",
+    # Profile write: agent hallucinates value types (string "null" -> int col)
+    # without seeing the full param schema, so keep description always loaded.
+    "update_profile",
+    # Plan write: shape is non-trivial ("sessions": [...] required, NOT a
+    # weekly_structure dict). Agent without the description guesses wrong
+    # and emits an empty plan_preview card.
+    "save_plan",
+    "get_active_plan",
     # Read context (cheap, often needed)
     "get_activities",
     "get_athlete_profile",

@@ -33,7 +33,27 @@ def register_memory_tools(registry: ToolRegistry, user_model):
         if field not in valid_fields:
             return {"error": f"Invalid field: {field}. Valid fields: {sorted(valid_fields)}"}
 
+        # Reject placeholder nulls before they hit the DB. The agent sometimes
+        # passes the string "null"/"None" or the Python None when it has not
+        # actually gathered a value. Persisting that into an integer column
+        # raises Postgres 22P02 ("invalid input syntax for type integer").
+        if value is None or (
+            isinstance(value, str) and value.strip().lower() in {"null", "none", ""}
+        ):
+            return {
+                "skipped": True,
+                "field": field,
+                "reason": "no value supplied; ask the athlete and try again",
+            }
+
         # Gemini often sends JSON values as strings -- parse them
+        numeric_fields = (
+            "constraints.training_days_per_week",
+            "constraints.max_session_minutes",
+            "fitness.estimated_vo2max",
+            "fitness.weekly_volume_km",
+            "fitness.ftp_watts",
+        )
         if isinstance(value, str):
             # Try to parse JSON arrays/numbers from string values
             stripped = value.strip()
@@ -44,12 +64,26 @@ def register_memory_tools(registry: ToolRegistry, user_model):
                 except _json.JSONDecodeError:
                     pass
             # Parse numeric strings for numeric fields
-            elif field in ("constraints.training_days_per_week", "constraints.max_session_minutes",
-                           "fitness.estimated_vo2max", "fitness.weekly_volume_km", "fitness.ftp_watts"):
+            elif field in numeric_fields:
                 try:
                     value = int(value) if "." not in value else float(value)
                 except (ValueError, TypeError):
-                    pass
+                    return {
+                        "error": (
+                            f"Field {field} expects a number, got '{value}'. "
+                            "Ask the athlete for the actual value first."
+                        ),
+                    }
+
+        # Final type guard for numeric fields. If after parsing we still do
+        # not have a number, bail out instead of corrupting the DB row.
+        if field in numeric_fields and not isinstance(value, (int, float)):
+            return {
+                "error": (
+                    f"Field {field} expects a number; received {type(value).__name__}. "
+                    "Ask the athlete for the actual value first."
+                ),
+            }
 
         user_model.update_structured_core(field, value)
         user_model.save()

@@ -74,25 +74,57 @@ litellm.modify_params = True
 _MIN_RUNTIME_CTX_CACHE_CHARS = 800
 
 
+def _mark_message_for_cache(msg: dict) -> dict | None:
+    """Return a copy of ``msg`` with cache_control on its last content block,
+    or None if the message shape cannot carry a breakpoint.
+
+    Plain string content gets rewrapped into a single-block list so
+    LiteLLM can forward the marker to Anthropic. role="tool" with string
+    content is rewrapped the same way, but LiteLLM versions vary in
+    whether they preserve the marker through the OpenAI->Anthropic
+    tool_result translation. We add markers on the last TWO messages
+    precisely so an assistant message immediately before a tool_result
+    still carries a valid breakpoint when the tool message cannot.
+    """
+    content = msg.get("content")
+    if isinstance(content, str):
+        blocks: list = [{"type": "text", "text": content}]
+    elif isinstance(content, list):
+        blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+    else:
+        return None
+    if not blocks:
+        return None
+    last_block = blocks[-1]
+    if not isinstance(last_block, dict):
+        return None
+    blocks[-1] = {**last_block, "cache_control": {"type": "ephemeral"}}
+    return {**msg, "content": blocks}
+
+
 def _add_message_cache_breakpoints(
     messages: list[dict],
     is_anthropic: bool,
 ) -> list[dict]:
-    """Return a new message list with a rotating cache breakpoint on the
-    LAST message.
+    """Return a new message list with cache breakpoints on the last TWO
+    messages (Claude Code's rotating-breakpoint pattern).
 
-    Anthropic only caches a prefix UP TO a cache_control marker. To reuse
-    the conversation history across multiple tool rounds in the same user
-    turn, we attach an ephemeral cache_control to the last block of the
-    last message on every call. The breakpoint rotates forward with each
-    round; everything before it stays byte-stable, so cache reads grow
-    monotonically through the tool loop.
+    Anthropic supports up to 4 cache_control breakpoints per request. We
+    already use two for the system block and the tools array; the
+    remaining two go on the tail of the message list. This achieves two
+    things at once:
 
-    The input list is NOT mutated (project immutability rule). Messages
-    whose content was a plain string get rewrapped into a single-block
-    list of content blocks, so LiteLLM can forward cache_control to
-    Anthropic in the expected shape (see
-    https://docs.litellm.ai/docs/completion/prompt_caching).
+    1. Robustness: if LiteLLM strips cache_control from a role="tool"
+       message during its OpenAI->Anthropic translation, the marker on
+       the second-to-last message (usually an assistant turn) still
+       provides a valid prefix cut.
+    2. Smaller input_tokens: with two breakpoints near the end of the
+       conversation, the "tokens after the last breakpoint" billed as
+       fresh input shrinks to just the final block, while the
+       breakpoint one back keeps the previous round's tool_use +
+       tool_result pair inside the cached prefix.
+
+    The input list is NOT mutated (project immutability rule).
 
     Args:
         messages: OpenAI-format messages. Untouched on return.
@@ -105,39 +137,20 @@ def _add_message_cache_breakpoints(
     if not is_anthropic or len(messages) < 2:
         return messages
 
-    # Deep-copy via dict reconstruction; we only mutate the local copy of
-    # the last message. Earlier messages stay shared (their dicts are not
-    # rewritten).
     new_messages = [dict(m) for m in messages]
-    last = new_messages[-1]
-    role = last.get("role")
 
-    content = last.get("content")
-    if isinstance(content, str):
-        blocks = [{"type": "text", "text": content}]
-    elif isinstance(content, list):
-        # Re-copy the list and the last block so we do not mutate caller state.
-        blocks = [dict(b) if isinstance(b, dict) else b for b in content]
-    else:
-        # Unsupported content shape - bail out without caching.
-        return messages
+    # Mark the very last message.
+    marked_last = _mark_message_for_cache(new_messages[-1])
+    if marked_last is not None:
+        new_messages[-1] = marked_last
 
-    if not blocks:
-        return messages
+    # Mark the second-to-last message as a fallback breakpoint. With at
+    # least 2 messages we are guaranteed an index >= 0.
+    second_idx = len(new_messages) - 2
+    marked_second = _mark_message_for_cache(new_messages[second_idx])
+    if marked_second is not None:
+        new_messages[second_idx] = marked_second
 
-    last_block = blocks[-1]
-    if not isinstance(last_block, dict):
-        return messages
-
-    blocks[-1] = {**last_block, "cache_control": {"type": "ephemeral"}}
-
-    # role="tool" with string content gets rewrapped the same way; LiteLLM
-    # forwards the cache_control through to the Anthropic tool_result block.
-    new_last = {**last, "content": blocks}
-    # Preserve any role-specific fields (e.g. tool_call_id) - dict spread above
-    # already does that.
-    _ = role  # role retained for future-proofing; logic is uniform per role.
-    new_messages[-1] = new_last
     return new_messages
 
 
