@@ -237,4 +237,5 @@ def register_goal_tools(registry: ToolRegistry, user_model) -> None:
             },
         },
         category="memory",
+        display_label="Aktualisiere dein Ziel",
     ))

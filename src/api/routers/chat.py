@@ -186,7 +186,13 @@ def _make_sse_event(event_type: str, data: dict) -> ServerSentEvent:
         return SSEEmitter.tool_hint(
             name=data.get("name", ""),
             args=data.get("args", {}),
+            display_label=data.get("display_label", ""),
+            group_id=data.get("group_id", ""),
         )
+    if event_type == "tool_group_start":
+        return SSEEmitter.tool_group_start(group_id=data.get("group_id", ""))
+    if event_type == "tool_group_end":
+        return SSEEmitter.tool_group_end(group_id=data.get("group_id", ""))
     if event_type == "tool_result":
         return ServerSentEvent(
             event="tool_result",

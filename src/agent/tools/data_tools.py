@@ -45,6 +45,7 @@ def register_data_tools(registry: ToolRegistry, user_model):
         handler=get_athlete_profile,
         parameters={},
         category="data",
+        display_label="Lese dein Profil",
     ))
 
     # DEPRECATED: get_user_profile replaced by get_athlete_profile. NOT registered.
@@ -175,6 +176,7 @@ def register_data_tools(registry: ToolRegistry, user_model):
             },
         },
         category="data",
+        display_label="Lese deine letzten Workouts",
     ))
 
     def get_activity_details(activity_id: str) -> dict:
@@ -321,6 +323,7 @@ def register_data_tools(registry: ToolRegistry, user_model):
             "required": ["activity_id"],
         },
         category="data",
+        display_label="Schaue mir den Lauf genauer an",
     ))
 
     def get_current_plan() -> dict:
@@ -364,6 +367,7 @@ def register_data_tools(registry: ToolRegistry, user_model):
         handler=get_current_plan,
         parameters={},
         category="data",
+        display_label="Lese deinen aktuellen Plan",
     ))
 
     def get_past_plans(limit: int = 5) -> dict:

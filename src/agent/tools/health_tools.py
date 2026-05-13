@@ -213,4 +213,5 @@ def register_health_tools(registry: ToolRegistry, user_id: str = None) -> None:
             },
         },
         category="data",
+        display_label="Lese Schlaf und Recovery",
     ))

@@ -110,6 +110,7 @@ def register_episode_read_tools(registry: ToolRegistry, user_model) -> None:
             },
         },
         category="memory",
+        display_label="Lese alte Episoden",
     ))
 
 

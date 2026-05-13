@@ -152,6 +152,7 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
             "required": ["plan"],
         },
         category="planning",
+        display_label="Speichere den Plan",
     ))
 
     def get_active_plan() -> dict:
@@ -174,6 +175,7 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
         handler=get_active_plan,
         parameters={"type": "object", "properties": {}},
         category="planning",
+        display_label="Lese deinen aktuellen Plan",
     ))
 
     def get_plan_history(limit: int = 5) -> dict:
@@ -213,4 +215,5 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
             },
         },
         category="planning",
+        display_label="Schaue in deine alten Plaene",
     ))

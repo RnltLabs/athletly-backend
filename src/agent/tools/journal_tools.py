@@ -99,6 +99,7 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
             "required": ["section", "content"],
         },
         category="memory",
+        display_label="Schreibe ins Journal",
     ))
 
     # -- append_to_journal -------------------------------------------------
@@ -139,6 +140,7 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
             "required": ["section", "entry"],
         },
         category="memory",
+        display_label="Notiere eine Beobachtung",
     ))
 
     # -- remove_from_journal ----------------------------------------------
@@ -176,6 +178,7 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
             "required": ["section", "contains"],
         },
         category="memory",
+        display_label="Entferne aus dem Journal",
     ))
 
     # -- annotate_activity ------------------------------------------------
@@ -224,4 +227,5 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
             "required": ["activity_id", "note"],
         },
         category="memory",
+        display_label="Kommentiere ein Workout",
     ))

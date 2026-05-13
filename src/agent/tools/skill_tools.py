@@ -75,6 +75,7 @@ def register_skill_tools(registry: ToolRegistry, user_model) -> None:
             "required": ["name"],
         },
         category="meta",
+        display_label="Lade ein Playbook",
     ))
 
     def list_skills_detail() -> dict:

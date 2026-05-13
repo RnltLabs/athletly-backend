@@ -122,4 +122,5 @@ def register_action_tools(registry: ToolRegistry, user_model=None) -> None:
             "required": [],
         },
         category="meta",
+        display_label="Frage nach Garmin-Verbindung",
     ))

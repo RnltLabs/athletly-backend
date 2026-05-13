@@ -188,6 +188,7 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
         handler=get_config,
         parameters=_get_config_parameters,
         category="config",
+        display_label="Lese gespeicherte Konfigurationen",
     ))
 
     # ------------------------------------------------------------------
@@ -286,4 +287,5 @@ def register_config_tools(registry: ToolRegistry, user_model=None) -> None:
             "required": ["config_type", "name", "definition"],
         },
         category="config",
+        display_label="Speichere eine Konfiguration",
     ))

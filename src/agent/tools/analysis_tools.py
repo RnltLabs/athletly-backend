@@ -63,6 +63,7 @@ def register_analysis_tools(registry: ToolRegistry):
             },
         },
         category="analysis",
+        display_label="Analysiere deine Trainingslast",
     ))
 
     def compare_plan_vs_actual() -> dict:
@@ -153,6 +154,7 @@ def register_analysis_tools(registry: ToolRegistry):
         handler=compare_plan_vs_actual,
         parameters={},
         category="analysis",
+        display_label="Vergleiche Plan mit echtem Training",
     ))
 
     def classify_activity(activity_id: str, sport: str) -> dict:
