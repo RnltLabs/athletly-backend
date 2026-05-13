@@ -104,6 +104,18 @@ class SSEEmitter:
         )
 
     @staticmethod
+    def action_request(action_type: str, label: str, payload: dict | None = None) -> ServerSentEvent:
+        """Emit a request for the frontend to render an inline action card."""
+        return ServerSentEvent(
+            event="action_request",
+            data=json.dumps({
+                "action_type": action_type,
+                "label": label,
+                "payload": payload or {},
+            }, ensure_ascii=False),
+        )
+
+    @staticmethod
     def done() -> ServerSentEvent:
         """Sentinel event — signals the stream is finished."""
         return ServerSentEvent(

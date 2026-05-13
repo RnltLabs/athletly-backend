@@ -741,6 +741,26 @@ class AgentLoop:
                     if isinstance(tool_result, dict) and tool_result.get("_sent_in_turn"):
                         sent_in_turn = True
 
+                    # Forward inline action card requests as SSE events.
+                    # Tools opt in by returning ``_action_request`` in their
+                    # result dict (see ``action_tools.py``). The marker is
+                    # stripped from the dict that the model sees so it does
+                    # not pollute the chat history with internal plumbing.
+                    if isinstance(tool_result, dict):
+                        action_request = tool_result.pop("_action_request", None)
+                        if action_request and self.on_progress:
+                            try:
+                                self.on_progress(
+                                    "action_request",
+                                    json.dumps(action_request, ensure_ascii=False),
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to forward action_request from %s",
+                                    tool_name,
+                                    exc_info=True,
+                                )
+
                     tool_duration = int((time.time() - tool_start) * 1000)
 
                     # Record turn
@@ -999,6 +1019,14 @@ def _progress_to_sse_data(event_type: str, detail: str) -> dict:
     if event_type == "tool_error":
         # detail: "tool_name -> Error: <message>"
         return {"detail": detail}
+
+    if event_type == "action_request":
+        # detail: JSON-encoded {"action_type": ..., "label": ..., "payload": ...}
+        try:
+            return json.loads(detail) if detail else {}
+        except json.JSONDecodeError:
+            logger.warning("action_request payload was not valid JSON: %r", detail)
+            return {"action_type": "", "label": "", "payload": {}}
 
     if event_type == "responding":
         # The loop emits this just before setting response_text; we map it

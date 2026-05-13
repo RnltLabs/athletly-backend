@@ -144,6 +144,12 @@ def _make_sse_event(event_type: str, data: dict) -> ServerSentEvent:
             message=data.get("message", "Unknown error"),
             code=data.get("code", "internal_error"),
         )
+    if event_type == "action_request":
+        return SSEEmitter.action_request(
+            action_type=data.get("action_type", ""),
+            label=data.get("label", ""),
+            payload=data.get("payload") or {},
+        )
     return ServerSentEvent(
         event=event_type,
         data=json.dumps(data, ensure_ascii=False),

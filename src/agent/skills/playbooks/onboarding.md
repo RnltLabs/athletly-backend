@@ -62,6 +62,12 @@ fields while making it feel like a normal conversation, not a form.
    they want to do next ("Soll ich dir mal einen ersten Trainingsplan
    bauen?"). The transition is INVISIBLE to the athlete.
 
+7. **Garmin connect prompt.** Immediately after the four core fields are
+   filled, call `request_garmin_connect` so the athlete can connect their
+   Garmin account. Once they do (you will see new activities in
+   `get_activities`), you will have real data to ground the first plan in.
+   Call this once per onboarding flow; do not spam it.
+
 ## Anti-patterns to avoid
 
 - Asking multiple questions at once. One question, one answer.
