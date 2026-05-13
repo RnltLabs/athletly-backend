@@ -14,6 +14,7 @@ Architecture:
 import asyncio
 import json
 import logging
+import re
 from typing import Annotated, AsyncGenerator, Awaitable, Callable
 
 import redis.asyncio as aioredis
@@ -114,6 +115,65 @@ async def _release_lock(redis: aioredis.Redis | None, user_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Assistant-text sanitizer
+# ---------------------------------------------------------------------------
+#
+# The model sometimes leaks Markdown formatting (asterisks, headings) or
+# em/en-dashes despite the system-prompt rules. The frontend renders chat
+# text literally, so these characters appear as raw glyphs in the UI.
+# Strip them server-side before emitting the `message` SSE event.
+#
+# Design choice: sanitize ONLY the outgoing SSE payload. The raw text is
+# still persisted to `session_messages` by the agent loop, so the original
+# model output is preserved for replay, debugging, and re-evaluation. The
+# client never sees the raw form.
+
+# **bold**  or  __bold__   (non-greedy, single line)
+_BOLD_RE = re.compile(r"(?:\*\*|__)(.+?)(?:\*\*|__)")
+
+# *italic*  -- single asterisks NOT acting as a list bullet.
+# We require a non-space character on BOTH sides of the asterisks so that
+# a line that starts with "* item" (Markdown bullet) is left alone.
+_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)")
+
+# `# heading`, `## heading`, ... at start of a line.
+_HEADING_RE = re.compile(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+")
+
+
+def _sanitize_assistant_text(text: str) -> str:
+    """Strip Markdown formatting and em/en-dashes from an assistant reply.
+
+    The frontend renders SSE message text literally. Any Markdown bleed
+    (``**bold**``, ``# heading``) or em/en-dash glyphs show up as raw
+    characters. This helper normalises them to plain prose before the
+    `message` event is emitted.
+
+    Rules:
+      - ``**bold**`` and ``__bold__`` -> inner text only.
+      - ``*italic*`` -> inner text only, but a leading ``* `` bullet at
+        the start of a line is left untouched.
+      - ``#``..``######`` heading markers at start of line are removed.
+      - U+2014 (em-dash) and U+2013 (en-dash) -> ``-`` (hyphen-minus).
+
+    Args:
+        text: The raw assistant text emitted by the agent loop.
+
+    Returns:
+        The sanitised text safe for SSE delivery to the client.
+    """
+    if not text:
+        return text
+
+    # Bold first so that the italic pass does not match the inner pair of
+    # asterisks from a `**word**` construct.
+    cleaned = _BOLD_RE.sub(r"\1", text)
+    cleaned = _ITALIC_RE.sub(r"\1", cleaned)
+    cleaned = _HEADING_RE.sub("", cleaned)
+    cleaned = cleaned.replace("—", "-").replace("–", "-")
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
 # SSE event generator
 # ---------------------------------------------------------------------------
 
@@ -138,7 +198,7 @@ def _make_sse_event(event_type: str, data: dict) -> ServerSentEvent:
             data=json.dumps(data, ensure_ascii=False),
         )
     if event_type == "message":
-        return SSEEmitter.message(data.get("text", ""))
+        return SSEEmitter.message(_sanitize_assistant_text(data.get("text", "")))
     if event_type == "error":
         return SSEEmitter.error(
             message=data.get("message", "Unknown error"),
