@@ -8,6 +8,10 @@ required_tools:
   - update_journal_section
   - append_to_journal
   - spawn_subagent
+  - ask_choice
+  - ask_number
+  - ask_date
+  - ask_confirm
 ---
 
 # Onboarding Workflow
@@ -67,6 +71,32 @@ fields while making it feel like a normal conversation, not a form.
    Garmin account. Once they do (you will see new activities in
    `get_activities`), you will have real data to ground the first plan in.
    Call this once per onboarding flow; do not spam it.
+
+## Use Generative UI when possible
+
+When a question has a known, small set of valid answers, render an inline
+input component instead of asking in plain prose. The user taps an option
+and the choice arrives as a normal user message; you then call the matching
+update tool exactly as if they had typed the answer.
+
+Concrete mappings:
+
+- "Was sind deine Hauptsportarten?" -> `ask_choice(question="Was sind deine Hauptsportarten?", options=["Laufen", "Radfahren", "Schwimmen", "Triathlon", "Wandern", "Fitness", "Yoga", "Andere"], multi=true)`
+- "Wie viele Tage pro Woche?" -> `ask_number(question="Wie viele Tage pro Woche kannst du trainieren?", min=1, max=7, unit="Tage")`
+- "Max. Session-Dauer?" -> `ask_number(question="Wie lange darf eine Session maximal dauern?", min=20, max=240, step=10, unit="Min")`
+- "Wann ist dein Zielrennen?" -> `ask_date(question="Wann ist dein Zielrennen?", min_date=<today as YYYY-MM-DD>)`
+
+For free-text answers (name, specific event name, goal description) keep
+using plain prose questions. Those cannot be constrained to a fixed option
+set.
+
+After the user replies via the UI component (the frontend sends a normal
+user message like "Laufen, Radfahren" or "5 Tage"), continue the onboarding
+flow exactly as before: call the matching update_profile / update_goal tool
+and move to the next missing field.
+
+Call each UI tool at most once per question. Do not re-render the same
+component if the user has already answered.
 
 ## Anti-patterns to avoid
 
