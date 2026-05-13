@@ -183,6 +183,38 @@ class AgentLoop:
         self.user_model = user_model
         self.tools = tool_registry or get_default_tools(user_model, context=context)
         self.on_progress = on_progress
+
+        # Observability: log resolved tool-loadout + approximate token weight
+        # so we can monitor the impact of CORE_TOOL_NAMES / defer_loading.
+        # Uses a cheap len(json)/4 heuristic (close enough for tracking).
+        try:
+            from src.agent.tools.registry import CORE_TOOL_NAMES
+            _all_tools = self.tools.get_openai_tools(defer_non_core=False)
+            _deferred = self.tools.get_openai_tools(defer_non_core=True)
+            _core_count = sum(
+                1 for t in _all_tools
+                if t.get("function", {}).get("name") in CORE_TOOL_NAMES
+            )
+            _full_weight = len(json.dumps(_all_tools)) // 4
+            # Deferred tools strip descriptions/parameters on the wire; the
+            # name-only stub is ~5 tokens each. Core tools keep full schema.
+            _slim_weight = sum(
+                len(json.dumps(t)) // 4 if not t.get("defer_loading") else 5
+                for t in _deferred
+            )
+            logger.info(
+                "agent_tools_loaded context=%s total=%d core=%d deferred=%d "
+                "tokens_full~%d tokens_slim~%d savings~%d%%",
+                context,
+                len(_all_tools),
+                _core_count,
+                len(_all_tools) - _core_count,
+                _full_weight,
+                _slim_weight,
+                int(round((1 - _slim_weight / _full_weight) * 100)) if _full_weight else 0,
+            )
+        except Exception as _e:  # pragma: no cover - observability only
+            logger.debug("tool_loadout_log_failed: %s", _e)
         self.startup_context = startup_context
         self.context = context
         self._max_rounds = max_rounds or MAX_TOOL_ROUNDS
