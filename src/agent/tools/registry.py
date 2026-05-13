@@ -202,6 +202,7 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     from src.agent.tools.garmin_tools import register_garmin_tools
     from src.agent.tools.notification_tools import register_notification_tools
     from src.agent.tools.action_tools import register_action_tools
+    from src.agent.tools.ui_tools import register_ui_tools
     from src.agent.tools.session_tools import register_session_tools
     from src.agent.tools.episode_read_tools import register_episode_read_tools
     from src.agent.tools.goal_tools import register_goal_tools
@@ -232,6 +233,7 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_garmin_tools(registry, user_model)
     register_notification_tools(registry, _user_id)
     register_action_tools(registry, user_model)
+    register_ui_tools(registry, user_model)
     register_session_tools(registry, _user_id)
     register_episode_read_tools(registry, user_model)
     register_goal_tools(registry, user_model)
