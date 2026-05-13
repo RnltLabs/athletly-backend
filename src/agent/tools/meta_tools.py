@@ -18,8 +18,23 @@ from src.agent.tools.registry import Tool, ToolRegistry
 logger = logging.getLogger(__name__)
 
 
-# Hard limit on subagent iterations to bound cost / latency.
-SUBAGENT_MAX_ROUNDS = 8
+# Hard limit on subagent iterations to bound cost / latency. Lowered from 8
+# to 5 after observing single subagent invocations chew through 30-50k input
+# tokens and trip Anthropic's 50k ITPM Tier 1 rate limit. Research tasks
+# typically resolve in 2 to 3 web_fetch calls, so 5 is plenty of headroom.
+SUBAGENT_MAX_ROUNDS = 5
+
+# Hard cap on cumulative prompt (input) tokens spent across all rounds of a
+# single spawn_subagent call. Once exceeded the loop halts with
+# _budget_exhausted=True instead of issuing another chat_completion. This is
+# the primary guard against the subagent eating the parent request's entire
+# ITPM budget on one tool call.
+SUBAGENT_INPUT_TOKEN_BUDGET = 10000
+
+# Per-tool-result trim for the subagent's own context. Subagents need short
+# observations; long tool outputs compound across rounds and push us past
+# the token budget faster. Main agent uses 2000; subagent uses 1200.
+SUBAGENT_TOOL_RESULT_MAX_CHARS = 1200
 
 
 def register_meta_tools(registry: ToolRegistry, user_model):
@@ -176,11 +191,19 @@ def register_meta_tools(registry: ToolRegistry, user_model):
 
         rounds = 0
         tool_trace: list[dict] = []
+        total_input_tokens = 0
+        budget_exhausted = False
         bound = max_rounds if max_rounds and max_rounds > 0 else SUBAGENT_MAX_ROUNDS
         bound = min(bound, SUBAGENT_MAX_ROUNDS)
 
         openai_tools = sub_registry.get_openai_tools()
 
+        # NOTE: chat_completion does not yet accept a per-call timeout kwarg.
+        # A 30s timeout would fail fast on hung calls but would require
+        # extending the chat_completion signature. Skipping for now to avoid
+        # conflicting with parallel work on llm.py; the token budget guard
+        # below is the main protection. Future improvement: thread a
+        # timeout=30 through to litellm.completion.
         while rounds < bound:
             rounds += 1
             response = chat_completion(
@@ -190,15 +213,55 @@ def register_meta_tools(registry: ToolRegistry, user_model):
                 temperature=0.3,
             )
             if not response.choices:
+                logger.info(
+                    "subagent_complete task=%s rounds=%d total_input_tokens=%d "
+                    "budget_exhausted=%s",
+                    (task or "")[:60], rounds, total_input_tokens, False,
+                )
                 return {"error": "subagent: empty LLM response", "rounds": rounds}
+
+            # Accumulate prompt tokens from this round. LiteLLM normalizes the
+            # usage object across providers, exposing .prompt_tokens. Guard
+            # against missing/None values from mocked or partial responses.
+            usage = getattr(response, "usage", None)
+            prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+            if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+                total_input_tokens += prompt_tokens
 
             msg = response.choices[0].message
             tcalls = msg.tool_calls
             if not tcalls:
+                # Natural exit: the model produced a final answer this round.
+                logger.info(
+                    "subagent_complete task=%s rounds=%d total_input_tokens=%d "
+                    "budget_exhausted=%s",
+                    (task or "")[:60], rounds, total_input_tokens, False,
+                )
                 return {
                     "result": (msg.content or "").strip(),
                     "tool_calls": tool_trace,
                     "rounds": rounds,
+                    "_tokens_used": total_input_tokens,
+                }
+
+            # Budget guard: if the cumulative input-token spend has exceeded
+            # the cap, stop BEFORE executing tools / issuing another call.
+            if total_input_tokens >= SUBAGENT_INPUT_TOKEN_BUDGET:
+                budget_exhausted = True
+                fallback = (msg.content or "").strip() or (
+                    "Subagent halted before completing - token budget exhausted."
+                )
+                logger.info(
+                    "subagent_complete task=%s rounds=%d total_input_tokens=%d "
+                    "budget_exhausted=%s",
+                    (task or "")[:60], rounds, total_input_tokens, True,
+                )
+                return {
+                    "result": fallback,
+                    "tool_calls": tool_trace,
+                    "rounds": rounds,
+                    "_budget_exhausted": True,
+                    "_tokens_used": total_input_tokens,
                 }
 
             # Append assistant message with tool calls
@@ -225,13 +288,21 @@ def register_meta_tools(registry: ToolRegistry, user_model):
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str)[:2000],
+                    "content": json.dumps(result, ensure_ascii=False, default=str)[
+                        :SUBAGENT_TOOL_RESULT_MAX_CHARS
+                    ],
                 })
 
+        logger.info(
+            "subagent_complete task=%s rounds=%d total_input_tokens=%d "
+            "budget_exhausted=%s",
+            (task or "")[:60], rounds, total_input_tokens, budget_exhausted,
+        )
         return {
             "error": "subagent: hit max rounds without final answer",
             "tool_calls": tool_trace,
             "rounds": rounds,
+            "_tokens_used": total_input_tokens,
         }
 
     registry.register(Tool(
@@ -272,7 +343,7 @@ def register_meta_tools(registry: ToolRegistry, user_model):
                 },
                 "max_rounds": {
                     "type": "integer",
-                    "description": "Cap subagent rounds (default 5, max 8).",
+                    "description": "Cap subagent rounds (default 5, max 5).",
                     "nullable": True,
                 },
                 "context": {
