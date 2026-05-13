@@ -59,6 +59,60 @@ _SAVE_PLAN_DESCRIPTION = (
 )
 
 
+_WEEKDAY_ORDER = (
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+)
+
+
+def _coerce_sessions(plan: dict) -> list[dict]:
+    """Extract sessions[] from a plan dict, tolerating older shapes.
+
+    The canonical schema is ``plan["sessions"] = [{day, sport, ...}]`` but
+    earlier agent versions sometimes produced ``plan["weekly_structure"] =
+    {"monday": {...}, ...}``. We convert that on the fly so the
+    plan_preview card renders the same way regardless of when the plan
+    was saved.
+    """
+    sessions = plan.get("sessions")
+    if isinstance(sessions, list) and sessions:
+        return sessions
+
+    weekly = plan.get("weekly_structure")
+    if isinstance(weekly, dict) and weekly:
+        derived: list[dict] = []
+        # Sort by canonical weekday order so the UI shows Mon..Sun.
+        for day in _WEEKDAY_ORDER:
+            entry = weekly.get(day)
+            if not isinstance(entry, dict):
+                continue
+            derived.append({
+                "day": day,
+                "sport": entry.get("sport"),
+                "name": entry.get("focus") or entry.get("name"),
+                "description": entry.get("notes") or entry.get("description"),
+                "duration_minutes": entry.get("target_duration_min")
+                or entry.get("duration_minutes"),
+                "intensity": entry.get("intensity"),
+            })
+        # Also pick up any extra keys not in the canonical weekday list
+        # (e.g. an athlete-specific custom label).
+        for key, entry in weekly.items():
+            if key in _WEEKDAY_ORDER or not isinstance(entry, dict):
+                continue
+            derived.append({
+                "day": key,
+                "sport": entry.get("sport"),
+                "name": entry.get("focus") or entry.get("name"),
+                "description": entry.get("notes") or entry.get("description"),
+                "duration_minutes": entry.get("target_duration_min")
+                or entry.get("duration_minutes"),
+                "intensity": entry.get("intensity"),
+            })
+        return derived
+
+    return []
+
+
 def _build_plan_preview(plan: dict, plan_id: str | int | None) -> dict:
     """Construct the ``_ui_component`` payload for the plan_preview card.
 
@@ -66,7 +120,7 @@ def _build_plan_preview(plan: dict, plan_id: str | int | None) -> dict:
     nulls. The frontend treats an absent key as "the agent did not provide
     this" and renders accordingly.
     """
-    sessions = plan.get("sessions") or []
+    sessions = _coerce_sessions(plan)
     truncated = len(sessions) > _MAX_INLINE_PREVIEW_SESSIONS
     inline_sessions = (
         list(sessions[:_MAX_INLINE_PREVIEW_SESSIONS]) if truncated else list(sessions)
@@ -77,8 +131,13 @@ def _build_plan_preview(plan: dict, plan_id: str | int | None) -> dict:
         props["plan_id"] = plan_id
     if "start_date" in plan:
         props["start_date"] = plan.get("start_date")
+    elif "period_start" in plan:
+        # Older plans used period_start; surface it under the canonical key.
+        props["start_date"] = plan.get("period_start")
     if "focus" in plan:
         props["focus"] = plan.get("focus")
+    elif "name" in plan:
+        props["focus"] = plan.get("name")
     # Always include sessions (possibly empty list) so the card can render
     # an explicit "no sessions" state instead of breaking on a missing key.
     props["sessions"] = inline_sessions
@@ -156,21 +215,39 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
     ))
 
     def get_active_plan() -> dict:
-        """Return the most recent (active) plan or an empty result."""
+        """Return the most recent (active) plan or an empty result.
+
+        Also emits an inline plan_preview UI card so the frontend can
+        render the plan as a structured component instead of forcing
+        the coach to describe it in prose. When the athlete asks
+        "show me my plan" we want the visual, not a wall of text.
+        """
         if not _settings.use_supabase:
             return {"plan": None, "message": "No Supabase configured."}
         from src.db.plans_db import get_active_plan as _get_active
         row = _get_active(_resolve_user_id())
         if not row:
             return {"plan": None, "message": "No active plan."}
-        return {"plan": row.get("plan_data"), "id": row.get("id"), "created_at": row.get("created_at")}
+        plan_data = row.get("plan_data") or {}
+        plan_id = row.get("id")
+        result: dict = {
+            "plan": plan_data,
+            "id": plan_id,
+            "created_at": row.get("created_at"),
+        }
+        if plan_data:
+            result["_ui_component"] = _build_plan_preview(plan_data, plan_id)
+        return result
 
     registry.register(Tool(
         name="get_active_plan",
         description=(
-            "Read the athlete's current active plan. Use this before "
-            "adjusting (move a session, change intensity, etc.) so you "
-            "can mutate the dict and call save_plan with the new version."
+            "Read the athlete's current active plan and render it as an "
+            "inline plan_preview card. The card is the canonical surface "
+            "for showing a plan in chat: do NOT re-describe sessions in "
+            "prose after calling this. Use this before adjusting (move a "
+            "session, change intensity, etc.) so you can mutate the dict "
+            "and call save_plan with the new version."
         ),
         handler=get_active_plan,
         parameters={"type": "object", "properties": {}},
