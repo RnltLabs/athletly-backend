@@ -5,12 +5,15 @@ Currently exposes a single destructive operation:
     POST /profile/reset
 
 This wipes every row owned by the authenticated user across all
-user-scoped tables. The auth row in ``auth.users`` is preserved so the
-user stays signed in and can simply start a fresh onboarding.
+user-scoped tables EXCEPT provider_tokens. The auth row in
+``auth.users`` is also preserved so the user stays signed in.
 
-Tables touched are aligned with what ``athctl reset full|nuclear`` removes.
-Provider tokens are removed too (Garmin disconnects) - the athlete must
-reconnect after a reset.
+Provider tokens (Garmin / Strava OAuth) are deliberately kept so the
+athlete does NOT need to redo the SSO flow after a reset. Re-logging in
+to Garmin is the heaviest step (rate-limited, sometimes requires MFA),
+so the UX optimises for: chat-history + plans + activities go away, but
+the wearable stays paired. If the athlete really wants to drop the
+provider too, they use the explicit disconnect button in the profile.
 
 This endpoint is destructive. Frontend MUST gate it behind a confirmation
 dialog.
@@ -32,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Tables keyed by user_id that get wiped during reset.
 # Order is from leaf to root (dependents first) where there are FKs.
+# Deliberately excludes ``provider_tokens`` - see module docstring.
 USER_TABLES_IN_ORDER: list[str] = [
     "pending_actions",
     "proactive_queue",
@@ -41,7 +45,6 @@ USER_TABLES_IN_ORDER: list[str] = [
     "activities",
     "health_daily_metrics",
     "athlete_journal",
-    "provider_tokens",
     "profiles",
 ]
 
