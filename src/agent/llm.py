@@ -17,18 +17,33 @@ from google import genai
 
 logger = logging.getLogger(__name__)
 
-# Anthropic prompt caching notes (https://platform.claude.com/docs/en/build-with-claude/prompt-caching):
+# Anthropic prompt caching notes (Q2 2026, source:
+# https://platform.claude.com/docs/en/build-with-claude/prompt-caching):
 # - 5-minute TTL default. Reads cost 10% of base input tokens. Writes cost 125%.
-# - Cache invalidates on ANY change to system or tools, so the cached prefix
-#   must be stable across turns.
-# - Min cacheable size: 1024 tokens for Haiku, 2048 for Sonnet. Our static
-#   system prompt is ~2k+ tokens so we are safe; below threshold we skip
-#   caching to avoid an "invalid_request_error".
+# - Cache invalidates on ANY change to a cached block (system, tools, or a
+#   message preceded by a cache_control breakpoint), so the cached prefix
+#   must be byte-stable across turns.
+# - Min cacheable size for claude-haiku-4-5 / claude-sonnet-4-x is 4096 tokens.
+#   Below the threshold the cache_control flag is silently ignored by the API
+#   (no error, no caching), which is exactly the bug we are fixing.
+# - On claude-haiku-4-5 cache reads do NOT count toward ITPM (Input Tokens
+#   Per Minute). This is different from haiku 3.5 which still counts reads
+#   against ITPM (see the dagger marker in the rate-limit docs). For us this
+#   means a healthy cache hit rate directly buys headroom inside our 50k
+#   ITPM Tier 1 budget.
+# - Up to 4 cache_control breakpoints per request. We use them for:
+#     1. The static system prompt block (stable across all turns)
+#     2. An optional per-turn runtime_context system block (stable within
+#        the multi-round tool loop of a single user turn)
+#     3. The last tool definition (stable across turns)
+#     4. The last message in the conversation history (rotating breakpoint
+#        so the growing tool-use history is reused on subsequent rounds)
 
-# Min characters as a cheap proxy for tokens (1 token ~= 4 chars). 1024
-# tokens ~= 4096 chars; use a conservative 4000 to skip caching for tiny
-# system prompts like test fixtures.
-_MIN_CACHE_CHARS = 4000
+# Min characters as a cheap proxy for tokens (1 token ~= 4 chars). The
+# 4096-token Anthropic minimum maps to ~16384 chars; we use 16400 as a
+# conservative round number so test fixtures with shorter prompts simply
+# skip caching instead of failing.
+_MIN_CACHE_CHARS = 16400
 
 # Rate-limit retry policy (Anthropic 429s and other provider 429s):
 # - max 3 attempts total
@@ -52,12 +67,87 @@ litellm.suppress_debug_info = True
 litellm.modify_params = True
 
 
+# Min characters required for a runtime_context block to get its own
+# cache breakpoint. ~800 chars (~200 tokens) is the sweet spot: large
+# enough that a 1-round write recovers itself on round 2, small enough
+# that we do not split tiny per-turn payloads.
+_MIN_RUNTIME_CTX_CACHE_CHARS = 800
+
+
+def _add_message_cache_breakpoints(
+    messages: list[dict],
+    is_anthropic: bool,
+) -> list[dict]:
+    """Return a new message list with a rotating cache breakpoint on the
+    LAST message.
+
+    Anthropic only caches a prefix UP TO a cache_control marker. To reuse
+    the conversation history across multiple tool rounds in the same user
+    turn, we attach an ephemeral cache_control to the last block of the
+    last message on every call. The breakpoint rotates forward with each
+    round; everything before it stays byte-stable, so cache reads grow
+    monotonically through the tool loop.
+
+    The input list is NOT mutated (project immutability rule). Messages
+    whose content was a plain string get rewrapped into a single-block
+    list of content blocks, so LiteLLM can forward cache_control to
+    Anthropic in the expected shape (see
+    https://docs.litellm.ai/docs/completion/prompt_caching).
+
+    Args:
+        messages: OpenAI-format messages. Untouched on return.
+        is_anthropic: Whether the target model is an Anthropic model.
+
+    Returns:
+        A new list of message dicts. Identical to input when not anthropic
+        or when there are fewer than 2 messages.
+    """
+    if not is_anthropic or len(messages) < 2:
+        return messages
+
+    # Deep-copy via dict reconstruction; we only mutate the local copy of
+    # the last message. Earlier messages stay shared (their dicts are not
+    # rewritten).
+    new_messages = [dict(m) for m in messages]
+    last = new_messages[-1]
+    role = last.get("role")
+
+    content = last.get("content")
+    if isinstance(content, str):
+        blocks = [{"type": "text", "text": content}]
+    elif isinstance(content, list):
+        # Re-copy the list and the last block so we do not mutate caller state.
+        blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+    else:
+        # Unsupported content shape - bail out without caching.
+        return messages
+
+    if not blocks:
+        return messages
+
+    last_block = blocks[-1]
+    if not isinstance(last_block, dict):
+        return messages
+
+    blocks[-1] = {**last_block, "cache_control": {"type": "ephemeral"}}
+
+    # role="tool" with string content gets rewrapped the same way; LiteLLM
+    # forwards the cache_control through to the Anthropic tool_result block.
+    new_last = {**last, "content": blocks}
+    # Preserve any role-specific fields (e.g. tool_call_id) - dict spread above
+    # already does that.
+    _ = role  # role retained for future-proofing; logic is uniform per role.
+    new_messages[-1] = new_last
+    return new_messages
+
+
 def chat_completion(
     messages: list[dict],
     system_prompt: str | None = None,
     tools: list[dict] | None = None,
     temperature: float = 0.7,
     model: str | None = None,
+    runtime_context: str | None = None,
 ) -> litellm.ModelResponse:
     """Perform a synchronous chat completion via LiteLLM.
 
@@ -71,6 +161,12 @@ def chat_completion(
         tools: OpenAI-format tool definitions (list of dicts).
         temperature: Sampling temperature.
         model: Model to use (defaults to MODULE-level MODEL).
+        runtime_context: Optional per-turn context (date, athlete profile,
+            plan summary, recovery status). For Anthropic models this is
+            placed in a SECOND system block AFTER the static system prompt
+            and gets its own ephemeral cache_control, so a single user turn
+            can hit the cache on every follow-up tool round. For non-
+            Anthropic models it is prepended to the first user message.
 
     Returns:
         litellm.ModelResponse (OpenAI-compatible response object).
@@ -81,29 +177,91 @@ def chat_completion(
     # Build final message list. For Anthropic, wrap the system prompt in a
     # content-blocks structure carrying cache_control so the (large) static
     # coaching prompt is cached for 5 minutes. This cuts token cost ~90%
-    # and excludes cached input tokens from the per-minute rate limit.
+    # and excludes cached input tokens from the per-minute rate limit
+    # (claude-haiku-4-5 specifically; haiku 3.5 still counts reads vs ITPM).
     final_messages = list(messages)
+
+    # 1. Optionally inject runtime_context for non-anthropic providers as a
+    #    prefix to the first user message. Anthropic gets a dedicated
+    #    system block further below.
+    if (
+        runtime_context
+        and not is_anthropic
+        and final_messages
+    ):
+        first_user_idx = next(
+            (i for i, m in enumerate(final_messages) if m.get("role") == "user"),
+            None,
+        )
+        if first_user_idx is not None:
+            existing = final_messages[first_user_idx]
+            existing_content = existing.get("content") or ""
+            merged = (
+                f"[CONTEXT]\n{runtime_context}\n\n[USER MESSAGE]\n{existing_content}"
+            )
+            final_messages = (
+                final_messages[:first_user_idx]
+                + [{**existing, "content": merged}]
+                + final_messages[first_user_idx + 1:]
+            )
+
+    # 2. Prepend the system prompt (and, for Anthropic, a runtime_context
+    #    block) at the very front.
     if system_prompt:
-        # Only cache when the prompt is large enough to clear Anthropic's
-        # minimum cacheable size (Haiku >= 1024 tokens, Sonnet >= 2048).
         cache_system = is_anthropic and len(system_prompt) >= _MIN_CACHE_CHARS
         if cache_system:
-            final_messages = [
-                {
+            system_msg: dict = {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+            prefix: list[dict] = [system_msg]
+
+            if (
+                runtime_context
+                and len(runtime_context) >= _MIN_RUNTIME_CTX_CACHE_CHARS
+            ):
+                # Second system block: per-turn but stable across tool
+                # rounds inside that turn. Own cache_control breakpoint
+                # so the runtime context is a cache write on round 1 and
+                # a cache read on every subsequent round.
+                prefix.append({
                     "role": "system",
                     "content": [
                         {
                             "type": "text",
-                            "text": system_prompt,
+                            "text": runtime_context,
                             "cache_control": {"type": "ephemeral"},
                         }
                     ],
-                }
-            ] + final_messages
+                })
+            elif runtime_context:
+                # Too short to bother caching - inline as plain text after
+                # the static block.
+                prefix.append({
+                    "role": "system",
+                    "content": runtime_context,
+                })
+
+            final_messages = prefix + final_messages
         else:
-            final_messages = [
-                {"role": "system", "content": system_prompt}
-            ] + final_messages
+            prefix = [{"role": "system", "content": system_prompt}]
+            if runtime_context and is_anthropic:
+                # System prompt too small to cache, but caller still passed
+                # runtime_context. Emit it as an uncached second system block
+                # so callers see consistent behaviour.
+                prefix.append({"role": "system", "content": runtime_context})
+            final_messages = prefix + final_messages
+
+    # 3. Add a rotating cache breakpoint on the LAST message. This makes
+    #    accumulating tool_use / tool_result history cacheable across the
+    #    rounds of a single user turn.
+    final_messages = _add_message_cache_breakpoints(final_messages, is_anthropic)
 
     kwargs: dict = {
         "model": resolved_model,
@@ -197,17 +355,40 @@ def _extract_retry_after(exc: Exception) -> float | None:
 
 
 def _log_cache_usage(response: litellm.ModelResponse, model: str) -> None:
-    """Emit cache hit/write counters so we can measure cache effectiveness."""
+    """Emit per-call token counters so cache effectiveness is observable.
+
+    Always logs, even when the provider returns zero/None for the cache
+    fields. That way absent cache reads show up explicitly as
+    cache_hit_pct=0 instead of silently disappearing, which is exactly
+    the failure mode that hid the original caching bug.
+    """
     usage = getattr(response, "usage", None)
     if usage is None:
         return
-    cache_writes = getattr(usage, "cache_creation_input_tokens", None)
-    cache_reads = getattr(usage, "cache_read_input_tokens", None)
-    if cache_writes is None and cache_reads is None:
-        return
+
+    input_tokens = getattr(usage, "prompt_tokens", None) or 0
+    output_tokens = getattr(usage, "completion_tokens", None) or 0
+    cache_writes = getattr(usage, "cache_creation_input_tokens", None) or 0
+    cache_reads = getattr(usage, "cache_read_input_tokens", None) or 0
+
+    # total_input represents what the provider actually billed as input
+    # for this call: fresh input + cache writes + cache reads. Different
+    # providers expose this differently; we reconstruct it locally so the
+    # log line is consistent across providers.
+    total_input = input_tokens + cache_writes + cache_reads
+    denom = max(1, total_input)
+    cache_hit_pct = round(100 * cache_reads / denom)
+
     logger.info(
-        "LLM cache usage model=%s writes=%s reads=%s",
-        model, cache_writes or 0, cache_reads or 0,
+        "LLM call model=%s input=%s cache_create=%s cache_read=%s "
+        "output=%s total_input=%s cache_hit_pct=%s",
+        model,
+        input_tokens,
+        cache_writes,
+        cache_reads,
+        output_tokens,
+        total_input,
+        cache_hit_pct,
     )
 
 
@@ -228,6 +409,7 @@ def chat_completion_with_fallback(
     system_prompt: str | None = None,
     tools: list[dict] | None = None,
     temperature: float | None = None,
+    runtime_context: str | None = None,
 ) -> litellm.ModelResponse:
     """Try models in sequence from settings.fallback_models until one succeeds.
 
@@ -240,6 +422,7 @@ def chat_completion_with_fallback(
         system_prompt: Optional system prompt prepended to messages.
         tools: Optional OpenAI-format tool definitions.
         temperature: Sampling temperature (defaults to settings.agent_temperature).
+        runtime_context: Optional per-turn context block (see chat_completion).
 
     Returns:
         litellm.ModelResponse from the first model that succeeds.
@@ -262,10 +445,11 @@ def chat_completion_with_fallback(
                 tools=tools,
                 temperature=resolved_temperature,
                 model=model,
+                runtime_context=runtime_context,
             )
         except Exception as exc:
             last_error = exc
-            logger.warning("Model %s failed: %s — trying next...", model, exc)
+            logger.warning("Model %s failed: %s - trying next...", model, exc)
 
     raise last_error or RuntimeError("All fallback models failed")
 
