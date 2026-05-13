@@ -41,15 +41,23 @@ already knows.
    weniger fragen." The tool emits an inline credentials form, the user
    fills it, the frontend handles the API call.
 
-3. After connection succeeds, call `get_activities(limit=30)`. Look at
-   the sport field across activities and infer the athlete's main
-   sports. Then confirm via
+3. After the form submits, call `get_provider_status(provider="garmin")`.
+   - If `connected=true` and `activity_count > 0`: skip ahead, you
+     already have data. Read it via `get_activities(limit=30)`.
+   - If `connected=true` and `activity_count == 0` (or `last_sync_at` is
+     stale by 24h+): call `sync_garmin_data(days=30)` to pull fresh data,
+     then `get_activities(limit=30)`.
+   - If `connected=false`: the user cancelled or it errored. Fall back to
+     asking sports directly (see fallback below).
+
+   With activities in hand, infer the athlete's main sports from the
+   `sport` field and confirm via
    `ask_choice(multi=true, question="Ich sehe diese Sportarten in deinen
    letzten 30 Tagen - stimmt das?", options=[<detected sports>, "Andere"])`.
    Persist with `update_profile(field="sports", value=[...])`.
 
-   Fallback (user cancelled Garmin or it errored): ask sports directly
-   via `ask_choice(multi=true, options=["Laufen", "Radfahren", "Schwimmen",
+   Fallback (no Garmin): ask sports directly via
+   `ask_choice(multi=true, options=["Laufen", "Radfahren", "Schwimmen",
    "Triathlon", "Krafttraining", "Wandern", "Andere"])`.
 
 4. Goal. Free text first: "Hast du ein konkretes Ziel - ein Rennen, ein

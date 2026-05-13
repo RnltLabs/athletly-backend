@@ -176,14 +176,21 @@ or pick dates instead of typing free text whenever the answer set is known.
    verbinde dein Garmin." The user submits credentials in the inline
    form. The tool itself handles the rest.
 
-3. **After Garmin connected**: call `get_activities(limit=30)` and look at
-   the sport types. Use that to INFER the athlete's main sports - don't
-   ask them again. Confirm briefly: "Ich sehe Laufen und Radfahren in
-   deinen letzten 30 Tagen, stimmt das?" via `ask_choice(multi=true,
-   options=[<detected sports>, "Andere"])` so they can adjust.
-   - If Garmin connection FAILED (user cancelled or error), fall back to
-     `ask_choice(multi=true, options=["Laufen", "Radfahren", "Schwimmen",
-     "Triathlon", "Krafttraining", "Wandern", "Andere"])`.
+3. **After Garmin connected**: call `get_provider_status(provider="garmin")`.
+   - If `connected=true, activity_count > 0`: just `get_activities(limit=30)`
+     and use it. No sync needed.
+   - If `connected=true, activity_count == 0` (or `last_sync_at` stale):
+     `sync_garmin_data(days=30)` first, then `get_activities(limit=30)`.
+   - If `connected=false`: skip to the fallback (ask sports directly).
+
+   With activity data: infer the athlete's main sports from the
+   `sport` field and confirm via `ask_choice(multi=true, options=[<detected
+   sports>, "Andere"])`. Persist with `update_profile(field="sports",
+   value=[...])`.
+
+   Fallback (no Garmin): `ask_choice(multi=true, options=["Laufen",
+   "Radfahren", "Schwimmen", "Triathlon", "Krafttraining", "Wandern",
+   "Andere"])`.
 
 4. **Goal**. Free-text first ("Hast du ein konkretes Ziel - ein Rennen,
    ein Event?"), then if a specific event is named, use `spawn_subagent`
