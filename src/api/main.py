@@ -8,7 +8,6 @@ Entry point for uvicorn:
     - slowapi rate limiting
     - Chat router (mounted at /chat)
     - Webhook router (mounted at /webhook)
-    - HeartbeatService (started/stopped with app lifespan)
     - Lifespan startup/shutdown logging
     - Health endpoint
 """
@@ -35,22 +34,15 @@ VERSION = "0.1.0"
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    from src.services.heartbeat import HeartbeatService
-
     settings = get_settings()
     logger.info(
-        "Athletly backend starting — model=%s redis=%s",
+        "Athletly backend starting - model=%s redis=%s",
         settings.agenticsports_model,
         settings.redis_url,
     )
-
-    heartbeat = HeartbeatService(interval_seconds=settings.heartbeat_interval_seconds)
-    await heartbeat.start()
-
     try:
         yield
     finally:
-        await heartbeat.stop()
         logger.info("Athletly backend shutting down")
 
 

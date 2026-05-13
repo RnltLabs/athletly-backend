@@ -367,25 +367,6 @@ async def _run_background_task(
             },
         )
 
-        # Also queue as proactive message for next chat session
-        try:
-            from src.agent.proactive import queue_proactive_message
-            await asyncio.to_thread(
-                queue_proactive_message,
-                user_id=user_id,
-                trigger={
-                    "type": "background_task_result",
-                    "data": {
-                        "task_id": task_id,
-                        "result": response_text[:4000],
-                        "tool_calls": result.tool_calls_made,
-                    },
-                },
-                priority=0.7,
-            )
-        except Exception:
-            logger.debug("Proactive queue for bg task result skipped", exc_info=True)
-
         logger.info(
             "Background task %s completed: %d tool calls, %d ms",
             task_id, result.tool_calls_made, result.total_duration_ms,

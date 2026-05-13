@@ -1,347 +1,94 @@
-"""Planning tools -- create and evaluate training plans.
+"""Planning tools: thin persistence + read access for training plans.
 
-These are the equivalent of Claude Code using Write/Edit tools to create code.
-Plan creation uses a specialized LLM call (like a sub-agent) with a
-coaching-specific system prompt.
+The agent composes plans inline using its own reasoning (no sub-LLM, no
+hardcoded coaching rules). These tools only provide:
+
+    - save_plan(plan): persist a plan dict the agent constructed
+    - get_active_plan(): read the current plan so the agent can adjust it
+    - get_plan_history(limit): list past plans for context
+
+The plan schema is documented in the save_plan tool description so the
+agent knows what shape to produce. No prompts, no scores, no rules.
 """
 
+from __future__ import annotations
+
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
-import logging
-
-from src.agent.llm import chat_completion
-from src.agent.json_utils import extract_json
 from src.agent.tools.registry import Tool, ToolRegistry
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 
-def _unwrap_plan(plan: dict) -> dict:
-    """Unwrap nested plan structures that LLMs sometimes produce.
-
-    Gemini occasionally wraps the actual plan in a `{"result": "```json ...```"}`
-    envelope. This function detects and unwraps such wrappers so downstream
-    code always receives a proper plan dict.
-    """
-    # Case 1: {"result": "<json string>"} wrapper
-    if list(plan.keys()) == ["result"] and isinstance(plan.get("result"), str):
-        raw = plan["result"]
-        try:
-            inner = extract_json(raw)
-            if isinstance(inner, dict):
-                logger.info("Unwrapped plan from 'result' string wrapper")
-                return _unwrap_plan(inner)  # recurse in case of double-wrap
-        except (ValueError, TypeError):
-            pass
-
-    # Case 2: Plan nested under a single top-level key like "plan" or "training_plan"
-    # but only if the inner value is a dict with session-like content
-    for wrapper_key in ("plan", "training_plan", "weekly_plan"):
-        inner = plan.get(wrapper_key)
-        if (
-            isinstance(inner, dict)
-            and len(plan) <= 3  # wrapper + maybe metadata keys
-            and any(k in inner for k in ("sessions", "days", "s", "plan"))
-        ):
-            logger.info("Unwrapped plan from '%s' dict wrapper", wrapper_key)
-            # Preserve any metadata keys from the outer wrapper
-            result = {**inner}
-            for k, v in plan.items():
-                if k != wrapper_key and k not in result:
-                    result[k] = v
-            return result
-
-    return plan
+_SAVE_PLAN_DESCRIPTION = (
+    "Persist a weekly training plan you composed. The frontend reads "
+    "plan_data.sessions to render the plan view. Required shape:\n"
+    "{\n"
+    '  "start_date": "YYYY-MM-DD (Monday)",\n'
+    '  "focus": "short free-text label",\n'
+    '  "sessions": [\n'
+    "    {\n"
+    '      "day": "monday|tuesday|... or German equivalent",\n'
+    '      "date": "YYYY-MM-DD",\n'
+    '      "sport": "running|cycling|swimming|strength|...",\n'
+    '      "name": "session title",\n'
+    '      "description": "what to do in 1-2 sentences",\n'
+    '      "duration_minutes": 60,\n'
+    '      "intensity": "low|moderate|high",\n'
+    '      "steps": [ /* optional structured intervals */ ],\n'
+    '      "notes": "optional coaching notes"\n'
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "Use this whenever you decide to set or replace the athlete's plan. "
+    "For adjustments (move a session, swap intensity, etc.) call "
+    "get_active_plan first, mutate, then save_plan with the new dict."
+)
 
 
-def _build_recovery_planning_context(user_id: str | None) -> str | None:
-    """Build recovery-aware planning context from health data.
-
-    Returns planning-relevant hints based on current recovery metrics,
-    or None if no health data or on error.
-    """
-    if not user_id:
-        return None
-
-    try:
-        from src.services.health_context import build_health_summary
-
-        summary = build_health_summary(user_id, days=7)
-        if not summary or not summary.get("data_available"):
-            return None
-
-        latest = summary.get("latest", {})
-        avgs = summary.get("averages_7d", {})
-        hints: list[str] = []
-
-        # Sleep quality check
-        sleep_score = latest.get("sleep_score")
-        if sleep_score is not None and sleep_score < 65:
-            hints.append(f"Sleep score is low ({sleep_score}/100). Reduce high-intensity sessions, add recovery work.")
-
-        # HRV trend check
-        hrv = latest.get("hrv")
-        avg_hrv = avgs.get("hrv")
-        if hrv is not None and avg_hrv is not None and avg_hrv > 0:
-            hrv_deviation = ((hrv - avg_hrv) / avg_hrv) * 100
-            if hrv_deviation < -15:
-                hints.append(f"HRV is {abs(hrv_deviation):.0f}% below 7-day average ({hrv} vs {avg_hrv}). Signs of accumulated fatigue.")
-
-        # Stress check
-        stress = latest.get("stress")
-        if stress is not None and stress > 50:
-            hints.append(f"Stress level is elevated ({stress}). Consider lighter training load.")
-
-        # Body battery check
-        body_battery = latest.get("body_battery_high")
-        if body_battery is not None and body_battery < 30:
-            hints.append(f"Body battery is very low ({body_battery}). Rest day recommended.")
-
-        if not hints:
-            # Good recovery — note it
-            parts = []
-            if sleep_score is not None:
-                parts.append(f"Sleep {sleep_score}")
-            if hrv is not None:
-                parts.append(f"HRV {hrv}")
-            if parts:
-                hints.append(f"Recovery looks good ({', '.join(parts)}). Normal training load appropriate.")
-
-        return "\n".join(hints)
-
-    except Exception:
-        return None  # Non-critical — plan generation continues without recovery context
-
-
-def _build_macrocycle_week_context(week_number: int, settings=None, user_id: str = None) -> str | None:
-    """Load the active macrocycle and extract context for the given week.
-
-    Returns a formatted string for prompt injection, or None on failure.
-    """
-    try:
-        if settings is None:
-            settings = get_settings()
-        if not settings.use_supabase:
-            return None
-
-        uid = user_id or settings.agenticsports_user_id
-        from src.db.macrocycle_db import get_active_macrocycle
-        macrocycle = get_active_macrocycle(uid)
-        if not macrocycle:
-            return None
-
-        weeks = macrocycle.get("weeks", [])
-        # Find the matching week
-        target_week = None
-        for w in weeks:
-            if w.get("week_number") == week_number:
-                target_week = w
-                break
-
-        if not target_week:
-            return None
-
-        lines = [
-            f"MACROCYCLE CONTEXT (Week {week_number} of {macrocycle.get('total_weeks', '?')}):",
-            f"  Macrocycle: {macrocycle.get('name', 'Unknown')}",
-            f"  Phase: {target_week.get('phase', 'Unknown')}",
-            f"  Focus: {target_week.get('focus', 'Not specified')}",
-        ]
-
-        volume = target_week.get("volume_target", {})
-        if volume:
-            lines.append(f"  Volume target: {volume.get('total_minutes', '?')} min, {volume.get('total_sessions', '?')} sessions")
-
-        intensity = target_week.get("intensity_distribution", {})
-        if intensity:
-            lines.append(
-                f"  Intensity: {intensity.get('low', '?')}% low, "
-                f"{intensity.get('moderate', '?')}% moderate, "
-                f"{intensity.get('high', '?')}% high"
-            )
-
-        key_sessions = target_week.get("key_sessions", [])
-        if key_sessions:
-            lines.append(f"  Key sessions: {', '.join(key_sessions)}")
-
-        notes = target_week.get("notes")
-        if notes:
-            lines.append(f"  Notes: {notes}")
-
-        lines.append("")
-        lines.append("Design this week's training plan to match the macrocycle targets above.")
-        return "\n".join(lines)
-
-    except Exception:
-        return None  # Non-critical — plan generation continues without macrocycle context
-
-
-def register_planning_tools(registry: ToolRegistry, user_model):
-    """Register all planning tools."""
+def register_planning_tools(registry: ToolRegistry, user_model) -> None:
+    """Register plan persistence and read tools."""
     _settings = get_settings()
 
-    def create_training_plan(
-        focus: str = None,
-        feedback: str = None,
-        sport_distribution: dict = None,
-        macrocycle_week: int = None,
-    ) -> dict:
-        """Generate a training plan using the coach persona."""
-        from src.agent.prompts import build_coach_system_prompt, build_plan_prompt
+    def _resolve_user_id() -> str:
+        return (
+            getattr(user_model, "user_id", None)
+            or _settings.agenticsports_user_id
+        )
 
-        profile = user_model.project_profile()
-        beliefs = user_model.get_active_beliefs(min_confidence=0.6)
-        uid = (getattr(user_model, "user_id", None) or _settings.agenticsports_user_id) if _settings.use_supabase else ""
+    def save_plan(plan: dict) -> dict:
+        """Persist a training plan to the active store."""
+        if not isinstance(plan, dict) or not plan:
+            return {"error": "plan must be a non-empty dict matching the documented schema"}
+
+        plan = {**plan, "_saved_at": datetime.now().isoformat()}
 
         if _settings.use_supabase:
-            from src.db import list_activities as db_list_activities
-            from src.db import list_episodes as db_list_episodes
-            activities = db_list_activities(uid, limit=50)
-            episodes = db_list_episodes(uid, limit=10)
-        else:
-            from src.tools.activity_store import list_activities
-            from src.memory.episodes import list_episodes
-            activities = list_activities()
-            episodes = list_episodes(limit=10)
+            from src.db import store_plan
+            row = store_plan(_resolve_user_id(), plan)
+            return {"saved": True, "id": row["id"]}
 
-        from src.memory.episodes import retrieve_relevant_episodes
-        relevant_eps = retrieve_relevant_episodes(
-            {"goal": profile.get("goal", {}), "sports": profile.get("sports", [])},
-            episodes,
-            max_results=5,
-        )
-
-        base_prompt = build_plan_prompt(
-            profile, beliefs=beliefs, activities=activities,
-            relevant_episodes=relevant_eps,
-        )
-
-        # Inject recovery context when available
-        recovery_context = _build_recovery_planning_context(uid or None)
-        if recovery_context:
-            base_prompt += f"\n\nCURRENT RECOVERY STATUS:\n{recovery_context}"
-
-        # Inject macrocycle week context when specified
-        if macrocycle_week is not None:
-            macro_context = _build_macrocycle_week_context(macrocycle_week, settings=_settings, user_id=uid)
-            if macro_context:
-                base_prompt += f"\n\n{macro_context}"
-
-        if focus:
-            base_prompt += f"\n\nFOCUS FOR THIS PLAN: {focus}"
-        if feedback:
-            base_prompt += f"\n\nPREVIOUS PLAN FEEDBACK (address these issues): {feedback}"
-        if sport_distribution:
-            base_prompt += f"\n\nREQUESTED SPORT DISTRIBUTION: {json.dumps(sport_distribution)}"
-
-        response = chat_completion(
-            messages=[{"role": "user", "content": base_prompt}],
-            system_prompt=build_coach_system_prompt(uid),
-            temperature=0.7,
-        )
-
-        plan = extract_json(response.choices[0].message.content.strip())
-        plan = _unwrap_plan(plan)
-        plan["_generated_at"] = datetime.now().isoformat()
-        if macrocycle_week is not None:
-            plan["_macrocycle_week"] = macrocycle_week
-
-        # Cache the draft so save_plan() can save without the agent
-        # re-echoing the full plan dict through context.
-        try:
-            user_model.meta = {**user_model.meta, "_last_plan_draft": plan}
-            user_model.save()
-        except Exception as exc:
-            logger.debug("Failed to cache plan draft: %s", exc)
-
-        return plan
+        plans_dir = Path("data/plans")
+        plans_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        path = plans_dir / f"plan_{timestamp}.json"
+        path.write_text(json.dumps(plan, indent=2))
+        return {"saved": True, "path": str(path)}
 
     registry.register(Tool(
-        name="create_training_plan",
-        description=(
-            "Draft a structured weekly plan via the coach sub-agent (profile + "
-            "beliefs + recent 50 activities + recovery + optional macrocycle "
-            "week context). Use for next-week plans, regen after evaluator "
-            "rejection (pass feedback), or post-save_macrocycle week 1. Avoid "
-            "for multi-week structure (use create_macrocycle_plan) or single-"
-            "session tweaks. Workflow: create -> evaluate_plan -> save_plan() "
-            "no-args. Draft is cached in user_model.meta; DO NOT echo plan back."
-        ),
-        handler=create_training_plan,
-        parameters={
-            "type": "object",
-            "properties": {
-                "focus": {
-                    "type": "string",
-                    "description": "Training focus or emphasis (e.g., 'base building', 'speed work', 'recovery week')",
-                    "nullable": True,
-                },
-                "feedback": {
-                    "type": "string",
-                    "description": "Feedback from a previous plan evaluation -- issues to fix",
-                    "nullable": True,
-                },
-                "sport_distribution": {
-                    "type": "object",
-                    "description": "Requested session counts per sport (e.g., {\"running\": 3, \"cycling\": 2})",
-                    "nullable": True,
-                },
-                "macrocycle_week": {
-                    "type": "integer",
-                    "description": "Week number from active macrocycle to use as context for this plan",
-                    "nullable": True,
-                },
-            },
-        },
-        category="planning",
-    ))
-
-    def evaluate_plan(plan: dict) -> dict:
-        """Evaluate plan quality with an independent reviewer persona.
-
-        Uses agent-defined eval criteria from DB. If no criteria are
-        defined, the plan is accepted by default (score=100).
-        """
-        from src.agent.plan_evaluator import evaluate_plan as _evaluate
-
-        profile = user_model.project_profile()
-        beliefs = user_model.get_active_beliefs(min_confidence=0.6)
-
-        user_id = getattr(user_model, "user_id", "unknown")
-
-        evaluation = _evaluate(
-            plan, profile, user_id=user_id, beliefs=beliefs,
-        )
-
-        return {
-            "score": evaluation.score,
-            "acceptable": evaluation.acceptable,
-            "criteria": evaluation.criteria_scores,
-            "issues": evaluation.issues,
-            "suggestions": evaluation.suggestions,
-        }
-
-    registry.register(Tool(
-        name="evaluate_plan",
-        description=(
-            "Score a training plan via an independent evaluator persona using "
-            "define_eval_criteria. Returns {score 0-100, acceptable, criteria, "
-            "issues, suggestions}. Call IMMEDIATELY after create_training_plan; "
-            "acceptable=true+score>=70 -> save_plan(); else regen with "
-            "feedback. Avoid for single sessions or re-evaluating accepted "
-            "plans. No criteria defined -> auto-accept (score=100); define "
-            "criteria early in onboarding so evaluation has teeth."
-        ),
-        handler=evaluate_plan,
+        name="save_plan",
+        description=_SAVE_PLAN_DESCRIPTION,
+        handler=save_plan,
         parameters={
             "type": "object",
             "properties": {
                 "plan": {
                     "type": "object",
-                    "description": "The training plan to evaluate",
+                    "description": "The plan dict. See tool description for schema.",
                 },
             },
             "required": ["plan"],
@@ -349,111 +96,53 @@ def register_planning_tools(registry: ToolRegistry, user_model):
         category="planning",
     ))
 
-    def save_plan(plan: dict | None = None) -> dict:
-        """Save a training plan.
-
-        If *plan* is omitted, uses the cached draft from the most recent
-        ``create_training_plan`` call. This lets the agent persist a plan
-        with a single ``save_plan()`` call after evaluation passes,
-        without re-echoing the whole plan through context.
-        """
-        if plan is None or not isinstance(plan, dict) or not plan:
-            plan = (user_model.meta or {}).get("_last_plan_draft")
-            if not plan:
-                return {
-                    "error": (
-                        "No plan provided and no draft is cached. Call "
-                        "create_training_plan first, then save_plan() to "
-                        "persist the draft."
-                    )
-                }
-            # Use a copy so popping _evaluation does not mutate cache.
-            plan = dict(plan)
-        if _settings.use_supabase:
-            from src.db import store_plan
-            evaluation = plan.pop("_evaluation", None)
-            score = evaluation.get("score") if evaluation else None
-            feedback = evaluation.get("feedback") if evaluation else None
-            row = store_plan(
-                getattr(user_model, "user_id", None) or _settings.agenticsports_user_id, plan,
-                evaluation_score=score, evaluation_feedback=feedback,
-            )
-            return {"saved": True, "id": row["id"]}
-        else:
-            plans_dir = Path("data/plans")
-            plans_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            path = plans_dir / f"plan_{timestamp}.json"
-            path.write_text(json.dumps(plan, indent=2))
-            return {"saved": True, "path": str(path)}
+    def get_active_plan() -> dict:
+        """Return the most recent (active) plan or an empty result."""
+        if not _settings.use_supabase:
+            return {"plan": None, "message": "No Supabase configured."}
+        from src.db.plans_db import get_active_plan as _get_active
+        row = _get_active(_resolve_user_id())
+        if not row:
+            return {"plan": None, "message": "No active plan."}
+        return {"plan": row.get("plan_data"), "id": row.get("id"), "created_at": row.get("created_at")}
 
     registry.register(Tool(
-        name="save_plan",
+        name="get_active_plan",
         description=(
-            "Persist the current plan draft as the active plan (archives prior). "
-            "CALL save_plan() with NO ARGS to commit the cached draft from "
-            "create_training_plan (zero context tokens). Pass plan=<dict> only "
-            "when committing an externally-provided plan. Use immediately after "
-            "evaluate_plan returns acceptable=true; never save unevaluated. "
-            "Empty cache + no plan -> error; run create_training_plan first."
+            "Read the athlete's current active plan. Use this before "
+            "adjusting (move a session, change intensity, etc.) so you "
+            "can mutate the dict and call save_plan with the new version."
         ),
-        handler=save_plan,
-        parameters={
-            "type": "object",
-            "properties": {
-                "plan": {
-                    "type": "object",
-                    "description": (
-                        "OPTIONAL - explicit plan dict. Omit to use the "
-                        "cached draft from the last create_training_plan."
-                    ),
-                    "nullable": True,
-                },
-            },
-        },
+        handler=get_active_plan,
+        parameters={"type": "object", "properties": {}},
         category="planning",
     ))
 
     def get_plan_history(limit: int = 5) -> dict:
-        """Get historical training plans for the athlete."""
+        """List historical plans (compact summaries)."""
+        if not _settings.use_supabase:
+            return {"plans": [], "message": "No Supabase configured."}
         from src.db.plans_db import list_plans
-
-        uid = getattr(user_model, "user_id", None) or _settings.agenticsports_user_id
-
-        plans = list_plans(uid, limit=min(limit, 20))
-
-        if not plans:
-            return {"plans": [], "message": "No historical plans found."}
-
-        from src.agent.plan_evaluator import extract_sessions_from_plan
-
-        summaries = []
-        for p in plans:
-            plan_data = p.get("plan_data", {})
-            sessions = extract_sessions_from_plan(plan_data)
-            summaries.append({
+        plans = list_plans(_resolve_user_id(), limit=min(max(limit, 1), 20))
+        summaries = [
+            {
                 "id": p.get("id"),
                 "created_at": p.get("created_at"),
                 "active": p.get("active", False),
-                "evaluation_score": p.get("evaluation_score"),
-                "session_count": len(sessions),
-                "week_start": plan_data.get("week_start"),
-                "sports": list(set(
-                    s.get("sport") or s.get("sp") or "unknown" for s in sessions
-                )),
-                "total_duration_min": sum(
-                    s.get("total_duration_minutes") or s.get("duration_minutes") or s.get("dur_min") or s.get("dur") or 0
-                    for s in sessions
-                ),
-            })
-
+                "focus": (p.get("plan_data") or {}).get("focus"),
+                "start_date": (p.get("plan_data") or {}).get("start_date"),
+                "session_count": len((p.get("plan_data") or {}).get("sessions") or []),
+            }
+            for p in plans
+        ]
         return {"plans": summaries, "count": len(summaries)}
 
     registry.register(Tool(
         name="get_plan_history",
         description=(
-            "Get historical training plans. Returns compact summaries of past "
-            "plans with dates, scores, sports, and session counts."
+            "List historical training plans (compact summaries: id, "
+            "created_at, focus, start_date, session_count). Use for "
+            "context when planning a new week."
         ),
         handler=get_plan_history,
         parameters={
@@ -461,7 +150,7 @@ def register_planning_tools(registry: ToolRegistry, user_model):
             "properties": {
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of plans to return (default 5, max 20)",
+                    "description": "Max plans to return (default 5, max 20).",
                 },
             },
         },

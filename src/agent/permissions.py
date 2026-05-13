@@ -26,10 +26,7 @@ logger = logging.getLogger(__name__)
 DANGEROUS_TOOLS: frozenset[str] = frozenset({
     "disconnect_provider",  # wipes provider tokens
     "delete_plan",          # if such a tool exists
-    "delete_macrocycle",    # if such a tool exists
     "reset_user_data",      # wipes everything
-    # update_goal is destructive (archives macrocycle) but the user is
-    # actively driving it so we let it through without confirmation.
 })
 
 

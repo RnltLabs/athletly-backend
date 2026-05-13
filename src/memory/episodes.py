@@ -400,10 +400,19 @@ def _build_reflection_prompt(
             f"{conversation_context}\n"
         )
     if beliefs:
-        from src.agent.prompts import _format_beliefs_section
-        beliefs_text = _format_beliefs_section(beliefs)
-        if beliefs_text:
-            subjective_section += beliefs_text
+        by_category: dict[str, list[dict]] = {}
+        for b in beliefs:
+            cat = b.get("category", "general")
+            by_category.setdefault(cat, []).append(b)
+        if by_category:
+            lines = ["\nCOACH'S NOTES ON THIS ATHLETE (from past conversations):"]
+            for category, items in sorted(by_category.items()):
+                lines.append(f"  [{category.upper()}]")
+                for b in items:
+                    conf = b.get("confidence", 0.7)
+                    lines.append(f"    - {b.get('text', '?')} (confidence: {conf:.1f})")
+            lines.append("")
+            subjective_section += "\n".join(lines)
 
     return f"""\
 Reflect on this completed training block:

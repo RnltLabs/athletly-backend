@@ -102,16 +102,8 @@ def test_app(monkeypatch) -> FastAPI:
     monkeypatch.setattr("src.api.auth.get_settings", lambda: test_settings)
     monkeypatch.setattr("src.api.routers.chat.get_settings", lambda: test_settings)
 
-    # Patch HeartbeatService so lifespan does not attempt real Supabase/Redis.
-    mock_heartbeat = MagicMock()
-    mock_heartbeat.start = AsyncMock()
-    mock_heartbeat.stop = AsyncMock()
-
-    with patch("src.services.heartbeat.HeartbeatService", return_value=mock_heartbeat):
-        from src.api.main import create_app
-
-        app = create_app()
-
+    from src.api.main import create_app
+    app = create_app()
     return app
 
 

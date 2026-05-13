@@ -3,12 +3,10 @@
 ``update_goal`` is the right way to change the target event/date/time.
 It writes the new goal as a markdown block into the athlete journal's
 ``Current Goal`` section, appends a timeline entry to ``Goal Timeline``,
-archives the active macrocycle, and also updates the structured profile
-columns as a query cache.
+and updates the structured profile columns as a query cache.
 
 Using ``update_journal_section`` directly works but loses the timeline
-log and the macrocycle archive cascade. Use this tool whenever the goal
-actually changes.
+log. Use this tool whenever the goal actually changes.
 """
 
 from __future__ import annotations
@@ -116,9 +114,6 @@ def register_goal_tools(registry: ToolRegistry, user_model) -> None:
             append_to_section,
             update_section,
         )
-        from src.db.client import get_supabase
-
-        client = get_supabase()
 
         old_goal = _read_current_goal_from_journal()
         new_goal = {
@@ -179,44 +174,22 @@ def register_goal_tools(registry: ToolRegistry, user_model) -> None:
         except Exception as exc:
             logger.warning("Failed to update profile goal cache: %s", exc)
 
-        # 4. Archive any active macrocycle - the goal moved.
-        archived_macrocycle_id: str | None = None
-        try:
-            arch = (
-                client.table("macrocycle_plans")
-                .update({"status": "archived"})
-                .eq("user_id", _user_id)
-                .eq("status", "active")
-                .execute()
-            )
-            if arch.data:
-                archived_macrocycle_id = arch.data[0].get("id")
-        except Exception as exc:
-            logger.warning("Failed to archive active macrocycle: %s", exc)
-
         return {
             "status": "ok",
             "old_goal": old_goal,
             "new_goal": new_goal,
-            "archived_macrocycle_id": archived_macrocycle_id,
-            "next_step": (
-                "Build a fresh macrocycle for the new goal using "
-                "create_macrocycle_plan + save_macrocycle, then derive "
-                "the next training week with create_training_plan."
-            ),
         }
 
     registry.register(Tool(
         name="update_goal",
         description=(
             "Atomically change target goal: rewrites journal 'Current Goal', "
-            "appends to 'Goal Timeline', archives active macrocycle, updates "
-            "profile cache (goal_event/target_date/target_time). Use when "
-            "athlete commits to a new event/date/time. Avoid for musings "
-            "(confirm first) or pure journal-text edits (use "
-            "update_journal_section). ALWAYS pass reasoning (one sentence "
-            "captured in timeline) and event_facts+source when known. After: "
-            "create_macrocycle_plan -> save_macrocycle -> weekly plan."
+            "appends to 'Goal Timeline', updates profile cache "
+            "(goal_event/target_date/target_time). Use when the athlete "
+            "commits to a new event/date/time. Avoid for musings (confirm "
+            "first) or pure journal-text edits (use update_journal_section). "
+            "ALWAYS pass reasoning (one sentence captured in timeline) and "
+            "event_facts+source when known."
         ),
         handler=update_goal,
         parameters={

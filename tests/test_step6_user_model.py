@@ -260,19 +260,6 @@ class TestProjectProfile:
         assert profile["constraints"]["training_days_per_week"] == 5
         assert profile["constraints"]["max_session_minutes"] == 90
 
-    def test_project_profile_compatible_with_plan_prompt(self, populated_model):
-        """Verify the projected profile can be passed to build_plan_prompt."""
-        from src.agent.prompts import build_plan_prompt
-
-        profile = populated_model.project_profile()
-        prompt = build_plan_prompt(profile)
-
-        assert isinstance(prompt, str)
-        assert "Half Marathon" in prompt
-        assert "running" in prompt
-        assert "5" in prompt  # training days
-
-
 # ── Persistence ──────────────────────────────────────────────────
 
 

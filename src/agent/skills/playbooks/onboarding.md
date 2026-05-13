@@ -68,8 +68,8 @@ fields while making it feel like a normal conversation, not a form.
 - Treating it like a form. "Schritt 3 von 5" is wrong.
 - Skipping the tool call. Every answer gets persisted immediately.
 - Generic chitchat that adds no progress. Every turn should advance.
-- Calling save_macrocycle/create_training_plan before the four core fields
-  are filled. Onboarding first, planning second.
+- Calling save_plan before the four core fields are filled. Onboarding
+  first, planning second.
 
 ## Disambiguation
 

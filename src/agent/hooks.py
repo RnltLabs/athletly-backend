@@ -121,47 +121,8 @@ def run_post_hooks(tool_name: str, args: dict, result: Any, ctx: HookContext) ->
 # ---------------------------------------------------------------------------
 
 
-def _post_update_profile_cascade(
-    args: dict, result: Any, ctx: HookContext
-) -> None:
-    """When goal.event or goal.target_date changes, archive active macrocycle.
-
-    The athlete is changing their target. The current macrocycle no longer
-    matches reality; the coach should rebuild it. We archive (not delete)
-    so history is preserved.
-    """
-    field = (args or {}).get("field", "")
-    if field not in {"goal.event", "goal.target_date", "goal.target_time"}:
-        return
-
-    try:
-        from src.db.client import get_supabase
-
-        client = get_supabase()
-        # Archive any active macrocycle - the agent will be prompted to rebuild
-        client.table("macrocycle_plans").update({"status": "archived"}).eq(
-            "user_id", ctx.user_id
-        ).eq("status", "active").execute()
-        logger.info(
-            "Goal field %s changed for %s - archived active macrocycle",
-            field, ctx.user_id,
-        )
-    except Exception:
-        logger.exception("goal-change cascade failed")
-
-
 def install_builtin_hooks() -> None:
     """Register all built-in hooks. Called once at agent startup."""
-    register_post_hook("update_profile", _post_update_profile_cascade)
-
-    # Self-improvement: auto-evaluate every saved plan.
-    try:
-        from src.agent.self_improvement import post_save_plan_evaluation
-        register_post_hook("save_plan", post_save_plan_evaluation)
-    except Exception:
-        logger.warning("self_improvement post_save_plan hook not installed", exc_info=True)
-
-    # Permission system: pre-hook dangerous tools.
     try:
         from src.agent.permissions import install_permission_hooks
         install_permission_hooks()

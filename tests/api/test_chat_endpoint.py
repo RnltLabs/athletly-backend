@@ -85,16 +85,11 @@ def chat_app():
     """FastAPI app with all external dependencies mocked."""
     test_settings = _make_test_settings()
 
-    mock_heartbeat = MagicMock()
-    mock_heartbeat.start = AsyncMock()
-    mock_heartbeat.stop = AsyncMock()
-
-    with patch("src.services.heartbeat.HeartbeatService", return_value=mock_heartbeat):
-        with patch("src.config.get_settings", return_value=test_settings):
-            with patch("src.api.auth.get_settings", return_value=test_settings):
-                with patch("src.api.routers.chat.get_settings", return_value=test_settings):
-                    from src.api.main import create_app
-                    app = create_app()
+    with patch("src.config.get_settings", return_value=test_settings):
+        with patch("src.api.auth.get_settings", return_value=test_settings):
+            with patch("src.api.routers.chat.get_settings", return_value=test_settings):
+                from src.api.main import create_app
+                app = create_app()
 
     return app
 

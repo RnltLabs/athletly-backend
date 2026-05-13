@@ -152,7 +152,6 @@ def get_restricted_tools(user_model) -> ToolRegistry:
     from src.agent.tools.health_tools import register_health_tools
     from src.agent.tools.health_trend_tools import register_health_trend_tools
     from src.agent.tools.health_inventory_tools import register_health_inventory_tools
-    from src.agent.tools.goal_trajectory_tools import register_goal_trajectory_tools
 
     from src.config import get_settings as _gs
     _uid = (
@@ -167,7 +166,6 @@ def get_restricted_tools(user_model) -> ToolRegistry:
     register_health_inventory_tools(registry)
     register_analysis_tools(registry)
     register_calc_tools(registry, user_model)
-    register_goal_trajectory_tools(registry)
 
     return registry
 
@@ -200,17 +198,12 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     from src.agent.tools.health_inventory_tools import register_health_inventory_tools
 
     from src.agent.tools.checkpoint_tools import register_checkpoint_tools
-    from src.agent.tools.self_improvement_tools import register_self_improvement_tools
     from src.agent.tools.product_tools import register_product_tools
-    from src.agent.tools.goal_trajectory_tools import register_goal_trajectory_tools
-    from src.agent.tools.macrocycle_tools import register_macrocycle_tools
     from src.agent.tools.garmin_tools import register_garmin_tools
     from src.agent.tools.notification_tools import register_notification_tools
     from src.agent.tools.session_tools import register_session_tools
     from src.agent.tools.episode_read_tools import register_episode_read_tools
-    from src.agent.tools.plan_adjust_tools import register_plan_adjust_tools
     from src.agent.tools.goal_tools import register_goal_tools
-    from src.agent.tools.background_tools import register_background_tools
     from src.agent.tools.skill_tools import register_skill_tools
     from src.agent.tools.journal_tools import register_journal_tools
 
@@ -234,17 +227,12 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_config_tools(registry, user_model)
     register_calc_tools(registry, user_model)
     register_checkpoint_tools(registry, user_model)
-    register_self_improvement_tools(registry, user_model)
     register_product_tools(registry, user_model)
-    register_goal_trajectory_tools(registry, user_model)
-    register_macrocycle_tools(registry, user_model)
     register_garmin_tools(registry, user_model)
     register_notification_tools(registry, _user_id)
     register_session_tools(registry, _user_id)
     register_episode_read_tools(registry, user_model)
-    register_plan_adjust_tools(registry, user_model)
     register_goal_tools(registry, user_model)
-    register_background_tools(registry, user_model)
     register_skill_tools(registry, user_model)
     register_journal_tools(registry, user_model)
 
