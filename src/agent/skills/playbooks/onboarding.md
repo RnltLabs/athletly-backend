@@ -1,6 +1,6 @@
 ---
 name: onboarding
-description: Guide a new athlete through profile setup in natural conversation. Invoke when profiles.onboarding_complete is false or when key identity fields are empty (no name, no sports, no goal). One question at a time, warm tone, no checklist feel.
+description: Guide a new athlete through profile setup via conversation. Garmin-first - connect data BEFORE asking what the athlete does, then infer sports from activities.
 when_to_use: Athlete is new or has incomplete core profile (missing name, sports, or goal). NOT a separate mode - just a workflow the coach follows inline.
 required_tools:
   - update_profile
@@ -8,123 +8,99 @@ required_tools:
   - update_journal_section
   - append_to_journal
   - spawn_subagent
+  - request_garmin_connect
+  - get_activities
   - ask_choice
   - ask_number
   - ask_date
-  - ask_confirm
 ---
 
-# Onboarding Workflow
+# Onboarding Workflow (Garmin-first)
 
-You are onboarding a new athlete. The goal is to fill in the core profile
-fields while making it feel like a normal conversation, not a form.
+You are onboarding a new athlete. Goal: get the core profile filled in
+quickly, with the athlete typing as little as possible. The data answers
+most questions for you - don't make the user repeat what their watch
+already knows.
 
-## Required core fields (in priority order)
+## Output rules
 
-1. **Name** - profile.name
-2. **Sports** - profile.sports (array)
-3. **Goal event** - profile.goal_event + target_date + target_time
-4. **Training constraints** - profile.training_days_per_week + profile.max_session_minutes
+- Plain prose, no Markdown formatting (no asterisks, no underscores, no
+  bullet points, no headings in chat messages).
+- One short paragraph per turn (max 3 sentences) plus, when relevant, ONE
+  GenUI tool call.
+- Mirror the athlete's language.
 
-## Process
+## Step-by-step
 
-1. **Inspect what is missing**. The athlete profile block in your runtime
-   context shows current state. Identify the first unfilled field in the
-   priority order above.
+1. Name (free text). Warm short greeting, ask one question: "Wie soll
+   ich dich nennen?" Persist with `update_profile(field="name", value=...)`.
 
-2. **Ask ONE question naturally** about that field. Conversational, not
-   form-style. Examples:
-   - "Wie soll ich dich nennen?" (not "Bitte gib deinen Namen ein.")
-   - "Was sind deine Hauptsportarten?"
-   - "Hast du ein konkretes Ziel - ein Rennen, ein Event?"
-   - "Wie viele Tage in der Woche kannst du realistisch trainieren?"
+2. Connect Garmin EARLY. Right after the name. Call
+   `request_garmin_connect`. Tell the athlete why: "Damit ich gleich
+   sehe was du gerne machst, verbinde dein Garmin - dann muss ich dich
+   weniger fragen." The tool emits an inline credentials form, the user
+   fills it, the frontend handles the API call.
 
-3. **When the athlete answers**, call the matching tool IMMEDIATELY:
-   - Name: `update_profile(field="name", value="...")`
-   - Sports: `update_profile(field="sports", value=["running", "cycling", ...])`
-   - Goal event: if the user names a specific race, first
-     `spawn_subagent(task="Find date, distance, course details for <event>")`
-     to verify, then `update_goal(event=..., target_date=..., target_time=..., reasoning=...)`
-   - Training days: `update_profile(field="constraints.training_days_per_week", value=N)`
-   - Max session: `update_profile(field="constraints.max_session_minutes", value=N)`
+3. After connection succeeds, call `get_activities(limit=30)`. Look at
+   the sport field across activities and infer the athlete's main
+   sports. Then confirm via
+   `ask_choice(multi=true, question="Ich sehe diese Sportarten in deinen
+   letzten 30 Tagen - stimmt das?", options=[<detected sports>, "Andere"])`.
+   Persist with `update_profile(field="sports", value=[...])`.
 
-4. **Capture extra signals in the journal** alongside the structured updates.
-   - Identity / lifestyle / body facts ("32, lebt in Karlsruhe, ein Kind"):
-     `update_journal_section(section="Identity", content="...")` or
-     `append_to_journal(section="Identity", entry="...")`.
-   - Coaching preferences ("laufe lieber morgens, mag keinen Asphalt"):
-     `update_journal_section(section="Preferences", content="...")` or
-     `append_to_journal(section="Preferences", entry="...")`.
-   - Anything that should be checked next session (injury, decision pending):
-     `append_to_journal(section="Open Threads", entry="<date>: ...")`.
+   Fallback (user cancelled Garmin or it errored): ask sports directly
+   via `ask_choice(multi=true, options=["Laufen", "Radfahren", "Schwimmen",
+   "Triathlon", "Krafttraining", "Wandern", "Andere"])`.
 
-5. **Move to next missing field**. Repeat until all four required fields
-   are filled.
+4. Goal. Free text first: "Hast du ein konkretes Ziel - ein Rennen, ein
+   Event?". If they name a specific event, run
+   `spawn_subagent(task="Find date, distance, course details for <event>")`
+   to verify, then `ask_date(min_date=<today>, question="Wann ist
+   <event>?")` for the date. Free-text follow-up for target time if
+   relevant. Persist via `update_goal(event=..., target_date=...,
+   target_time=..., reasoning=..., source=...)`.
 
-6. **When complete**, do NOT announce "onboarding done". Just transition
-   naturally into coaching: confirm the picture briefly, then ask what
-   they want to do next ("Soll ich dir mal einen ersten Trainingsplan
-   bauen?"). The transition is INVISIBLE to the athlete.
+5. Training constraints (only if not obvious from activity volume):
+   - Training days per week: `ask_number(min=1, max=7, unit="Tage")` and
+     persist via `update_profile(field="constraints.training_days_per_week", ...)`.
+   - Max session duration: `ask_number(min=20, max=240, step=10, unit="Min")`
+     and persist via `update_profile(field="constraints.max_session_minutes", ...)`.
+   Skip these if the activity history clearly shows the answer.
 
-7. **Garmin connect prompt.** Immediately after the four core fields are
-   filled, call `request_garmin_connect` so the athlete can connect their
-   Garmin account. This renders an inline email + password form directly
-   in the chat (not a modal popup); the frontend submits straight to
-   `POST /garmin/connect`. Once connected (you will see new activities in
-   `get_activities`), you will have real data to ground the first plan in.
-   Call this once per onboarding flow; do not spam it.
+6. Capture extra signals in the journal as they emerge:
+   - Identity / lifestyle: `update_journal_section(section="Identity", content="...")`.
+   - Preferences: `update_journal_section(section="Preferences", content="...")`.
+   - Open threads: `append_to_journal(section="Open Threads", entry="<date>: ...")`.
 
-## Use Generative UI when possible
+7. Complete. Don't announce "Onboarding done". Transition naturally into
+   coaching: "OK, ich hab jetzt ein gutes Bild. Soll ich dir den ersten
+   Wochenplan bauen?" On yes, compose and `save_plan(plan=<dict>)`.
+   Finally `update_profile(field="onboarding_complete", value=true)`.
 
-When a question has a known, small set of valid answers, render an inline
-input component instead of asking in plain prose. The user taps an option
-and the choice arrives as a normal user message; you then call the matching
-update tool exactly as if they had typed the answer.
+## Anti-patterns
 
-Concrete mappings:
-
-- "Was sind deine Hauptsportarten?" -> `ask_choice(question="Was sind deine Hauptsportarten?", options=["Laufen", "Radfahren", "Schwimmen", "Triathlon", "Wandern", "Fitness", "Yoga", "Andere"], multi=true)`
-- "Wie viele Tage pro Woche?" -> `ask_number(question="Wie viele Tage pro Woche kannst du trainieren?", min=1, max=7, unit="Tage")`
-- "Max. Session-Dauer?" -> `ask_number(question="Wie lange darf eine Session maximal dauern?", min=20, max=240, step=10, unit="Min")`
-- "Wann ist dein Zielrennen?" -> `ask_date(question="Wann ist dein Zielrennen?", min_date=<today as YYYY-MM-DD>)`
-
-For free-text answers (name, specific event name, goal description) keep
-using plain prose questions. Those cannot be constrained to a fixed option
-set.
-
-After the user replies via the UI component (the frontend sends a normal
-user message like "Laufen, Radfahren" or "5 Tage"), continue the onboarding
-flow exactly as before: call the matching update_profile / update_goal tool
-and move to the next missing field.
-
-Call each UI tool at most once per question. Do not re-render the same
-component if the user has already answered.
-
-## Anti-patterns to avoid
-
-- Asking multiple questions at once. One question, one answer.
-- Treating it like a form. "Schritt 3 von 5" is wrong.
-- Skipping the tool call. Every answer gets persisted immediately.
-- Generic chitchat that adds no progress. Every turn should advance.
-- Calling save_plan before the four core fields are filled. Onboarding
-  first, planning second.
+- Asking the sport question BEFORE Garmin connect. The data answers it.
+- Asking multiple questions in one turn.
+- Using Markdown formatting in messages.
+- Treating it like a form ("Schritt 3 von 5"). It's a conversation.
+- Skipping the persistence tool call. Every answer gets saved
+  immediately.
+- Calling save_plan before the four core fields are filled.
 
 ## Disambiguation
 
-If the athlete names a sport you cannot uniquely classify (e.g. "Trail")
-or an event you cannot identify (e.g. "Heidelberg Marathon"), use
-`spawn_subagent` to research before calling update_profile/update_goal.
-Do NOT guess.
+If the athlete names a sport you cannot classify (e.g. "Trail") or an
+event you cannot identify, use `spawn_subagent` to research before
+calling update_profile / update_goal. Do NOT guess.
 
 ## Success criteria
 
-The skill has succeeded when:
+Onboarding is done when:
 - profile.name is set
-- profile.sports has >= 1 entry
-- profile.goal_event, goal_target_date, goal_target_time are all set
-- profile.training_days_per_week is set
-- profile.max_session_minutes is set
+- profile.sports has at least one entry
+- profile.goal_event and goal_target_date are set (goal_target_time when
+  applicable)
+- profile.training_days_per_week and profile.max_session_minutes are set
+  (either by direct ask or inferred from activities)
 
-After that, set onboarding_complete=true via
-`update_profile(field="onboarding_complete", value=true)` (note: this
-field is a bool, the tool accepts strings that get parsed).
+After: `update_profile(field="onboarding_complete", value=true)`.
