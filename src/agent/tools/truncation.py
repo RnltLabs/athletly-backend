@@ -30,8 +30,45 @@ PER_TOOL_BUDGET: dict[str, int] = {
     "list_garmin_activities": 1500,
 }
 
-# The compression model — fast and cheap.
-_COMPRESSION_MODEL = "gemini/gemini-2.5-flash"
+# Substrings that indicate an auth-related failure on the compression provider.
+# When any of these match the str(exception), we treat it as a credential
+# problem and retry the call against the primary MODEL.
+_AUTH_ERROR_HINTS: tuple[str, ...] = (
+    "API_KEY_INVALID",
+    "invalid key",
+    "AuthenticationError",
+)
+
+
+def _get_compression_model() -> str:
+    """Return the configured compression model.
+
+    Resolved lazily so that tests / runtime overrides of the env var (or
+    of get_settings) take effect.  Falls back to the historic default when
+    settings cannot be loaded for any reason.
+    """
+    try:
+        from src.config import get_settings
+
+        return get_settings().compression_model
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("could not load settings for compression model", exc_info=True)
+        return "gemini/gemini-2.5-flash"
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """Detect whether an exception signals an auth issue with the provider."""
+    try:
+        from litellm.exceptions import AuthenticationError, BadRequestError
+    except Exception:  # pragma: no cover - litellm is a hard dep, but stay safe
+        AuthenticationError = ()  # type: ignore[assignment]
+        BadRequestError = ()  # type: ignore[assignment]
+
+    if isinstance(exc, (AuthenticationError, BadRequestError)):
+        return True
+    message = str(exc)
+    return any(hint in message for hint in _AUTH_ERROR_HINTS)
+
 
 _COMPRESSION_PROMPT = (
     "Compress the following JSON tool output into a shorter JSON object. "
@@ -51,28 +88,80 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-def _compress_with_llm(text: str, budget_tokens: int) -> str | None:
-    """Compress text via a fast LLM call.
+def _call_compression_llm(text: str, budget_tokens: int, model: str) -> str | None:
+    """Invoke the LLM once with the compression prompt.
 
-    Returns the compressed text, or None on any failure (caller should
-    fall back to the original output).
+    Returns the (stripped) response text, or None when the model gave back
+    an empty body.  Exceptions are not caught here so the caller can decide
+    whether to retry with a different model.
     """
-    try:
-        from src.agent.llm import chat_completion
+    from src.agent.llm import chat_completion
 
-        prompt = _COMPRESSION_PROMPT.format(budget=budget_tokens, text=text[:32000])
-        response = chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            model=_COMPRESSION_MODEL,
+    prompt = _COMPRESSION_PROMPT.format(budget=budget_tokens, text=text[:32000])
+    response = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+        model=model,
+    )
+    compressed = (response.choices[0].message.content or "").strip()
+    return compressed or None
+
+
+def _compress_with_llm(text: str, budget_tokens: int) -> str | None:
+    """Compress text via a fast LLM call, with auth-failure fallback.
+
+    Pipeline:
+    1. Try the configured compression model.
+    2. If that call fails with an auth-like error (e.g. invalid Gemini key),
+       retry ONCE against the primary ``MODEL`` from ``src.agent.llm`` using
+       the same prompt and budget.
+    3. If the fallback also fails (or the first failure is non-auth), return
+       None so the caller can apply naive truncation.
+    """
+    primary_model = _get_compression_model()
+    try:
+        return _call_compression_llm(text, budget_tokens, primary_model)
+    except Exception as primary_exc:
+        logger.warning(
+            "LLM compression failed model=%s error=%s",
+            primary_model, primary_exc, exc_info=True,
         )
-        compressed = (response.choices[0].message.content or "").strip()
-        if not compressed:
+        if not _is_auth_error(primary_exc):
             return None
-        return compressed
-    except Exception:
-        logger.warning("LLM compression failed — using fallback", exc_info=True)
-        return None
+
+        from src.agent.llm import MODEL as fallback_model
+
+        if fallback_model == primary_model:
+            logger.warning(
+                "compression fallback unavailable model=%s (primary == fallback)",
+                primary_model,
+            )
+            return None
+
+        try:
+            result = _call_compression_llm(text, budget_tokens, fallback_model)
+        except Exception as fallback_exc:
+            logger.warning(
+                "compression fallback failed model_primary=%s model_fallback=%s "
+                "primary_error=%s fallback_error=%s",
+                primary_model, fallback_model, primary_exc, fallback_exc,
+                exc_info=True,
+            )
+            return None
+
+        if result is None:
+            logger.warning(
+                "compression fallback returned empty model_primary=%s "
+                "model_fallback=%s primary_error=%s",
+                primary_model, fallback_model, primary_exc,
+            )
+            return None
+
+        logger.info(
+            "compression fallback ok model_primary=%s model_fallback=%s",
+            primary_model, fallback_model,
+        )
+        return result
 
 
 def execute_with_budget(
