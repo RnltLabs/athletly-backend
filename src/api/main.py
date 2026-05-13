@@ -123,6 +123,10 @@ def create_app() -> FastAPI:
     from src.api.routers.push import router as push_router
     app.include_router(push_router, prefix="/push", tags=["push"])
 
+    # Profile lifecycle - reset user data.
+    from src.api.routers.profile import router as profile_router
+    app.include_router(profile_router, prefix="/profile", tags=["profile"])
+
     # -- Health endpoint ------------------------------------------------------
 
     @app.get("/health", tags=["meta"])
