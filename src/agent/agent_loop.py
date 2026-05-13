@@ -54,9 +54,19 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 25          # Safety limit
 MAX_CONSECUTIVE_ERRORS = 3    # Stop if tools keep failing
 AGENT_TEMPERATURE = 0.7       # Creative for coaching, lower for analysis
-COMPRESSION_THRESHOLD = 40    # Compress history when messages exceed this
+# Compression threshold tuned down from 40 to 12: with prompt caching
+# active, the cheapest way to keep total_input low is to purge stale
+# tool_result payloads aggressively. Keeping the last 4 user-turns of
+# full tool-call rounds preserves the model's working memory while
+# slashing per-call input tokens for long sessions.
+COMPRESSION_THRESHOLD = 12
 COMPRESSION_KEEP_ROUNDS = 4   # Keep last N full tool-call rounds verbatim
 TOOL_CALL_SUMMARY_THRESHOLD = 8  # Inject summary reminder after N consecutive tool rounds
+# When purging stale tool_result payloads inside a single user turn, keep
+# this many of the most recent rounds intact. Older tool results get
+# replaced with a short outcome string while preserving message shape
+# (role, tool_call_id) so the API still validates the conversation.
+TOOL_RESULT_PURGE_KEEP_TURNS = 4
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 SESSIONS_DIR = DATA_DIR / "sessions"
@@ -421,6 +431,63 @@ class AgentLoop:
             old_count, len(self._messages), COMPRESSION_KEEP_ROUNDS,
         )
 
+    def _purge_old_tool_results(self):
+        """Truncate stale tool_result payloads to short outcome strings.
+
+        Different from ``_compress_history`` (which rewrites the whole
+        prefix). This runs INSIDE the tool loop of a single user turn:
+        after appending fresh tool results we walk back through the
+        message list, identify ``role="tool"`` messages whose content is
+        full JSON and which sit more than ``TOOL_RESULT_PURGE_KEEP_TURNS``
+        user-turns ago, and shrink their content to a short summary while
+        keeping ``tool_call_id`` intact (so the conversation still
+        validates).
+
+        Idempotent: a message already purged starts with the purge
+        marker and is skipped on subsequent passes.
+        """
+        if not self._messages:
+            return
+
+        # Locate user-turn boundaries to count "turns ago".
+        user_turn_indices = [
+            i for i, m in enumerate(self._messages)
+            if m.get("role") == "user"
+        ]
+        if len(user_turn_indices) <= TOOL_RESULT_PURGE_KEEP_TURNS:
+            return
+
+        # Anything before this index is older than the keep-window.
+        cutoff_idx = user_turn_indices[-TOOL_RESULT_PURGE_KEEP_TURNS]
+
+        new_messages: list[dict] = []
+        purged_count = 0
+        for idx, msg in enumerate(self._messages):
+            if (
+                idx < cutoff_idx
+                and msg.get("role") == "tool"
+                and isinstance(msg.get("content"), str)
+                and not msg["content"].startswith("[purged tool_result")
+            ):
+                preview = msg["content"][:100]
+                purged = {
+                    **msg,
+                    "content": (
+                        f"[purged tool_result - outcome: {preview}]"
+                    ),
+                }
+                new_messages.append(purged)
+                purged_count += 1
+            else:
+                new_messages.append(msg)
+
+        if purged_count > 0:
+            self._messages = new_messages
+            logger.info(
+                "Purged %d old tool_result payloads (kept last %d user turns)",
+                purged_count, TOOL_RESULT_PURGE_KEEP_TURNS,
+            )
+
     # -- Post-Turn Safety Nets (Gap 3b, Gap 4b) -----------------------------
 
     def _post_turn_extraction_check(self, response_text: str):
@@ -490,8 +557,13 @@ class AgentLoop:
         # Compress history before adding new message (Gap 2)
         self._compress_history()
 
-        # Inject runtime context together with the user message to avoid
-        # consecutive "user" messages (Gemini requires alternating turns).
+        # Build the per-turn runtime context ONCE per user message.
+        # The same string is passed as `runtime_context` to every
+        # chat_completion call in the tool loop so the second system
+        # block stays byte-stable inside this turn (cache write on
+        # round 1, cache read on every subsequent round). Mutating
+        # runtime data here would invalidate the breakpoint and re-bill
+        # the whole prefix as fresh input.
         runtime_ctx = build_runtime_context(
             user_model=self.user_model,
             date=None,
@@ -507,10 +579,13 @@ class AgentLoop:
                 "content": "[Continuing from our previous conversation.]",
             })
 
-        # Combine context + user message into a single user turn
+        # The user message no longer carries the runtime context inline.
+        # Anthropic gets runtime_ctx as a dedicated cacheable system
+        # block; non-Anthropic providers get it merged in by
+        # chat_completion as a prefix on the first user message.
         self._messages.append({
             "role": "user",
-            "content": f"[CONTEXT]\n{runtime_ctx}\n\n[USER MESSAGE]\n{user_message}",
+            "content": user_message,
         })
 
         # Persist user turn (Gap 1)
@@ -541,6 +616,7 @@ class AgentLoop:
                 system_prompt=system_prompt,
                 tools=openai_tools if openai_tools else None,
                 temperature=AGENT_TEMPERATURE,
+                runtime_context=runtime_ctx,
             )
 
             # Track usage (non-blocking, fire-and-forget)
@@ -604,6 +680,7 @@ class AgentLoop:
                     messages=self._messages,
                     system_prompt=fallback_prompt,
                     temperature=AGENT_TEMPERATURE,
+                    runtime_context=runtime_ctx,
                 )
                 fb_message = fallback_response.choices[0].message
                 if fb_message.content:
@@ -841,6 +918,12 @@ class AgentLoop:
                 if sent_in_turn:
                     result.response_text = ""
                     break
+
+                # Tool-result purge: shrink stale tool_result payloads
+                # to short outcome strings before the next LLM call. Runs
+                # every round so the per-call total_input stays bounded
+                # even during long tool chains.
+                self._purge_old_tool_results()
 
                 # Active context compression: track consecutive tool-call rounds
                 self._consecutive_tool_calls += 1
