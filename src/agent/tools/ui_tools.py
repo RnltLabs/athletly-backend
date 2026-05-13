@@ -335,3 +335,96 @@ def register_ui_tools(registry: ToolRegistry, user_model=None) -> None:
         },
         category="meta",
     ))
+
+    # -- ask_text_input -----------------------------------------------------
+
+    def ask_text_input(
+        question: str,
+        fields: list[dict],
+        submit_label: str = "Weiter",
+    ) -> dict:
+        """Render a multi-field free-text form inline in the chat."""
+        # Normalize each field dict, applying defaults and dropping any
+        # unexpected keys so the SSE payload stays tight.
+        normalized_fields: list[dict] = []
+        for field_def in fields:
+            normalized: dict = {
+                "name": field_def["name"],
+                "label": field_def["label"],
+                "type": field_def.get("type", "text"),
+            }
+            placeholder = field_def.get("placeholder")
+            if placeholder is not None:
+                normalized["placeholder"] = placeholder
+            is_password = field_def.get("isPassword")
+            if is_password is not None:
+                normalized["isPassword"] = bool(is_password)
+            normalized_fields.append(normalized)
+
+        props = {
+            "question": question,
+            "fields": normalized_fields,
+            "submit_label": submit_label,
+        }
+
+        return {
+            "status": "rendered",
+            "_ui_component": {
+                "type": "text_input",
+                "id": _new_ui_id(),
+                "props": props,
+            },
+        }
+
+    registry.register(Tool(
+        name="ask_text_input",
+        description=(
+            "Render a multi-field form inline in the chat. Use this when "
+            "you need structured free-text answers (e.g. 'Tell me your age "
+            "and city') or when single-field input is more natural than "
+            "chips. The user's answer comes back as a normal chat message "
+            "in the form 'name=value, name=value, ...'. Do NOT use for "
+            "Garmin connect (a dedicated tool handles that). Do NOT use "
+            "for signup/login (frontend handles those)."
+        ),
+        handler=ask_text_input,
+        parameters={
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The form heading shown above the fields.",
+                },
+                "fields": {
+                    "type": "array",
+                    "description": (
+                        "One entry per input field. Each entry has 'name' "
+                        "(key returned to the agent), 'label' (visible "
+                        "label), optional 'placeholder', optional 'type' "
+                        "(text|email|password, default text), and optional "
+                        "'isPassword' (bool, default false)."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "label": {"type": "string"},
+                            "placeholder": {"type": "string"},
+                            "type": {
+                                "type": "string",
+                                "enum": ["text", "email", "password"],
+                            },
+                            "isPassword": {"type": "boolean"},
+                        },
+                        "required": ["name", "label"],
+                    },
+                },
+                "submit_label": {
+                    "type": "string",
+                    "description": "Submit button label. Defaults to 'Weiter'.",
+                },
+            },
+            "required": ["question", "fields"],
+        },
+        category="meta",
+    ))
