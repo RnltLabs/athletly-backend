@@ -28,11 +28,45 @@ class SSEEmitter:
         )
 
     @staticmethod
-    def tool_hint(name: str, args: dict) -> ServerSentEvent:
-        """Agent is about to call a tool — lets the UI show a spinner label."""
+    def tool_hint(
+        name: str,
+        args: dict,
+        display_label: str = "",
+        group_id: str = "",
+    ) -> ServerSentEvent:
+        """Agent is about to call a tool - lets the UI show a spinner label.
+
+        display_label: short German action phrase for the UI to show in
+        place of the raw tool name (frontend falls back to ``name`` when
+        empty).
+        group_id: stable id grouping tool calls that belong to the same
+        agent turn. Frontend uses this to collapse multiple tool calls
+        from one turn into a single status entry.
+        """
+        payload: dict = {"name": name, "args": args}
+        if display_label:
+            payload["display_label"] = display_label
+        if group_id:
+            payload["group_id"] = group_id
         return ServerSentEvent(
             event="tool_hint",
-            data=json.dumps({"name": name, "args": args}, ensure_ascii=False),
+            data=json.dumps(payload, ensure_ascii=False),
+        )
+
+    @staticmethod
+    def tool_group_start(group_id: str) -> ServerSentEvent:
+        """Signal the start of a tool-call group for the current agent turn."""
+        return ServerSentEvent(
+            event="tool_group_start",
+            data=json.dumps({"group_id": group_id}, ensure_ascii=False),
+        )
+
+    @staticmethod
+    def tool_group_end(group_id: str) -> ServerSentEvent:
+        """Signal the end of a tool-call group for the current agent turn."""
+        return ServerSentEvent(
+            event="tool_group_end",
+            data=json.dumps({"group_id": group_id}, ensure_ascii=False),
         )
 
     @staticmethod

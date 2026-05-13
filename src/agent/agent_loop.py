@@ -26,6 +26,7 @@ import logging
 import os
 import queue
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -959,13 +960,25 @@ class AsyncAgentLoop(AgentLoop):
         sync_queue: queue.Queue = queue.Queue()
         result_holder: list[AgentResult | BaseException] = []
 
-        # -- Bridge: on_progress callback → sync queue --
+        # Stable id for grouping all tool calls of this single turn.
+        # Frontend uses this to collapse multiple tool_hint events into
+        # one collapsible status entry in the chat.
+        current_group_id = uuid.uuid4().hex
+
+        # -- Bridge: on_progress callback -> sync queue --
+        # The worker thread emits (event_type, detail) pairs; we also
+        # carry the current_group_id so the consumer can attach it to
+        # the SSE payload without crossing threads.
         def _bridge_progress(event_type: str, detail: str) -> None:
-            sync_queue.put((event_type, detail))
+            sync_queue.put((event_type, detail, current_group_id))
 
         # Swap out on_progress for the duration of this call.
         original_on_progress = self.on_progress
         self.on_progress = _bridge_progress
+
+        # Snapshot the tool registry for display_label lookups inside
+        # the consumer (read-only, safe to share across threads).
+        tool_registry = self.tools
 
         # -- Worker: runs synchronous process_message in a thread --
         def _worker() -> None:
@@ -990,14 +1003,26 @@ class AsyncAgentLoop(AgentLoop):
                 if item is _DONE_SENTINEL:
                     return
 
-                event_type, detail = item
-                data = _progress_to_sse_data(event_type, detail)
+                event_type, detail, group_id = item
+                data = _progress_to_sse_data(
+                    event_type,
+                    detail,
+                    group_id=group_id,
+                    tool_registry=tool_registry,
+                )
                 try:
                     await emit_fn(event_type, data)
                 except Exception:
                     logger.warning(
                         "emit_fn raised while emitting %s event", event_type, exc_info=True
                     )
+
+        # Emit the group_start sentinel BEFORE the worker begins so the
+        # frontend can open a collapsible status panel for this turn.
+        try:
+            await emit_fn("tool_group_start", {"group_id": current_group_id})
+        except Exception:
+            logger.warning("emit_fn raised on tool_group_start", exc_info=True)
 
         # Run worker and consumer concurrently.
         worker_task = asyncio.to_thread(_worker)
@@ -1016,6 +1041,11 @@ class AsyncAgentLoop(AgentLoop):
         # Unwrap result or re-raise as SSE error (never persist error).
         if not result_holder:
             await emit_fn("error", {"message": "Agent returned no result", "code": "no_result"})
+            # Close the group even on error so the UI does not hang.
+            try:
+                await emit_fn("tool_group_end", {"group_id": current_group_id})
+            except Exception:
+                logger.warning("emit_fn raised on tool_group_end (no_result)", exc_info=True)
             raise RuntimeError("Agent returned no result")
 
         outcome = result_holder[0]
@@ -1028,23 +1058,43 @@ class AsyncAgentLoop(AgentLoop):
                     "code": "internal_error",
                 },
             )
+            try:
+                await emit_fn("tool_group_end", {"group_id": current_group_id})
+            except Exception:
+                logger.warning("emit_fn raised on tool_group_end (exception)", exc_info=True)
             raise outcome
 
         # Emit the final message event.
         if outcome.response_text:
             await emit_fn("message", {"text": outcome.response_text})
 
+        # Close the tool group after the final response so the UI can
+        # mark this turn's status panel as complete.
+        try:
+            await emit_fn("tool_group_end", {"group_id": current_group_id})
+        except Exception:
+            logger.warning("emit_fn raised on tool_group_end", exc_info=True)
+
         return outcome
 
 
 # -- Helpers ------------------------------------------------------------------
 
-def _progress_to_sse_data(event_type: str, detail: str) -> dict:
+def _progress_to_sse_data(
+    event_type: str,
+    detail: str,
+    group_id: str = "",
+    tool_registry: ToolRegistry | None = None,
+) -> dict:
     """Convert an on_progress (event_type, detail) pair into an SSE data dict.
 
     The ``on_progress`` callback in ``AgentLoop`` passes a plain string as
     ``detail``.  This function translates those strings into structured dicts
     that the SSE router can forward directly to the client.
+
+    For ``tool_call`` / ``tool_hint`` events the dict is enriched with
+    ``display_label`` (from the tool registry) and ``group_id`` (stable id
+    grouping all tool calls of one agent turn).
     """
     if event_type == "tool_call":
         # detail: "tool_name({"arg": "value"})"
@@ -1056,8 +1106,17 @@ def _progress_to_sse_data(event_type: str, detail: str) -> dict:
                 args = json.loads(args_str) if args_str else {}
             except json.JSONDecodeError:
                 args = {"raw": args_str}
-            return {"name": name, "args": args}
-        return {"name": detail, "args": {}}
+        else:
+            name = detail
+            args = {}
+        data: dict = {"name": name, "args": args}
+        if tool_registry is not None:
+            tool = tool_registry._tools.get(name)
+            if tool and tool.display_label:
+                data["display_label"] = tool.display_label
+        if group_id:
+            data["group_id"] = group_id
+        return data
 
     if event_type == "tool_result":
         # detail: "tool_name -> {result preview}"
