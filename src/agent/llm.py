@@ -9,11 +9,34 @@ Provides:
 
 import os
 import logging
+import time
 
 import litellm
+from litellm.exceptions import RateLimitError
 from google import genai
 
 logger = logging.getLogger(__name__)
+
+# Anthropic prompt caching notes (https://platform.claude.com/docs/en/build-with-claude/prompt-caching):
+# - 5-minute TTL default. Reads cost 10% of base input tokens. Writes cost 125%.
+# - Cache invalidates on ANY change to system or tools, so the cached prefix
+#   must be stable across turns.
+# - Min cacheable size: 1024 tokens for Haiku, 2048 for Sonnet. Our static
+#   system prompt is ~2k+ tokens so we are safe; below threshold we skip
+#   caching to avoid an "invalid_request_error".
+
+# Min characters as a cheap proxy for tokens (1 token ~= 4 chars). 1024
+# tokens ~= 4096 chars; use a conservative 4000 to skip caching for tiny
+# system prompts like test fixtures.
+_MIN_CACHE_CHARS = 4000
+
+# Rate-limit retry policy (Anthropic 429s and other provider 429s):
+# - max 3 attempts total
+# - base delay derived from Retry-After header if present, else 5s
+# - exponential multiplier of 2 between attempts
+_RATE_LIMIT_MAX_ATTEMPTS = 3
+_RATE_LIMIT_BASE_DELAY_S = 5.0
+_RATE_LIMIT_BACKOFF_MULTIPLIER = 2.0
 
 # Default model -- override with AGENTICSPORTS_MODEL env var
 # LiteLLM format: "provider/model" (e.g. "gemini/gemini-2.5-flash", "openai/gpt-4o")
@@ -61,7 +84,10 @@ def chat_completion(
     # and excludes cached input tokens from the per-minute rate limit.
     final_messages = list(messages)
     if system_prompt:
-        if is_anthropic:
+        # Only cache when the prompt is large enough to clear Anthropic's
+        # minimum cacheable size (Haiku >= 1024 tokens, Sonnet >= 2048).
+        cache_system = is_anthropic and len(system_prompt) >= _MIN_CACHE_CHARS
+        if cache_system:
             final_messages = [
                 {
                     "role": "system",
@@ -112,8 +138,77 @@ def chat_completion(
     if "gemini-2.5" in resolved_model:
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
 
-    response = litellm.completion(**kwargs)
+    response = _completion_with_rate_limit_retry(kwargs)
+    _log_cache_usage(response, resolved_model)
     return response
+
+
+def _completion_with_rate_limit_retry(kwargs: dict) -> litellm.ModelResponse:
+    """Call litellm.completion with exponential backoff on RateLimitError.
+
+    Only ``RateLimitError`` is retried. Any other exception propagates
+    immediately so the agent loop can surface real failures. The base
+    delay is read from the ``Retry-After`` response header when present
+    (LiteLLM exposes ``exc.response.headers`` on most providers).
+    """
+    delay = _RATE_LIMIT_BASE_DELAY_S
+    for attempt in range(1, _RATE_LIMIT_MAX_ATTEMPTS + 1):
+        try:
+            return litellm.completion(**kwargs)
+        except RateLimitError as exc:
+            if attempt >= _RATE_LIMIT_MAX_ATTEMPTS:
+                logger.error(
+                    "Rate limit exhausted after %d attempts: %s",
+                    attempt, exc,
+                )
+                raise
+
+            retry_after = _extract_retry_after(exc)
+            sleep_s = retry_after if retry_after is not None else delay
+            logger.warning(
+                "Retrying after rate limit, attempt %d/%d, sleeping %s s",
+                attempt, _RATE_LIMIT_MAX_ATTEMPTS, sleep_s,
+            )
+            time.sleep(sleep_s)
+            delay *= _RATE_LIMIT_BACKOFF_MULTIPLIER
+
+    # Unreachable - the loop either returns or raises.
+    raise RuntimeError("rate-limit retry loop fell through")
+
+
+def _extract_retry_after(exc: Exception) -> float | None:
+    """Return Retry-After header value in seconds, or None if absent."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except Exception:
+        return None
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_cache_usage(response: litellm.ModelResponse, model: str) -> None:
+    """Emit cache hit/write counters so we can measure cache effectiveness."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    cache_writes = getattr(usage, "cache_creation_input_tokens", None)
+    cache_reads = getattr(usage, "cache_read_input_tokens", None)
+    if cache_writes is None and cache_reads is None:
+        return
+    logger.info(
+        "LLM cache usage model=%s writes=%s reads=%s",
+        model, cache_writes or 0, cache_reads or 0,
+    )
 
 
 def get_client() -> genai.Client:

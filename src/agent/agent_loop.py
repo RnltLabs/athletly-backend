@@ -545,50 +545,48 @@ class AgentLoop:
             if reasoning and self.on_progress:
                 self.on_progress("thinking", str(reasoning)[:500])
 
-            # Handle empty response (edge case -- Gap 9c)
+            # Handle empty response (edge case -- Gap 9c).
+            # Token-burn fix: cap empty-response retries at 1 (was 3) so a
+            # broken turn does not triple our per-minute input token spend.
             if not content and not tool_calls:
                 consecutive_errors += 1
                 logger.warning(
-                    "Empty response from LLM (round %d, errors: %d), retrying...",
+                    "Empty response from LLM (round %d, errors: %d), retrying once with tool-free fallback...",
                     round_num, consecutive_errors,
                 )
 
-                # After 3 empty retries, try WITHOUT tools as fallback
-                if consecutive_errors == 3:
-                    logger.info("Falling back to tool-free call...")
-                    fallback_prompt = (
-                        STATIC_SYSTEM_PROMPT
-                        + "\n\n# IMPORTANT OVERRIDE\n"
-                        "Tools are temporarily unavailable. Respond ONLY with "
-                        "natural conversational text. Do NOT list, reference, or "
-                        "simulate any tool calls (no update_profile, update_journal_section, "
-                        "get_activities, etc.). Just answer the athlete directly "
-                        "as a coach would in a normal conversation."
-                    )
-                    fallback_response = chat_completion(
-                        messages=self._messages,
-                        system_prompt=fallback_prompt,
-                        temperature=AGENT_TEMPERATURE,
-                    )
-                    fb_message = fallback_response.choices[0].message
-                    if fb_message.content:
-                        result.response_text = fb_message.content.strip()
-                        self._messages.append({
-                            "role": "assistant",
-                            "content": result.response_text,
-                        })
-                        break
-
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                    result.response_text = (
-                        "I had trouble generating a response. "
-                        "Could you rephrase your message?"
-                    )
+                # Single retry: drop tools entirely and ask for plain text.
+                logger.info("Falling back to tool-free call after empty response...")
+                fallback_prompt = (
+                    STATIC_SYSTEM_PROMPT
+                    + "\n\n# IMPORTANT OVERRIDE\n"
+                    "Tools are temporarily unavailable. Respond ONLY with "
+                    "natural conversational text. Do NOT list, reference, or "
+                    "simulate any tool calls (no update_profile, update_journal_section, "
+                    "get_activities, etc.). Just answer the athlete directly "
+                    "as a coach would in a normal conversation."
+                )
+                time.sleep(2.0)  # let any transient provider hiccup clear
+                fallback_response = chat_completion(
+                    messages=self._messages,
+                    system_prompt=fallback_prompt,
+                    temperature=AGENT_TEMPERATURE,
+                )
+                fb_message = fallback_response.choices[0].message
+                if fb_message.content:
+                    result.response_text = fb_message.content.strip()
+                    self._messages.append({
+                        "role": "assistant",
+                        "content": result.response_text,
+                    })
                     break
 
-                # Brief pause before retry
-                time.sleep(0.5)
-                continue
+                # Fallback also failed - bail with a friendly message.
+                result.response_text = (
+                    "I had trouble generating a response. "
+                    "Could you rephrase your message?"
+                )
+                break
 
             if not tool_calls:
                 # -- MODEL DECIDED TO RESPOND --
