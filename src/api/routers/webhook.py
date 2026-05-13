@@ -85,7 +85,42 @@ async def receive_activity(
     )
 
     stored = await _store_activity(payload)
+    if stored:
+        _schedule_plan_review(payload)
     return {"status": "ok", "stored": stored}
+
+
+def _schedule_plan_review(payload: ActivityWebhookPayload) -> None:
+    """Fire-and-forget: kick off an agent turn to review the active plan.
+
+    Wrapped in try/except so a failure here NEVER prevents the webhook from
+    returning 200 to the upstream provider. The agent itself decides whether
+    anything should change - this function is pure infrastructure.
+    """
+    try:
+        from src.services.plan_review import schedule_plan_review
+
+        activity_summary = {
+            "sport": payload.activity_type,
+            **{
+                k: v
+                for k, v in payload.data.items()
+                if k
+                in (
+                    "id",
+                    "start_time",
+                    "date",
+                    "duration_seconds",
+                    "duration_s",
+                    "duration",
+                )
+            },
+        }
+        schedule_plan_review(payload.user_id, activity_summary)
+    except Exception:
+        logger.exception(
+            "Failed to schedule plan review for user=%s", payload.user_id,
+        )
 
 
 # ---------------------------------------------------------------------------
