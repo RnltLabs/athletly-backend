@@ -22,6 +22,12 @@ MODEL = os.environ.get("AGENTICSPORTS_MODEL", "gemini/gemini-2.5-flash")
 # Suppress litellm's noisy info logging unless the user turns it on
 litellm.suppress_debug_info = True
 
+# Anthropic requires a tools= param whenever the conversation history
+# contains tool_use messages (e.g. the agent retries without tools).
+# Enabling modify_params lets LiteLLM inject a dummy tool so the call
+# succeeds instead of erroring with UnsupportedParamsError.
+litellm.modify_params = True
+
 
 def chat_completion(
     messages: list[dict],
