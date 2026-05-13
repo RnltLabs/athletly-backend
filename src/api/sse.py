@@ -116,6 +116,18 @@ class SSEEmitter:
         )
 
     @staticmethod
+    def ui_component(component_type: str, ui_id: str, props: dict) -> ServerSentEvent:
+        """Emit a generative UI component for the frontend to render inline."""
+        return ServerSentEvent(
+            event="ui_component",
+            data=json.dumps({
+                "type": component_type,
+                "id": ui_id,
+                "props": props,
+            }, ensure_ascii=False),
+        )
+
+    @staticmethod
     def done() -> ServerSentEvent:
         """Sentinel event — signals the stream is finished."""
         return ServerSentEvent(

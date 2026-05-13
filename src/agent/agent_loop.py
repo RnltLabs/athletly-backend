@@ -761,6 +761,26 @@ class AgentLoop:
                                     exc_info=True,
                                 )
 
+                    # Forward generative UI component renders as SSE events.
+                    # Tools opt in by returning ``_ui_component`` in their
+                    # result dict (see ``ui_tools.py``). The marker is
+                    # stripped from the dict that the model sees so it does
+                    # not pollute the chat history with internal plumbing.
+                    if isinstance(tool_result, dict):
+                        ui_component = tool_result.pop("_ui_component", None)
+                        if ui_component and self.on_progress:
+                            try:
+                                self.on_progress(
+                                    "ui_component",
+                                    json.dumps(ui_component, ensure_ascii=False),
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to forward ui_component from %s",
+                                    tool_name,
+                                    exc_info=True,
+                                )
+
                     tool_duration = int((time.time() - tool_start) * 1000)
 
                     # Record turn
@@ -1027,6 +1047,14 @@ def _progress_to_sse_data(event_type: str, detail: str) -> dict:
         except json.JSONDecodeError:
             logger.warning("action_request payload was not valid JSON: %r", detail)
             return {"action_type": "", "label": "", "payload": {}}
+
+    if event_type == "ui_component":
+        # detail: JSON-encoded {"type": ..., "id": ..., "props": ...}
+        try:
+            return json.loads(detail) if detail else {}
+        except json.JSONDecodeError:
+            logger.warning("ui_component payload was not valid JSON: %r", detail)
+            return {"type": "", "id": "", "props": {}}
 
     if event_type == "responding":
         # The loop emits this just before setting response_text; we map it

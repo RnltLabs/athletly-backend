@@ -150,6 +150,12 @@ def _make_sse_event(event_type: str, data: dict) -> ServerSentEvent:
             label=data.get("label", ""),
             payload=data.get("payload") or {},
         )
+    if event_type == "ui_component":
+        return SSEEmitter.ui_component(
+            component_type=data.get("type", ""),
+            ui_id=data.get("id", ""),
+            props=data.get("props") or {},
+        )
     return ServerSentEvent(
         event=event_type,
         data=json.dumps(data, ensure_ascii=False),
