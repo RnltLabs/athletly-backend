@@ -91,20 +91,26 @@ def register_analysis_tools(registry: ToolRegistry):
         agent_acts = list_activities(user_id, limit=100, after=week_start)
         health_acts = list_health_activities(user_id, limit=100, after=week_start)
 
+        from src.agent.tools.format_helpers import minutes_to_hms
+
         all_activities = []
         for a in agent_acts:
+            duration_s = a.get("duration_seconds", 0)
             all_activities.append({
                 "sport": a.get("sport", "unknown"),
                 "start_time": a.get("start_time"),
-                "duration_seconds": a.get("duration_seconds", 0),
+                "duration_seconds": duration_s,
+                "duration_pretty": minutes_to_hms(duration_s / 60) if duration_s else None,
                 "distance_meters": a.get("distance_meters"),
                 "source": "agent",
             })
         for a in health_acts:
+            duration_s = a.get("duration_seconds", 0)
             all_activities.append({
                 "sport": a.get("activity_type", "unknown"),
                 "start_time": a.get("start_time"),
-                "duration_seconds": a.get("duration_seconds", 0),
+                "duration_seconds": duration_s,
+                "duration_pretty": minutes_to_hms(duration_s / 60) if duration_s else None,
                 "distance_meters": a.get("distance_meters"),
                 "source": "health",
             })

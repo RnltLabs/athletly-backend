@@ -165,9 +165,28 @@ def register_health_tools(registry: ToolRegistry, user_id: str = None) -> None:
     def get_daily_metrics(days: int = 14) -> dict:
         """Get daily health metrics (sleep, HRV, stress, body battery, recovery)."""
         from src.db.health_data_db import get_merged_daily_metrics
+        from src.agent.tools.format_helpers import minutes_to_hm
 
         user_id = _resolved_uid
         metrics = get_merged_daily_metrics(user_id, days=days)
+
+        # Attach human-readable sleep durations next to the decimal fields.
+        # Same reason as the pace formatting in get_activities: a value like
+        # sleep_duration_minutes=467.0 must never be quoted to the user as
+        # "4:67" or "467 Min" but as "7h 47min".
+        sleep_fields = (
+            "sleep_duration_minutes",
+            "sleep_deep_minutes",
+            "sleep_light_minutes",
+            "sleep_rem_minutes",
+            "sleep_awake_minutes",
+        )
+        for m in metrics:
+            for field in sleep_fields:
+                val = m.get(field)
+                if val is not None:
+                    pretty_key = field.replace("_minutes", "_pretty")
+                    m[pretty_key] = minutes_to_hm(val)
 
         return {"count": len(metrics), "metrics": metrics}
 
