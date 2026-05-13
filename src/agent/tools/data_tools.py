@@ -10,6 +10,7 @@ The accessors below try flat keys first, then fall back to nested.
 """
 
 from src.agent.tools.registry import Tool, ToolRegistry
+from src.agent.tools.format_helpers import pace_to_mmss, minutes_to_hms
 from src.config import get_settings
 
 
@@ -88,7 +89,6 @@ def register_data_tools(registry: ToolRegistry, user_model):
             "count": len(activities),
             "activities": [],
         }
-        from src.agent.tools.format_helpers import pace_to_mmss, minutes_to_hms
 
         for act in activities:
             # Try flat DB columns first, fall back to nested file-store dicts
@@ -96,24 +96,36 @@ def register_data_tools(registry: ToolRegistry, user_model):
             pace_data = act.get("pace", {}) or {}
             zone_data = act.get("zone_distribution") or act.get("hr_zone_distribution") or {}
 
-            duration_min = round(act.get("duration_seconds", 0) / 60, 1)
+            duration_seconds = act.get("duration_seconds", 0) or 0
+            distance_meters = act.get("distance_meters") or 0
+            duration_min = round(duration_seconds / 60, 1)
             pace_decimal = (
                 act.get("avg_pace_min_km")
                 or pace_data.get("avg_min_per_km")
                 or pace_data.get("avg_min_per_100m")
             )
 
+            # Compute pretty pace from duration/distance directly to avoid
+            # the ~0.5s precision loss of round(pace, 2). Falls back to the
+            # rounded decimal if either is missing.
+            if duration_seconds and distance_meters:
+                sec_per_km = (duration_seconds / distance_meters) * 1000
+                pretty_pace = f"{int(sec_per_km // 60)}:{int(round(sec_per_km % 60)):02d}"
+            else:
+                pretty_pace = pace_to_mmss(pace_decimal)
+
             entry = {
+                "id": act.get("id") or act.get("garmin_activity_id"),
                 "date": act.get("start_time", "")[:10],
                 "sport": act.get("sport", "unknown"),
                 "sub_sport": act.get("sub_sport"),
                 "duration_minutes": duration_min,
                 "duration_pretty": minutes_to_hms(duration_min),
-                "distance_km": round(act.get("distance_meters", 0) / 1000, 2) if act.get("distance_meters") else None,
+                "distance_km": round(distance_meters / 1000, 2) if distance_meters else None,
                 "avg_hr": act.get("avg_hr") or hr_data.get("avg"),
                 "max_hr": act.get("max_hr") or hr_data.get("max"),
                 "avg_pace_min_km": pace_decimal,
-                "avg_pace_pretty": pace_to_mmss(pace_decimal),
+                "avg_pace_pretty": pretty_pace,
                 "trimp": act.get("trimp"),
                 "hr_zones": zone_data if zone_data else None,
                 "calories": act.get("calories"),
@@ -161,6 +173,152 @@ def register_data_tools(registry: ToolRegistry, user_model):
                     "nullable": True,
                 },
             },
+        },
+        category="data",
+    ))
+
+    def get_activity_details(activity_id: str) -> dict:
+        """Return all coaching-relevant fields for a single activity.
+
+        Pulls from the raw provider payload so the agent can see metrics
+        beyond the summary list: training effect (aerobic + anaerobic),
+        HR zone distribution, power data, running form, elevation, GAP.
+        """
+        if not _settings.use_supabase:
+            return {"error": "Supabase not configured"}
+
+        from src.db.client import get_supabase
+        sb = get_supabase()
+        uid = user_model.user_id if user_model else _settings.agenticsports_user_id
+
+        # Try by primary id first, then garmin_activity_id (string).
+        row = None
+        try:
+            r = sb.table("activities").select("*").eq("id", activity_id).eq("user_id", uid).limit(1).execute()
+            if r.data:
+                row = r.data[0]
+        except Exception:
+            pass
+        if row is None:
+            try:
+                r = sb.table("activities").select("*").eq("garmin_activity_id", str(activity_id)).eq("user_id", uid).limit(1).execute()
+                if r.data:
+                    row = r.data[0]
+            except Exception:
+                pass
+
+        if row is None:
+            return {"error": f"No activity found with id={activity_id}"}
+
+        raw = row.get("raw_data") or {}
+        duration_s = row.get("duration_seconds") or 0
+        distance_m = row.get("distance_meters") or 0
+
+        # Pretty pace from raw values (no rounding cascade).
+        pretty_pace = None
+        if duration_s and distance_m:
+            sec_per_km = (duration_s / distance_m) * 1000
+            pretty_pace = f"{int(sec_per_km // 60)}:{int(round(sec_per_km % 60)):02d}"
+
+        # HR zone distribution: turn raw seconds-per-zone into pct + pretty.
+        hr_zones_seconds = {
+            f"zone_{i}": raw.get(f"hrTimeInZone_{i}")
+            for i in range(1, 6)
+            if raw.get(f"hrTimeInZone_{i}") is not None
+        }
+        hr_total = sum(hr_zones_seconds.values()) if hr_zones_seconds else 0
+        hr_zones_pct = {
+            k: round((v / hr_total) * 100, 1) for k, v in hr_zones_seconds.items()
+        } if hr_total else None
+
+        power_zones_seconds = {
+            f"zone_{i}": raw.get(f"powerTimeInZone_{i}")
+            for i in range(1, 6)
+            if raw.get(f"powerTimeInZone_{i}") is not None
+        }
+
+        def _msps_to_kmh(speed_mps: float | None) -> float | None:
+            if speed_mps is None:
+                return None
+            try:
+                return round(float(speed_mps) * 3.6, 1)
+            except (TypeError, ValueError):
+                return None
+
+        avg_speed = raw.get("averageSpeed")
+        max_speed = raw.get("maxSpeed")
+        gap_speed = raw.get("avgGradeAdjustedSpeed")
+
+        return {
+            "id": row.get("id"),
+            "garmin_activity_id": row.get("garmin_activity_id"),
+            "date": (row.get("start_time") or "")[:10],
+            "sport": row.get("sport"),
+            "duration_pretty": minutes_to_hms(duration_s / 60) if duration_s else None,
+            "distance_km": round(distance_m / 1000, 2) if distance_m else None,
+            "avg_pace_pretty": pretty_pace,
+            "max_speed_kmh": _msps_to_kmh(max_speed),
+            "avg_grade_adjusted_speed_kmh": _msps_to_kmh(gap_speed),
+            "avg_hr": row.get("avg_hr"),
+            "max_hr": row.get("max_hr"),
+            "hr_zones_seconds": hr_zones_seconds or None,
+            "hr_zones_pct": hr_zones_pct,
+            "training_effect": {
+                "aerobic": row.get("training_effect") or raw.get("aerobicTrainingEffect"),
+                "anaerobic": raw.get("anaerobicTrainingEffect"),
+                "label": raw.get("trainingEffectLabel"),
+                "aerobic_message": raw.get("aerobicTrainingEffectMessage"),
+                "anaerobic_message": raw.get("anaerobicTrainingEffectMessage"),
+            },
+            "vo2max": row.get("vo2max_activity") or raw.get("vO2MaxValue"),
+            "activity_training_load": raw.get("activityTrainingLoad"),
+            "calories": row.get("calories"),
+            "power": {
+                "avg": raw.get("avgPower"),
+                "normalized": raw.get("normPower"),
+                "max": raw.get("maxPower"),
+                "zones_seconds": power_zones_seconds or None,
+            } if raw.get("avgPower") else None,
+            "running_form": {
+                "avg_cadence_spm": raw.get("averageRunningCadenceInStepsPerMinute"),
+                "max_cadence_spm": raw.get("maxRunningCadenceInStepsPerMinute"),
+                "avg_stride_length_cm": raw.get("avgStrideLength"),
+                "avg_vertical_oscillation_cm": raw.get("avgVerticalOscillation"),
+                "avg_ground_contact_time_ms": raw.get("avgGroundContactTime"),
+            } if raw.get("averageRunningCadenceInStepsPerMinute") else None,
+            "elevation": {
+                "gain_m": row.get("elevation_gain_m") or raw.get("elevationGain"),
+                "loss_m": raw.get("elevationLoss"),
+                "min_m": raw.get("minElevation"),
+                "max_m": raw.get("maxElevation"),
+                "avg_m": raw.get("avgElevation"),
+            } if (row.get("elevation_gain_m") or raw.get("elevationGain")) else None,
+            "moving_time_pretty": minutes_to_hms(raw.get("movingDuration") / 60) if raw.get("movingDuration") else None,
+        }
+
+    registry.register(Tool(
+        name="get_activity_details",
+        description=(
+            "Pull all coaching-relevant fields for ONE activity by id. "
+            "Returns: pace, training effect (aerobic + anaerobic + label), "
+            "HR zone distribution (seconds + percentages), power data + "
+            "zones, running form (cadence, stride, vertical oscillation), "
+            "elevation profile (gain, loss, min/max/avg), VO2max from "
+            "device. Use this to deep-dive ONE workout - e.g. analyse a "
+            "race, evaluate a tempo run, or diagnose a hard week. Do NOT "
+            "call for every activity in a list - get_activities is the "
+            "compact summary tool."
+        ),
+        handler=get_activity_details,
+        parameters={
+            "type": "object",
+            "properties": {
+                "activity_id": {
+                    "type": "string",
+                    "description": "Activity id (uuid from id column or string garmin_activity_id).",
+                },
+            },
+            "required": ["activity_id"],
         },
         category="data",
     ))
