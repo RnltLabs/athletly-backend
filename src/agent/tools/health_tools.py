@@ -175,7 +175,8 @@ def register_health_tools(registry: ToolRegistry, user_id: str = None) -> None:
         # sleep_duration_minutes=467.0 must never be quoted to the user as
         # "4:67" or "467 Min" but as "7h 47min".
         sleep_fields = (
-            "sleep_duration_minutes",
+            "sleep_minutes",          # the merged-layer key
+            "sleep_duration_minutes", # the raw-DB column
             "sleep_deep_minutes",
             "sleep_light_minutes",
             "sleep_rem_minutes",
@@ -185,7 +186,11 @@ def register_health_tools(registry: ToolRegistry, user_id: str = None) -> None:
             for field in sleep_fields:
                 val = m.get(field)
                 if val is not None:
-                    pretty_key = field.replace("_minutes", "_pretty")
+                    pretty_key = (
+                        "sleep_pretty"
+                        if field in ("sleep_minutes", "sleep_duration_minutes")
+                        else field.replace("_minutes", "_pretty")
+                    )
                     m[pretty_key] = minutes_to_hm(val)
 
         return {"count": len(metrics), "metrics": metrics}
