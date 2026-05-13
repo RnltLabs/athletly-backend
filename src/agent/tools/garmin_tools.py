@@ -124,45 +124,114 @@ def register_garmin_tools(registry: ToolRegistry, user_model=None) -> None:
     # sync_garmin_data
     # ------------------------------------------------------------------
 
-    def sync_garmin_data(days: int = 30) -> dict:
-        """Sync recent activities, daily health stats, and sleep from Garmin."""
+    def _resolve_sync_window(mode: str, days: int | None) -> tuple[int, str]:
+        """Pick the day count based on requested mode + last_sync_at.
+
+        Modes:
+          - "full":  always 365 days (use for onboarding / migration)
+          - "delta": since last_sync_at minus 3-day grace, capped at 30
+          - "auto":  full if never synced or last_sync > 30 days ago, else delta
+
+        An explicit `days` value overrides the mode entirely.
+        """
+        from datetime import datetime, timezone
+
+        if days is not None:
+            return (max(1, min(int(days), 365)), "explicit")
+
+        last_sync_at: str | None = None
+        try:
+            from src.db.client import get_supabase
+            sb = get_supabase()
+            rows = (
+                sb.table("provider_tokens")
+                .select("last_sync_at")
+                .eq("user_id", user_id)
+                .eq("provider", "garmin")
+                .limit(1)
+                .execute()
+            )
+            if rows.data:
+                last_sync_at = rows.data[0].get("last_sync_at")
+        except Exception:
+            pass
+
+        days_since: int | None = None
+        if last_sync_at:
+            try:
+                last_dt = datetime.fromisoformat(last_sync_at.replace("Z", "+00:00"))
+                days_since = max(0, (datetime.now(timezone.utc) - last_dt).days)
+            except Exception:
+                days_since = None
+
+        if mode == "full":
+            return (365, "full")
+        if mode == "delta":
+            if days_since is None:
+                return (14, "delta:no-history")
+            return (max(2, min(days_since + 3, 30)), "delta")
+
+        # auto
+        if days_since is None or days_since > 30:
+            return (365, "auto:full")
+        return (max(2, min(days_since + 3, 30)), "auto:delta")
+
+    def sync_garmin_data(mode: str = "auto", days: int | None = None) -> dict:
+        """Sync activities, daily health stats, and sleep from Garmin.
+
+        Picks the day window automatically based on last_sync_at:
+          - First time / stale (no sync in >30 days): pulls 365 days.
+          - Recent sync: pulls only the gap since last sync + 3-day grace.
+
+        Use mode="full" to force a 365-day initial sync (onboarding).
+        Use mode="delta" to force a short refresh.
+        Use days=N to override entirely.
+        """
         if not user_id:
             return {"error": "No user_id available"}
 
-        # Hard cap to keep individual sync runtime sane. Daily-stats and
-        # sleep loop one API call per day, so 365 days = ~365 calls.
-        days = max(1, min(int(days or 30), 365))
+        effective_days, resolved_mode = _resolve_sync_window(mode, days)
 
         from src.services.garmin_sync import GarminSyncService
 
-        activities = GarminSyncService.sync_activities(user_id, days)
-        daily_stats = GarminSyncService.sync_daily_stats(user_id, days)
-        sleep = GarminSyncService.sync_sleep(user_id, days)
-        return {"activities": activities, "daily_stats": daily_stats, "sleep": sleep}
+        activities = GarminSyncService.sync_activities(user_id, effective_days)
+        daily_stats = GarminSyncService.sync_daily_stats(user_id, effective_days)
+        sleep = GarminSyncService.sync_sleep(user_id, effective_days)
+        return {
+            "mode": resolved_mode,
+            "days_synced": effective_days,
+            "activities": activities,
+            "daily_stats": daily_stats,
+            "sleep": sleep,
+        }
 
     registry.register(Tool(
         name="sync_garmin_data",
         description=(
             "Pull activities, daily health stats, and sleep from the user's "
-            "connected Garmin account. Returns sync counts. "
-            "Days argument: 1-365, default 30. For onboarding a NEW athlete, "
-            "use days=90 to get 3 months of base context (training history, "
-            "fitness trend, recent goals). For a returning athlete's regular "
-            "refresh, 7-14 days is plenty. Avoid spamming - one sync per "
-            "chat turn is enough; daily-stats and sleep loop one API call "
-            "per day so 365 days takes ~30 sec."
+            "connected Garmin account. AUTO mode (default) inspects "
+            "last_sync_at: pulls 365 days the first time (or after a "
+            "30-day gap), otherwise pulls only the delta since last sync "
+            "with a 3-day grace. Use mode='full' to force a 365-day "
+            "initial pull (e.g. during onboarding). Use mode='delta' to "
+            "force a short refresh. Pass days=N to override entirely. "
+            "Returns {mode, days_synced, activities, daily_stats, sleep}. "
+            "365-day syncs take ~30 sec because daily-stats and sleep "
+            "loop per day."
         ),
         handler=sync_garmin_data,
         parameters={
             "type": "object",
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "description": "auto (default), full, or delta",
+                    "enum": ["auto", "full", "delta"],
+                    "default": "auto",
+                },
                 "days": {
                     "type": "integer",
-                    "description": (
-                        "Number of days to sync (1-365). Default 30. "
-                        "Recommended: 90 for onboarding, 7-14 for refresh."
-                    ),
-                    "default": 30,
+                    "description": "Explicit override 1-365. Omit for auto/full/delta logic.",
                 },
             },
         },

@@ -44,14 +44,17 @@ already knows.
 3. After the form submits, call `get_provider_status(provider="garmin")`.
    - If `connected=true` and `activity_count > 0`: skip ahead, you
      already have data. Read it via `get_activities(limit=30)`.
-   - If `connected=true` and `activity_count == 0` (or `last_sync_at` is
-     stale by 24h+): call `sync_garmin_data(days=90)` to pull 3 months
-     of base context (past races, training-load trend, recent injuries
-     visible as gaps), then `get_activities(limit=30)`. Do NOT use the
-     default 30 days for onboarding - 90 is needed to see meaningful
-     training history.
-   - If `connected=false`: the user cancelled or it errored. Fall back to
-     asking sports directly (see fallback below).
+   - If `connected=true` and `activity_count == 0` (or `last_sync_at`
+     is stale by 24h+): call `sync_garmin_data(mode="full")` to pull
+     the FULL 365-day history (past races, training-load trend,
+     injuries visible as gaps). Then `get_activities(limit=30)`. For
+     onboarding ALWAYS use mode="full" - delta mode misses the
+     long-term context needed for a credible first plan.
+   - If `connected=false`: the user cancelled or it errored. Fall back
+     to asking sports directly (see fallback below).
+
+   In later coaching turns (not onboarding) use the default mode="auto"
+   which does cheap delta syncs.
 
    With activities in hand, infer the athlete's main sports from the
    `sport` field and confirm via
