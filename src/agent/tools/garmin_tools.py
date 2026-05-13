@@ -124,10 +124,14 @@ def register_garmin_tools(registry: ToolRegistry, user_model=None) -> None:
     # sync_garmin_data
     # ------------------------------------------------------------------
 
-    def sync_garmin_data(days: int = 7) -> dict:
+    def sync_garmin_data(days: int = 30) -> dict:
         """Sync recent activities, daily health stats, and sleep from Garmin."""
         if not user_id:
             return {"error": "No user_id available"}
+
+        # Hard cap to keep individual sync runtime sane. Daily-stats and
+        # sleep loop one API call per day, so 365 days = ~365 calls.
+        days = max(1, min(int(days or 30), 365))
 
         from src.services.garmin_sync import GarminSyncService
 
@@ -139,11 +143,14 @@ def register_garmin_tools(registry: ToolRegistry, user_model=None) -> None:
     registry.register(Tool(
         name="sync_garmin_data",
         description=(
-            "Pull recent activities, daily health stats, and sleep data from "
-            "the user's connected Garmin account. Returns a sync summary "
-            "with counts of synced items. Call when get_provider_status "
-            "shows stale or missing data, or when the user explicitly asks "
-            "to refresh. Avoid spamming - one sync per chat turn is plenty."
+            "Pull activities, daily health stats, and sleep from the user's "
+            "connected Garmin account. Returns sync counts. "
+            "Days argument: 1-365, default 30. For onboarding a NEW athlete, "
+            "use days=90 to get 3 months of base context (training history, "
+            "fitness trend, recent goals). For a returning athlete's regular "
+            "refresh, 7-14 days is plenty. Avoid spamming - one sync per "
+            "chat turn is enough; daily-stats and sleep loop one API call "
+            "per day so 365 days takes ~30 sec."
         ),
         handler=sync_garmin_data,
         parameters={
@@ -151,8 +158,11 @@ def register_garmin_tools(registry: ToolRegistry, user_model=None) -> None:
             "properties": {
                 "days": {
                     "type": "integer",
-                    "description": "Number of days to sync (1-30, default 7)",
-                    "default": 7,
+                    "description": (
+                        "Number of days to sync (1-365). Default 30. "
+                        "Recommended: 90 for onboarding, 7-14 for refresh."
+                    ),
+                    "default": 30,
                 },
             },
         },

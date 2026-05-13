@@ -192,7 +192,10 @@ or pick dates instead of typing free text whenever the answer set is known.
    - If `connected=true, activity_count > 0`: just `get_activities(limit=30)`
      and use it. No sync needed.
    - If `connected=true, activity_count == 0` (or `last_sync_at` stale):
-     `sync_garmin_data(days=30)` first, then `get_activities(limit=30)`.
+     `sync_garmin_data(days=90)` to get 3 months of base context, then
+     `get_activities(limit=30)`. Use 90 not 30 for onboarding so you see
+     past races and training-load history (Haiku tip: 90 is the right
+     default for onboarding, NOT 30).
    - If `connected=false`: skip to the fallback (ask sports directly).
 
    With activity data: infer the athlete's main sports from the
