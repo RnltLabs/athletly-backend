@@ -91,6 +91,11 @@ already knows.
    Wochenplan bauen?" On yes, compose and `save_plan(plan=<dict>)`.
    Finally `update_profile(field="onboarding_complete", value=true)`.
 
+   Composing a plan = calling save_plan. Prose only is incomplete: a
+   plan that the athlete sees in chat but that never lands in the plans
+   table is invisible to the frontend plan tab, future re-evaluation,
+   and sync triggers. NEVER present a plan without persisting it.
+
 ## Anti-patterns
 
 - Asking the sport question BEFORE Garmin connect. The data answers it.
