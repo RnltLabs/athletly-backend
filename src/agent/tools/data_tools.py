@@ -90,53 +90,51 @@ def register_data_tools(registry: ToolRegistry, user_model):
             "activities": [],
         }
 
-        for act in activities:
-            # Try flat DB columns first, fall back to nested file-store dicts
-            hr_data = act.get("heart_rate", {}) or {}
-            pace_data = act.get("pace", {}) or {}
-            zone_data = act.get("zone_distribution") or act.get("hr_zone_distribution") or {}
+        # Sports for which pace is meaningful in the list view. Everything
+        # else (strength, yoga, etc.) omits avg_pace_pretty to keep entries
+        # tight - the agent can still fetch full pace data via
+        # get_activity_details(activity_id).
+        _PACE_SPORTS = {
+            "running", "trail_running", "treadmill_running",
+            "walking", "hiking",
+            "cycling", "road_biking", "mountain_biking", "indoor_cycling",
+            "swimming", "open_water_swimming", "lap_swimming",
+            "rowing", "indoor_rowing",
+        }
 
+        for act in activities:
+            pace_data = act.get("pace", {}) or {}
             duration_seconds = act.get("duration_seconds", 0) or 0
             distance_meters = act.get("distance_meters") or 0
             duration_min = round(duration_seconds / 60, 1)
-            pace_decimal = (
-                act.get("avg_pace_min_km")
-                or pace_data.get("avg_min_per_km")
-                or pace_data.get("avg_min_per_100m")
-            )
 
-            # Compute pretty pace from duration/distance directly to avoid
-            # the ~0.5s precision loss of round(pace, 2). Falls back to the
-            # rounded decimal if either is missing.
-            if duration_seconds and distance_meters:
-                sec_per_km = (duration_seconds / distance_meters) * 1000
-                pretty_pace = f"{int(sec_per_km // 60)}:{int(round(sec_per_km % 60)):02d}"
-            else:
-                pretty_pace = pace_to_mmss(pace_decimal)
+            sport = act.get("sport", "unknown")
+            include_pace = sport.lower() in _PACE_SPORTS
 
-            entry = {
+            entry: dict = {
                 "id": act.get("id") or act.get("garmin_activity_id"),
                 "date": act.get("start_time", "")[:10],
-                "sport": act.get("sport", "unknown"),
-                "sub_sport": act.get("sub_sport"),
-                "duration_minutes": duration_min,
+                "sport": sport,
                 "duration_pretty": minutes_to_hms(duration_min),
                 "distance_km": round(distance_meters / 1000, 2) if distance_meters else None,
-                "avg_hr": act.get("avg_hr") or hr_data.get("avg"),
-                "max_hr": act.get("max_hr") or hr_data.get("max"),
-                "avg_pace_min_km": pace_decimal,
-                "avg_pace_pretty": pretty_pace,
-                "trimp": act.get("trimp"),
-                "hr_zones": zone_data if zone_data else None,
-                "calories": act.get("calories"),
             }
 
-            # Add power data if available (flat first, then nested)
-            power_data = act.get("power", {}) or {}
-            avg_watts = act.get("avg_watts") or power_data.get("avg_watts")
-            if avg_watts:
-                entry["avg_watts"] = avg_watts
-                entry["normalized_watts"] = act.get("normalized_watts") or power_data.get("normalized_watts")
+            if include_pace:
+                pace_decimal = (
+                    act.get("avg_pace_min_km")
+                    or pace_data.get("avg_min_per_km")
+                    or pace_data.get("avg_min_per_100m")
+                )
+                # Compute pretty pace from duration/distance directly to
+                # avoid the ~0.5s precision loss of round(pace, 2). Falls
+                # back to the rounded decimal if either is missing.
+                if duration_seconds and distance_meters:
+                    sec_per_km = (duration_seconds / distance_meters) * 1000
+                    pretty_pace = f"{int(sec_per_km // 60)}:{int(round(sec_per_km % 60)):02d}"
+                else:
+                    pretty_pace = pace_to_mmss(pace_decimal)
+                if pretty_pace:
+                    entry["avg_pace_pretty"] = pretty_pace
 
             result["activities"].append(entry)
 
@@ -145,13 +143,15 @@ def register_data_tools(registry: ToolRegistry, user_model):
     registry.register(Tool(
         name="get_activities",
         description=(
-            "Return recent activities, newest first, with optional sport and "
-            "days filters. Each item: date, sport, duration_min, distance_km, "
-            "avg/max HR, pace, TRIMP, HR zones, calories, watts (if power). "
-            "Use before plan creation, when athlete asks 'what have I done?', "
-            "or to sanity-check profile claims. Avoid for multi-week trends "
-            "(use analysis_tools), health/recovery (use health_tools), or "
-            "ID-lookup. limit default 10 (use 30-50 for trends, 3-5 for last "
+            "Return a SLIM list of recent activities, newest first, with "
+            "optional sport and days filters. Each item carries ONLY: id, "
+            "date (YYYY-MM-DD), sport, duration_pretty (h:mm:ss), "
+            "distance_km, and avg_pace_pretty (m:ss/km, only for "
+            "pace-relevant sports). Use this to identify and pick "
+            "activities. For HR zone distribution, training effect, "
+            "power data, running form, elevation, TRIMP, calories, "
+            "decimal pace/HR - call get_activity_details(activity_id). "
+            "limit default 10 (use 30-50 for trends, 3-5 for last "
             "context); days e.g. 7 for last week."
         ),
         handler=get_activities,
