@@ -113,4 +113,5 @@ def register_onboarding_tools(registry: ToolRegistry, user_model) -> None:
             "properties": {},
         },
         category="onboarding",
+        display_label="Schliesse das Onboarding ab",
     ))

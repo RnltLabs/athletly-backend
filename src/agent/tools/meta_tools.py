@@ -284,6 +284,7 @@ def register_meta_tools(registry: ToolRegistry, user_model):
             "required": ["task"],
         },
         category="meta",
+        display_label="Recherchiere im Web",
     ))
 
     def get_session_context() -> dict:

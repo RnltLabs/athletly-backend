@@ -82,6 +82,7 @@ def register_health_trend_tools(registry: ToolRegistry, user_id: str = None) -> 
             },
         },
         category="data",
+        display_label="Analysiere Gesundheits-Trends",
     ))
 
 

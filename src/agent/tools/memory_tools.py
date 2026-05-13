@@ -85,6 +85,7 @@ def register_memory_tools(registry: ToolRegistry, user_model):
             "required": ["field", "value"],
         },
         category="memory",
+        display_label="Notiere ein Profil-Detail",
     ))
 
     def store_episode(summary: str, context: str, learnings: list = None) -> dict:
@@ -135,6 +136,7 @@ def register_memory_tools(registry: ToolRegistry, user_model):
             "required": ["summary", "context"],
         },
         category="memory",
+        display_label="Speichere eine Episode",
     ))
 
     def consolidate_episodes(month: str = "") -> dict:

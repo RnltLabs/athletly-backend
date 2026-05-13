@@ -96,6 +96,7 @@ def register_notification_tools(registry: ToolRegistry, user_id: str) -> None:
             "required": ["title", "body"],
         },
         category="meta",
+        display_label="Sende eine Push-Benachrichtigung",
     ))
 
     def spawn_background_task(

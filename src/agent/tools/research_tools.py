@@ -124,6 +124,7 @@ def register_research_tools(registry: ToolRegistry):
             "required": ["query"],
         },
         category="research",
+        display_label="Suche online",
     ))
 
     def web_fetch(url: str, extract_prompt: str = "Extract the key information.") -> dict:
@@ -182,4 +183,5 @@ def register_research_tools(registry: ToolRegistry):
             "required": ["url"],
         },
         category="research",
+        display_label="Lese eine Webseite",
     ))

@@ -118,6 +118,7 @@ def register_ui_tools(registry: ToolRegistry, user_model=None) -> None:
             "required": ["question", "options"],
         },
         category="meta",
+        display_label="Stelle eine Auswahl-Frage",
     ))
 
     # -- ask_number ---------------------------------------------------------
@@ -205,6 +206,7 @@ def register_ui_tools(registry: ToolRegistry, user_model=None) -> None:
             "required": ["question", "min", "max"],
         },
         category="meta",
+        display_label="Frage nach einer Zahl",
     ))
 
     # -- ask_date -----------------------------------------------------------
@@ -282,6 +284,7 @@ def register_ui_tools(registry: ToolRegistry, user_model=None) -> None:
             "required": ["question"],
         },
         category="meta",
+        display_label="Frage nach einem Datum",
     ))
 
     # -- ask_confirm --------------------------------------------------------
@@ -334,6 +337,7 @@ def register_ui_tools(registry: ToolRegistry, user_model=None) -> None:
             "required": ["question"],
         },
         category="meta",
+        display_label="Frage Ja oder Nein",
     ))
 
     # -- ask_text_input -----------------------------------------------------
@@ -427,4 +431,5 @@ def register_ui_tools(registry: ToolRegistry, user_model=None) -> None:
             "required": ["question", "fields"],
         },
         category="meta",
+        display_label="Frage nach Eingabe",
     ))

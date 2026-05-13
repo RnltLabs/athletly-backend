@@ -118,6 +118,7 @@ def register_garmin_tools(registry: ToolRegistry, user_model=None) -> None:
             },
         },
         category="data",
+        display_label="Pruefe Garmin Verbindung",
     ))
 
     # ------------------------------------------------------------------
@@ -236,4 +237,5 @@ def register_garmin_tools(registry: ToolRegistry, user_model=None) -> None:
             },
         },
         category="data",
+        display_label="Lade neue Garmin-Daten",
     ))

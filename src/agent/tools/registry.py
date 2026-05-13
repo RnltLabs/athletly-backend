@@ -45,6 +45,7 @@ class Tool:
     parameters: dict = field(default_factory=dict)  # JSON Schema
     category: str = "general"     # data, analysis, research, planning, memory, meta
     source: str = "native"        # native | mcp
+    display_label: str = ""       # German action phrase shown to users in UI
 
 
 class ToolRegistry:

@@ -123,4 +123,5 @@ def _create_brave_search_tool(api_key: str) -> Tool:
         },
         category="research",
         source="mcp",
+        display_label="Suche online",
     )

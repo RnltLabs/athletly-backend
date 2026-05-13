@@ -78,6 +78,7 @@ def register_health_inventory_tools(registry: ToolRegistry) -> None:
             "properties": {},
         },
         category="data",
+        display_label="Pruefe Health-Daten",
     ))
 
 
