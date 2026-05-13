@@ -1,11 +1,22 @@
-"""Garmin provider — wraps python-garminconnect / Garth OAuth.
+"""Garmin provider: wraps python-garminconnect / Garth OAuth.
 
 Authenticates with email + password (no MFA support in current upstream lib),
 persists Garth session tokens in ``provider_tokens``, and syncs activities,
 daily health metrics, and sleep into local Supabase tables.
 
 All garminconnect imports are deferred inside methods so the library remains
-an optional dependency — importing this module does not require it.
+an optional dependency: importing this module does not require it.
+
+``last_sync_at`` semantics
+--------------------------
+Each of the three sync methods (``sync_activities``, ``sync_daily_stats``,
+``sync_sleep``) maintains its own portion of ``provider_tokens.last_sync_at``:
+they each call ``update_last_sync`` only when ``synced > 0``. We picked
+per-method updates over a single end-of-pipeline update so that partial
+progress is preserved (e.g. activities succeed, sleep transiently fails).
+When all three return zero rows the timestamp stays untouched so that the
+agent's ``get_provider_status`` can tell "connected but never successfully
+fetched" apart from "connected and recently synced".
 """
 
 from __future__ import annotations
@@ -211,8 +222,36 @@ class GarminProvider(Provider):
                 ).execute()
                 synced += 1
 
-            update_last_sync(user_id, self.name)
-            return {"status": "ok", "synced": synced, "skipped": skipped, "days": days}
+            # Only advance last_sync_at when we actually persisted rows.
+            # Otherwise an empty Garmin window (or every record skipped)
+            # would silently mark the sync as fresh and mask real failures.
+            if synced > 0:
+                update_last_sync(user_id, self.name)
+                return {
+                    "status": "ok",
+                    "synced": synced,
+                    "skipped": skipped,
+                    "days": days,
+                }
+
+            note = (
+                "no_activities_in_window"
+                if skipped == 0
+                else "all_activities_skipped"
+            )
+            logger.warning(
+                "Garmin sync_activities for user %s wrote 0 rows (%s); "
+                "leaving last_sync_at untouched.",
+                user_id,
+                note,
+            )
+            return {
+                "status": "ok",
+                "synced": 0,
+                "skipped": skipped,
+                "days": days,
+                "note": note,
+            }
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
         except Exception as exc:
@@ -313,8 +352,25 @@ class GarminProvider(Provider):
                         "Failed to sync daily stats for %s", day, exc_info=True
                     )
 
-            update_last_sync(user_id, self.name)
-            return {"status": "ok", "synced": synced, "days": days}
+            # Only advance last_sync_at when we wrote at least one row.
+            # The per-day loop swallows exceptions; updating the timestamp
+            # unconditionally would hide a fully-failed sync.
+            if synced > 0:
+                update_last_sync(user_id, self.name)
+                return {"status": "ok", "synced": synced, "days": days}
+
+            logger.warning(
+                "Garmin sync_daily_stats for user %s wrote 0 rows across %s "
+                "days; leaving last_sync_at untouched.",
+                user_id,
+                days,
+            )
+            return {
+                "status": "ok",
+                "synced": 0,
+                "days": days,
+                "note": "no_daily_stats_in_window",
+            }
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
         except Exception as exc:
@@ -373,7 +429,23 @@ class GarminProvider(Provider):
                 except Exception:
                     logger.debug("Failed to sync sleep for %s", day, exc_info=True)
 
-            return {"status": "ok", "synced": synced, "days": days}
+            # Only advance last_sync_at when we wrote at least one row.
+            if synced > 0:
+                update_last_sync(user_id, self.name)
+                return {"status": "ok", "synced": synced, "days": days}
+
+            logger.warning(
+                "Garmin sync_sleep for user %s wrote 0 rows across %s days; "
+                "leaving last_sync_at untouched.",
+                user_id,
+                days,
+            )
+            return {
+                "status": "ok",
+                "synced": 0,
+                "days": days,
+                "note": "no_sleep_in_window",
+            }
         except ValueError as exc:
             return {"status": "error", "error": str(exc)}
         except Exception as exc:
