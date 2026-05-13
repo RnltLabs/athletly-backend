@@ -68,7 +68,9 @@ fields while making it feel like a normal conversation, not a form.
 
 7. **Garmin connect prompt.** Immediately after the four core fields are
    filled, call `request_garmin_connect` so the athlete can connect their
-   Garmin account. Once they do (you will see new activities in
+   Garmin account. This renders an inline email + password form directly
+   in the chat (not a modal popup); the frontend submits straight to
+   `POST /garmin/connect`. Once connected (you will see new activities in
    `get_activities`), you will have real data to ground the first plan in.
    Call this once per onboarding flow; do not spam it.
 
