@@ -88,25 +88,64 @@ def register_data_tools(registry: ToolRegistry, user_model):
             "count": len(activities),
             "activities": [],
         }
+        def _pace_to_mmss(pace_dec: float | None) -> str | None:
+            """Convert a decimal-minute pace (e.g. 4.41) to "4:24" notation.
+
+            Garmin and our DB store pace as decimal minutes per km. A
+            naive LLM (especially Haiku) tends to read 4.41 as "4 min 41
+            sec" which is wrong (it's actually ~4 min 25 sec). We format
+            both so the agent has the human string ready to quote.
+            """
+            if pace_dec is None:
+                return None
+            try:
+                whole = int(pace_dec)
+                seconds = round((float(pace_dec) - whole) * 60)
+                if seconds == 60:
+                    whole += 1
+                    seconds = 0
+                return f"{whole}:{seconds:02d}"
+            except (TypeError, ValueError):
+                return None
+
+        def _duration_to_hhmmss(minutes_dec: float | None) -> str | None:
+            """Convert decimal minutes (e.g. 93.5) to "1:33:30" notation."""
+            if minutes_dec is None:
+                return None
+            try:
+                total_seconds = round(float(minutes_dec) * 60)
+                h, rem = divmod(total_seconds, 3600)
+                m, s = divmod(rem, 60)
+                if h:
+                    return f"{h}:{m:02d}:{s:02d}"
+                return f"{m}:{s:02d}"
+            except (TypeError, ValueError):
+                return None
+
         for act in activities:
             # Try flat DB columns first, fall back to nested file-store dicts
             hr_data = act.get("heart_rate", {}) or {}
             pace_data = act.get("pace", {}) or {}
             zone_data = act.get("zone_distribution") or act.get("hr_zone_distribution") or {}
 
+            duration_min = round(act.get("duration_seconds", 0) / 60, 1)
+            pace_decimal = (
+                act.get("avg_pace_min_km")
+                or pace_data.get("avg_min_per_km")
+                or pace_data.get("avg_min_per_100m")
+            )
+
             entry = {
                 "date": act.get("start_time", "")[:10],
                 "sport": act.get("sport", "unknown"),
                 "sub_sport": act.get("sub_sport"),
-                "duration_minutes": round(act.get("duration_seconds", 0) / 60, 1),
+                "duration_minutes": duration_min,
+                "duration_pretty": _duration_to_hhmmss(duration_min),
                 "distance_km": round(act.get("distance_meters", 0) / 1000, 2) if act.get("distance_meters") else None,
                 "avg_hr": act.get("avg_hr") or hr_data.get("avg"),
                 "max_hr": act.get("max_hr") or hr_data.get("max"),
-                "avg_pace_min_km": (
-                    act.get("avg_pace_min_km")
-                    or pace_data.get("avg_min_per_km")
-                    or pace_data.get("avg_min_per_100m")
-                ),
+                "avg_pace_min_km": pace_decimal,
+                "avg_pace_pretty": _pace_to_mmss(pace_decimal),
                 "trimp": act.get("trimp"),
                 "hr_zones": zone_data if zone_data else None,
                 "calories": act.get("calories"),
