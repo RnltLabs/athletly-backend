@@ -210,6 +210,24 @@ def _log_cache_usage(response: litellm.ModelResponse, model: str) -> None:
         model, cache_writes or 0, cache_reads or 0,
     )
 
+    # Record into the in-memory telemetry buffer for /admin/cache-stats.
+    # Wrapped so observability failures never bubble into the agent loop.
+    try:
+        from src.services.cache_telemetry import get_telemetry
+        get_telemetry().record_call(
+            model=model,
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            cache_creation_tokens=cache_writes or 0,
+            cache_read_tokens=cache_reads or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        )
+        # ITPM warning at 80% of Tier 1 Haiku limit (50_000 tokens / minute).
+        itpm = get_telemetry().itpm(60)
+        if itpm > 40000:
+            logger.warning("ITPM=%d approaching Anthropic Tier 1 limit 50000", itpm)
+    except Exception:
+        pass  # observability must never break the agent loop
+
 
 def get_client() -> genai.Client:
     """Create a Gemini client for embedding operations.

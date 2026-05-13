@@ -127,6 +127,10 @@ def create_app() -> FastAPI:
     from src.api.routers.profile import router as profile_router
     app.include_router(profile_router, prefix="/profile", tags=["profile"])
 
+    # Admin/observability - cache hit rate, ITPM, per-model breakdown.
+    from src.api.routers.admin import router as admin_router
+    app.include_router(admin_router, prefix="/admin", tags=["admin"])
+
     # -- Health endpoint ------------------------------------------------------
 
     @app.get("/health", tags=["meta"])
