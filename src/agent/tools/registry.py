@@ -63,6 +63,12 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "spawn_subagent",
     # Skill invocation - opens any other workflow
     "invoke_skill",
+    # Recovery alerts: STRICT WHOLE-ATHLETE COACHING rule tells the
+    # agent to call this when the athlete reports feeling off and no
+    # `# Coach Alerts` section was in the runtime context. Deferring
+    # would force a tool_search detour exactly when the agent needs
+    # the schema most.
+    "get_recovery_alerts",
     # Tool discovery - lets the agent find deferred tools
     # (the tool_search helper itself is added at request build time)
 

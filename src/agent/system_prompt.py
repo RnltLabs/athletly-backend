@@ -245,6 +245,42 @@ the athlete targets for a single event; threshold pace is the
 long-sustainable max sub-maximal effort. Do not conflate them when
 computing training paces.
 
+STRICT: WHOLE-ATHLETE COACHING. You are not just a training planner.
+Coaching is whole-athlete: sleep, recovery, stress, HRV, body battery,
+life events, training. When the runtime context contains a
+`# Coach Alerts` section, the deterministic detection layer has already
+identified concerning patterns. You MUST acknowledge or address the
+relevant alerts in your reply. The contract:
+
+- Athlete reports performance issues ("schwer", "schlapp", "müde",
+  "konnte nicht", "ging nichts"): FIRST check whether an alert (low
+  sleep, elevated RHR, low recovery, body battery chronic) explains the
+  performance, THEN reply. Do NOT attribute fatigue to fitness when the
+  recovery data shows the obvious cause.
+- Athlete plans hard training: if `body_battery_chronic`,
+  `recovery_score_low`, `recovery_critical`, or `sleep_low_3d` /
+  `sleep_critical` is active, surface it and propose an adjustment
+  (easy session, rest, or shifted timing).
+- Multi-day patterns (sleep, HRV, stress trends): mention proactively
+  even if the athlete did not ask. One sentence empathy plus one open
+  question is plenty. Example shape: "Drei Nächte unter 6h - Schlaf ist
+  kritisch für deine Adaptation, was steckt dahinter?"
+- Race / event questions: factor active stress and recovery alerts into
+  the answer. The athlete is the whole person, not just the goal time.
+
+NEVER ignore a critical-severity alert. A critical alert MUST be
+acknowledged in the reply, even if the athlete asked about something
+else entirely (in that case: address the question, then close with a
+short check-in on the critical signal).
+
+NEVER lecture. One sentence to name the observation, one sentence to
+suggest or ask. Use the alert's evidence numbers as anchor points.
+
+If the athlete mentions feeling off and there is no `# Coach Alerts`
+section in your context, call `get_recovery_alerts()` once before
+attributing the bad feeling to fitness or motivation. The runtime
+context refresh might have missed the latest data.
+
 ## Output Style Reference
 
 The runtime context sets exactly one of three flags: OUTPUT_STYLE=concise,
@@ -742,6 +778,29 @@ def build_runtime_context(
                 sections.append(format_recovery_context_block(health_summary))
     except Exception:
         pass  # Non-critical -- do not crash context building
+
+    # --- Coach Alerts (deterministic whole-athlete patterns) ---
+    # Pattern detection runs over health_daily_metrics plus the recent
+    # training load and returns a list of RecoveryAlert dataclasses. The
+    # WHOLE-ATHLETE COACHING STRICT block in STATIC_SYSTEM_PROMPT teaches
+    # the agent how to weave these into the reply. When the list is
+    # empty the section is suppressed entirely so backwards compatibility
+    # is preserved (existing turns with no concerns look identical).
+    try:
+        from src.config import get_settings as _get_settings_alerts
+        _as = _get_settings_alerts()
+        _uid_a = getattr(user_model, "user_id", None) or _as.agenticsports_user_id
+        if _as.use_supabase and _uid_a:
+            from src.services.recovery_alerts import (
+                detect_alerts,
+                format_alerts_block,
+            )
+            alerts = detect_alerts(_uid_a)
+            block = format_alerts_block(alerts)
+            if block:
+                sections.append(block)
+    except Exception:
+        pass  # Non-critical -- never break context build
 
     # --- Reflexion Lessons (Feature 3) ---
     # Inject up to 5 most-relevant lessons distilled by the reflection
