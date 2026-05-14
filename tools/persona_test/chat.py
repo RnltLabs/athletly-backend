@@ -23,7 +23,9 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -47,6 +49,99 @@ DEFAULT_API_URL = os.environ.get("ATHLETLY_API_URL", "https://athletly.rnltlabs.
 _HTTP_TIMEOUT_S = 180.0
 
 
+# ---------------------------------------------------------------------------
+# Evidence trace
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EvidenceTrace:
+    """Accumulator for the structured ``=== EVIDENCE TRACE ===`` block.
+
+    Populated by :func:`_render_event` as the SSE stream is consumed. Rendered
+    by :func:`_render_evidence_block` after the stream completes when the
+    ``--print-evidence`` flag is set.
+
+    The block is consumed by downstream persona-test agents, so the shape and
+    line-by-line format MUST stay stable. See ``tools/persona_test/README.md``
+    "Evidence trace block" section.
+    """
+
+    session_id: str | None = None
+    tools_called: list[tuple[str, dict]] = field(default_factory=list)
+    message_chunks: list[str] = field(default_factory=list)
+    usage: dict[str, Any] | None = None
+    critic_review_event: dict[str, Any] | None = None
+
+
+def _format_tool_args_compact(args: dict, max_len: int = 60) -> str:
+    """Render a tool's args dict as a compact ``k=v`` string for the evidence block.
+
+    Caps the rendered length at ``max_len`` chars, truncating with ``...``.
+    Returns an empty string if ``args`` is falsy.
+    """
+    if not args:
+        return ""
+    parts = []
+    for key, value in args.items():
+        if isinstance(value, (dict, list)):
+            s = json.dumps(value, ensure_ascii=False)
+        else:
+            s = str(value)
+        parts.append(f"{key}={s}")
+    out = ", ".join(parts)
+    if len(out) > max_len:
+        out = out[: max_len - 3] + "..."
+    return out
+
+
+def _render_evidence_block(trace: EvidenceTrace) -> str:
+    """Render the accumulated trace as the literal block agents copy verbatim.
+
+    Returns a single string ending with a newline. Caller is responsible for
+    emitting the required leading blank line.
+    """
+    if trace.tools_called:
+        tools_rendered = ", ".join(
+            f"{name}({_format_tool_args_compact(args)})"
+            for name, args in trace.tools_called
+        )
+        tools_line = f"[{tools_rendered}]"
+    else:
+        tools_line = "[]"
+
+    response_text = "".join(trace.message_chunks)
+
+    if trace.usage is not None:
+        usage_line = "tokens: input={inp} cache_read={cr} output={out} model={model}".format(
+            inp=trace.usage.get("input_tokens", 0),
+            cr=trace.usage.get("cache_read_input_tokens", 0),
+            out=trace.usage.get("output_tokens", 0),
+            model=trace.usage.get("model", "?"),
+        )
+    else:
+        usage_line = "tokens: input=0 cache_read=0 output=0 model=?"
+
+    if trace.critic_review_event is None:
+        critic_line = "critic_review_event: null"
+    else:
+        critic_line = "critic_review_event: " + json.dumps(
+            trace.critic_review_event, ensure_ascii=False, separators=(",", ":")
+        )
+
+    lines = [
+        "=== EVIDENCE TRACE ===",
+        f"session_id: {trace.session_id or '<missing>'}",
+        f"tools_called: {tools_line}",
+        "response_text_verbatim:",
+        response_text,
+        usage_line,
+        critic_line,
+        "=== END EVIDENCE ===",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def send_message(
     *,
     slug: str,
@@ -54,6 +149,7 @@ def send_message(
     api_url: str,
     new_session: bool = False,
     show_thinking: bool = False,
+    print_evidence: bool = False,
 ) -> int:
     """Send one chat message as the persona; render the SSE stream.
 
@@ -78,8 +174,10 @@ def send_message(
     url = api_url.rstrip("/") + "/chat"
     _print_user_line(persona.name, message)
 
+    trace = EvidenceTrace() if print_evidence else None
+
     try:
-        rc = _stream(url, headers, body, slug, show_thinking)
+        rc = _stream(url, headers, body, slug, show_thinking, trace)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 401:
             # Cached JWT might have expired between the cache check and the
@@ -88,7 +186,7 @@ def send_message(
             auth = sign_in_persona(slug)
             headers["Authorization"] = f"Bearer {auth.access_token}"
             try:
-                rc = _stream(url, headers, body, slug, show_thinking)
+                rc = _stream(url, headers, body, slug, show_thinking, trace)
             except Exception as exc2:  # noqa: BLE001
                 sys.stderr.write(f"ERROR (retry): {exc2}\n")
                 return 3
@@ -98,6 +196,14 @@ def send_message(
     except httpx.HTTPError as exc:
         sys.stderr.write(f"HTTP error: {exc}\n")
         return 3
+
+    if trace is not None:
+        # Exactly one blank line, then the literal block, on stdout. Render
+        # the block even if rc != 0 so partial traces are still inspectable.
+        sys.stdout.write("\n")
+        sys.stdout.write(_render_evidence_block(trace))
+        sys.stdout.flush()
+
     return rc
 
 
@@ -112,8 +218,13 @@ def _stream(
     body: dict,
     slug: str,
     show_thinking: bool,
+    trace: EvidenceTrace | None = None,
 ) -> int:
-    """POST to /chat and render the SSE stream live."""
+    """POST to /chat and render the SSE stream live.
+
+    If ``trace`` is provided, evidence is accumulated into it alongside the
+    normal rendering. Caller emits the evidence block after this returns.
+    """
     saw_done = False
     saw_message = False
     with httpx.Client(timeout=_HTTP_TIMEOUT_S) as client:
@@ -129,7 +240,13 @@ def _stream(
                 if event_type == "done":
                     saw_done = True
                     break
-                _render_event(event_type, payload, slug=slug, show_thinking=show_thinking)
+                _render_event(
+                    event_type,
+                    payload,
+                    slug=slug,
+                    show_thinking=show_thinking,
+                    trace=trace,
+                )
                 if event_type == "message":
                     saw_message = True
     if not saw_done:
@@ -169,14 +286,27 @@ def _iter_sse(response):
         # Ignore comment lines (:) and id: lines.
 
 
-def _render_event(event_type: str, payload: dict, *, slug: str, show_thinking: bool) -> None:
-    """Render a single SSE event to stdout in a human-readable form."""
+def _render_event(
+    event_type: str,
+    payload: dict,
+    *,
+    slug: str,
+    show_thinking: bool,
+    trace: EvidenceTrace | None = None,
+) -> None:
+    """Render a single SSE event to stdout in a human-readable form.
+
+    If ``trace`` is provided, populate it with the event's structured data
+    in addition to the human-readable rendering.
+    """
     if event_type == "session_start":
         sid = payload.get("session_id")
         if sid:
             write_session_id(slug, sid)
             sys.stdout.write(f"[session] {sid}\n")
             sys.stdout.flush()
+            if trace is not None:
+                trace.session_id = sid
         return
 
     if event_type == "thinking":
@@ -193,6 +323,10 @@ def _render_event(event_type: str, payload: dict, *, slug: str, show_thinking: b
         args_short = _short_args(args)
         sys.stdout.write(f"[tool] {name}({args_short})\n")
         sys.stdout.flush()
+        if trace is not None and event_type == "tool_call":
+            # Only count actual tool calls in the evidence trace, not hints
+            # (hints are speculative pre-call markers).
+            trace.tools_called.append((name, args if isinstance(args, dict) else {}))
         return
 
     if event_type == "tool_group_start":
@@ -223,6 +357,8 @@ def _render_event(event_type: str, payload: dict, *, slug: str, show_thinking: b
         if text:
             sys.stdout.write(f"\n< Coach: {text}\n\n")
             sys.stdout.flush()
+            if trace is not None:
+                trace.message_chunks.append(text)
         return
 
     if event_type == "ui_component":
@@ -248,6 +384,8 @@ def _render_event(event_type: str, payload: dict, *, slug: str, show_thinking: b
             ),
         )
         sys.stdout.flush()
+        if trace is not None:
+            trace.usage = dict(payload)
         return
 
     if event_type == "error":
@@ -272,6 +410,8 @@ def _render_event(event_type: str, payload: dict, *, slug: str, show_thinking: b
     if event_type == "critic_review":
         sys.stdout.write(f"[critic_review] {_short_payload(payload)}\n")
         sys.stdout.flush()
+        if trace is not None:
+            trace.critic_review_event = dict(payload)
         return
 
     # Unknown event - show raw for diagnosis.
@@ -344,6 +484,17 @@ def _parse_args() -> argparse.Namespace:
         help="Also render thinking events from the stream.",
     )
     parser.add_argument(
+        "--print-evidence",
+        action="store_true",
+        help=(
+            "After the SSE stream completes, emit a literal "
+            "=== EVIDENCE TRACE === block with session_id, tools_called, "
+            "verbatim coach response, token usage, and critic_review event "
+            "(if any). Persona-test agents paste this block verbatim into "
+            "their report. See tools/persona_test/README.md."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -364,6 +515,7 @@ def main() -> int:
         api_url=args.api_url,
         new_session=args.new,
         show_thinking=args.show_thinking,
+        print_evidence=args.print_evidence,
     )
 
 
