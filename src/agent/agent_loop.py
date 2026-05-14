@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.agent.complexity_detector import needs_complex_reasoning
 from src.agent.hooks import (
     HookContext,
     install_builtin_hooks,
@@ -592,6 +593,29 @@ class AgentLoop:
         # Persist user turn (Gap 1)
         self._save_turn("user", user_message)
 
+        # -- Complexity routing (Sprint E) -----------------------------------
+        # Deterministic detector picks the chat_completion tier for THIS turn
+        # at message receipt. Sticky for the entire tool loop so the
+        # Anthropic prompt cache prefix is not invalidated mid-turn.
+        # Cross-sport, race-strategy, sport-math, and long-horizon plan
+        # queries route to Sonnet + extended thinking. Routine turns stay
+        # on Haiku. See src/agent/complexity_detector.py for the rule.
+        is_complex, matched_keywords = needs_complex_reasoning(user_message)
+        selected_tier = "complex" if is_complex else "routine"
+        if is_complex:
+            logger.info(
+                "complexity_detector: complex_triggered keywords=%s user_id=%s",
+                matched_keywords, self._user_id,
+            )
+        else:
+            logger.debug(
+                "complexity_detector: routine keywords=%s", matched_keywords,
+            )
+        # Tracks whether we already retried complex -> routine in this turn.
+        # When True we prepend a user-visible annotation to the final reply
+        # explaining that deep analysis was unavailable.
+        complex_fallback_used = False
+
         # Get tool declarations in OpenAI format for LiteLLM
         # Anthropic native tool_search: only CORE_TOOL_NAMES descriptions
         # are visible in the prompt; everything else is deferred. Saves
@@ -612,18 +636,44 @@ class AgentLoop:
             })
 
             # Call LLM with conversation history + tools via LiteLLM.
-            # tier="routine" is the default. To use Sonnet for a planning
-            # turn, call a higher-level service that sets tier="complex".
-            # Mid-turn switching is intentionally NOT supported here (it
-            # would invalidate the Anthropic prompt cache; see DESIGN.md).
-            response = chat_completion(
-                messages=self._messages,
-                system_prompt=system_prompt,
-                tools=openai_tools if openai_tools else None,
-                temperature=AGENT_TEMPERATURE,
-                runtime_context=runtime_ctx,
-                tier="routine",
-            )
+            # selected_tier is pinned at message receipt by the
+            # complexity_detector (Sprint E). Cross-sport / sport-math /
+            # race-strategy turns route to Sonnet + extended thinking,
+            # everything else stays on Haiku. Mid-turn switching is
+            # intentionally NOT supported here (it would invalidate the
+            # Anthropic prompt cache; see DESIGN.md).
+            try:
+                response = chat_completion(
+                    messages=self._messages,
+                    system_prompt=system_prompt,
+                    tools=openai_tools if openai_tools else None,
+                    temperature=AGENT_TEMPERATURE,
+                    runtime_context=runtime_ctx,
+                    tier=selected_tier,
+                )
+            except Exception as exc:
+                # Sonnet failure (rate limit exhausted, overload, etc.)
+                # falls back to Haiku once. The athlete still gets an
+                # answer; the response is annotated so they know deep
+                # analysis was unavailable. Non-complex turns re-raise
+                # so the existing error-handling path takes over.
+                if selected_tier != "complex":
+                    raise
+                logger.warning(
+                    "complex chat_completion failed (%s), retrying as routine",
+                    exc,
+                    exc_info=True,
+                )
+                complex_fallback_used = True
+                selected_tier = "routine"
+                response = chat_completion(
+                    messages=self._messages,
+                    system_prompt=system_prompt,
+                    tools=openai_tools if openai_tools else None,
+                    temperature=AGENT_TEMPERATURE,
+                    runtime_context=runtime_ctx,
+                    tier=selected_tier,
+                )
 
             # Track usage (non-blocking, fire-and-forget)
             try:
@@ -687,7 +737,7 @@ class AgentLoop:
                     system_prompt=fallback_prompt,
                     temperature=AGENT_TEMPERATURE,
                     runtime_context=runtime_ctx,
-                    tier="routine",
+                    tier=selected_tier,
                 )
                 fb_message = fallback_response.choices[0].message
                 if fb_message.content:
@@ -968,6 +1018,18 @@ class AgentLoop:
 
         result.total_duration_ms = int((time.time() - start_time) * 1000)
         self._turns_this_session += 1
+
+        # Annotate the response when we fell back from complex -> routine
+        # mid-turn. The athlete sees an explicit notice so they know the
+        # answer is from simpler reasoning. The annotation is in German
+        # because the agent's UI language is German.
+        if complex_fallback_used and result.response_text:
+            annotation = (
+                "[Hinweis: Tiefere Analyse war kurz nicht verfuegbar, "
+                "hier meine beste Antwort mit einfachem Reasoning.]\n\n"
+            )
+            if not result.response_text.startswith(annotation):
+                result.response_text = annotation + result.response_text
 
         # Persist agent response (Gap 1)
         self._save_turn("model", result.response_text, {
