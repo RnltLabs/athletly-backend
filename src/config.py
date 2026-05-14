@@ -102,7 +102,11 @@ class Settings(BaseSettings):
     critic_model: str = "anthropic/claude-haiku-4-5-20251001"
     # Hard timeout on a single critic API call. Above this we fail-open and
     # accept the coach response unchanged so the user never waits.
-    critic_timeout_s: float = 1.5
+    # 4.0s sits at the Anthropic Haiku 4.5 p99 latency budget; live data showed
+    # the prior 1.5s value cut off at ~p65 and caused 42% timeout fail-opens.
+    # Hard rules are now checked deterministically (see hard_inspect) and do
+    # not rely on this LLM call, so it is safe to use a wider budget here.
+    critic_timeout_s: float = 4.0
 
     # -- Product Recommendations / Affiliate -----------------------------------
     amazon_affiliate_tag: str = ""

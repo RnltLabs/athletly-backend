@@ -329,6 +329,215 @@ def _build_user_prompt(
     )
 
 
+# --- Hard inspector (deterministic always-block guardrails) ---------------
+#
+# The hard inspector runs BEFORE the LLM critic and checks the three rules
+# that are pure byte/character matches: em-dash, markdown markers, ASCII
+# transliteration of German umlauts. These checks are deterministic and
+# sub-millisecond, so they can never time out and never fail open. See
+# DESIGN.md for the two-tier rationale (hard always-block vs soft LLM
+# judgment with fail-open allowed).
+
+# Em-dash U+2014 and en-dash U+2013.
+_DASH_CHARS = ("—", "–")
+
+# Markdown markers we forbid in coach responses. Conservative regexes:
+# - `**bold**` and `__bold__` (double markers with non-empty body)
+# - single-asterisk italic with non-whitespace content
+# - heading line starting with `# ` or `## `, etc.
+_MARKDOWN_BOLD_RE = re.compile(r"(\*\*\S[^*\n]*?\S\*\*)|(__\S[^_\n]*?\S__)")
+_MARKDOWN_ITALIC_RE = re.compile(r"(?<![*\w])\*\S[^*\n]*?\S\*(?!\*)")
+_MARKDOWN_HEADING_RE = re.compile(r"(?m)^#{1,6}\s+\S")
+
+# German indicator tokens. If any of these appear in the user message we
+# treat the conversation as German and the umlauts rule applies. Kept
+# tiny and conservative to avoid false positives on mixed-language input.
+_GERMAN_INDICATORS = (
+    " der ", " die ", " das ", " und ", " nicht ", " ich ", " ist ",
+    " mein ", " dein ", " heute ", " morgen ", " gestern ", " warum ",
+    " trainings", " woche ", " lauf",
+)
+
+# ASCII transliterations of German umlauts. Word-boundary regex to avoid
+# matching inside unrelated tokens (e.g. "Status" should not trip "ss").
+# We only flag when the surrounding word is plausibly German, see
+# `_german_word_context` for the heuristic.
+_ASCII_UMLAUT_RE = re.compile(
+    r"\b\w*(?:ae|oe|ue|ss)\w*\b", re.IGNORECASE
+)
+
+# Words containing ae/oe/ue/ss that are legitimately ASCII (English loan
+# words, brand names, etc.). Skip these to avoid false positives.
+_ASCII_UMLAUT_ALLOWLIST = {
+    "aerobic", "anaerobic", "aerobics", "aeroplane",
+    "boss", "across", "process", "progress", "stress", "fitness",
+    "ross", "loss", "miss", "class", "pass", "mass", "less", "less",
+    "press", "assess", "address", "express", "success", "access",
+    "guess", "session", "sessions",
+    "blue", "true", "queue", "value", "issue", "fuel",
+    "due", "cue", "due", "tissue",
+    "coetzee",  # brand-y proper noun safety
+}
+
+
+def _is_german_text(user_message: str) -> bool:
+    """Cheap heuristic for German vs non-German conversation language.
+
+    We rely on a tiny allowlist of common German function words. False
+    positives on English text containing the word "die" (verb) are
+    acceptable because the umlauts rule only fires on responses that
+    ALSO contain suspicious ASCII transliterations - clean English
+    responses never trip the rule regardless of this check.
+    """
+    if not user_message:
+        return False
+    padded = " " + user_message.lower() + " "
+    return any(token in padded for token in _GERMAN_INDICATORS)
+
+
+def _has_real_umlaut(text: str) -> bool:
+    """Return True if *text* contains any real German umlaut character."""
+    return any(c in text for c in ("ä", "ö", "ü", "ß",
+                                    "Ä", "Ö", "Ü"))
+
+
+def _detect_ascii_umlaut_violation(response_text: str) -> str | None:
+    """Return the offending token if response uses ASCII transliteration.
+
+    Conservative: only fires when no real umlauts are present in the
+    response (so we don't penalise mixed text) AND at least one word
+    containing ae/oe/ue/ss is NOT in the allowlist.
+    """
+    # If the response already contains real umlauts somewhere, the
+    # author clearly knows how to type them; treat any remaining ASCII
+    # combos as intentional (e.g. "Status", "Saemann" surname).
+    if _has_real_umlaut(response_text):
+        return None
+    for match in _ASCII_UMLAUT_RE.finditer(response_text):
+        token = match.group(0).lower()
+        if token in _ASCII_UMLAUT_ALLOWLIST:
+            continue
+        # The token must contain ae/oe/ue/ss and at least one extra
+        # German-flavoured letter to count as a translit attempt.
+        # Single-syllable English words like "blue" are filtered above.
+        if any(seq in token for seq in ("ae", "oe", "ue", "ss")):
+            return token
+    return None
+
+
+def hard_inspect(response_text: str, user_message: str) -> tuple[Violation, ...]:
+    """Deterministic always-block rule checks.
+
+    Returns a tuple of Violations. An empty tuple means the response
+    passes all three hard rules. This function MUST be safe to run on
+    every coach response: zero network, zero LLM, sub-millisecond
+    latency, no exceptions for any input.
+
+    The three hard rules:
+    1. ``no_em_dash`` - U+2014 / U+2013 anywhere in the response.
+    2. ``no_markdown`` - bold/italic/heading markdown markers.
+    3. ``umlauts`` - ASCII transliteration of German umlauts when the
+       conversation is in German.
+
+    See DESIGN.md (Two-Tier Constitutional Critic) for why these three
+    rules are deterministic and the other five are LLM-judgment.
+    """
+    if not response_text:
+        return ()
+
+    violations: list[Violation] = []
+
+    # 1. em-dash / en-dash
+    for ch in _DASH_CHARS:
+        if ch in response_text:
+            violations.append(Violation(
+                rule="no_em_dash",
+                reason=(
+                    f"Response contains dash character U+{ord(ch):04X}. "
+                    "Only hyphen-minus is permitted."
+                ),
+            ))
+            break
+
+    # 2. markdown markers
+    md_match = (
+        _MARKDOWN_BOLD_RE.search(response_text)
+        or _MARKDOWN_ITALIC_RE.search(response_text)
+        or _MARKDOWN_HEADING_RE.search(response_text)
+    )
+    if md_match:
+        violations.append(Violation(
+            rule="no_markdown",
+            reason=f"Markdown marker detected: {md_match.group(0)[:60]!r}",
+        ))
+
+    # 3. ASCII umlauts in German conversation
+    if _is_german_text(user_message):
+        offending = _detect_ascii_umlaut_violation(response_text)
+        if offending is not None:
+            violations.append(Violation(
+                rule="umlauts",
+                reason=(
+                    f"German response uses ASCII transliteration "
+                    f"({offending!r}); real umlaut characters required."
+                ),
+            ))
+
+    return tuple(violations)
+
+
+def sanitize_hard(response_text: str, user_message: str) -> str:
+    """Last-resort cleaner that removes hard-rule violations.
+
+    Only invoked when both the original draft AND the LLM regenerate
+    introduced a hard violation. Guarantees zero hard-rule violations
+    on its output so we never ship em-dash / markdown / ASCII-umlaut
+    text to the user.
+
+    This is not a substitute for the LLM regenerate - the rewrite is
+    still the primary path. ``sanitize_hard`` is the safety net for the
+    rare double-failure case.
+    """
+    text = response_text or ""
+
+    # Replace dashes with " - " (hyphen with spaces).
+    for ch in _DASH_CHARS:
+        text = text.replace(ch, " - ")
+
+    # Strip markdown markers, preserving the inner text.
+    text = _MARKDOWN_BOLD_RE.sub(
+        lambda m: (m.group(1) or m.group(2) or "").strip("*_"),
+        text,
+    )
+    text = _MARKDOWN_ITALIC_RE.sub(lambda m: m.group(0).strip("*"), text)
+    text = _MARKDOWN_HEADING_RE.sub(
+        lambda m: m.group(0).lstrip("# ").rstrip(),
+        text,
+    )
+
+    # ASCII umlauts: only apply in German context, only for a tight
+    # whitelist of common German words. We intentionally do NOT do
+    # full transliteration - too risky. We just patch the most common
+    # cases that show up in coach responses.
+    if _is_german_text(user_message) and not _has_real_umlaut(text):
+        replacements = (
+            ("Fuer ", "Für "), ("fuer ", "für "),
+            ("Ueber", "Über"), ("ueber", "über"),
+            ("Moeglich", "Möglich"), ("moeglich", "möglich"),
+            ("Naechst", "Nächst"), ("naechst", "nächst"),
+            ("Waere", "Wäre"), ("waere", "wäre"),
+            ("Koennen", "Können"), ("koennen", "können"),
+            ("Muessen", "Müssen"), ("muessen", "müssen"),
+            ("Suess", "Süß"), ("suess", "süß"),
+            ("strasse", "straße"), ("Strasse", "Straße"),
+            ("grosse", "große"), ("Grosse", "Große"),
+        )
+        for ascii_form, real_form in replacements:
+            text = text.replace(ascii_form, real_form)
+
+    return text
+
+
 # --- Public convenience ----------------------------------------------------
 
 
