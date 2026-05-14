@@ -1378,8 +1378,14 @@ class AsyncAgentLoop(AgentLoop):
             except Exception:
                 logger.warning("Critique pass raised, accepting original", exc_info=True)
 
-        # Emit the final message event.
+        # Sprint G: unconditional deterministic finalize step.
+        # Every SSE ``message`` payload MUST be free of hard-rule
+        # violations regardless of CRITIC_ENABLED / gates state. The
+        # finalize step is sub-millisecond, no I/O, no LLM, and
+        # idempotent on already-clean text.
         if final_text:
+            final_text = _finalize_response(final_text, user_message)
+            outcome.response_text = final_text
             await emit_fn("message", {"text": final_text})
 
         # Close the tool group after the final response so the UI can
@@ -1831,6 +1837,46 @@ def _should_run_critic_safe(user_model) -> bool:
     except Exception:
         logger.warning("should_run_critic raised, skipping critique", exc_info=True)
         return False
+
+
+def _finalize_response(text: str, user_message: str) -> str:
+    """Unconditional pre-emit sanitization for SSE ``message`` payloads.
+
+    Runs ``sanitize_hard`` exactly once, then ``hard_inspect`` to verify
+    no residual violations. Logs an error if anything survives; ships
+    the sanitized text either way (it cannot be worse than the input).
+
+    Sprint G guarantees: ANY hard violation in the final response MUST
+    be sanitized BEFORE the SSE ``message`` emit. This function is the
+    single source of truth for that guarantee. Always-on regardless of
+    ``CRITIC_ENABLED`` or gates state. Sub-millisecond, no I/O.
+    """
+    if not text:
+        return text
+    try:
+        from src.agent.critic import hard_inspect, sanitize_hard
+    except Exception:
+        logger.warning("_finalize_response import failed, returning original", exc_info=True)
+        return text
+
+    try:
+        cleaned = sanitize_hard(text, user_message or "")
+    except Exception:
+        logger.warning("sanitize_hard raised, returning original", exc_info=True)
+        return text
+
+    try:
+        residual = hard_inspect(cleaned, user_message or "")
+    except Exception:
+        logger.warning("hard_inspect raised on finalize residual check", exc_info=True)
+        return cleaned
+
+    if residual:
+        logger.error(
+            "Finalize step left residual hard violations: %s",
+            [v.rule for v in residual],
+        )
+    return cleaned
 
 
 def _unique_tool_names(result: "AgentResult") -> list[str]:

@@ -969,3 +969,289 @@ def test_critic_timeout_default_is_at_least_four_seconds():
     settings = get_settings()
     assert settings.critic_timeout_s >= 4.0
     get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Sprint G: hard_inspect ACTUALLY blocks
+# ---------------------------------------------------------------------------
+
+
+def test_detect_ascii_umlaut_does_not_short_circuit_on_mixed_text():
+    """Regression for Sprint G Bug 1.
+
+    A single real umlaut anywhere in the response MUST NOT blind the
+    detector to ASCII transliterations elsewhere. Pre-fix behaviour:
+    the detector returned None as soon as it saw any real umlaut, so
+    "Nächte ... Koerper ... ueber Naechte" passed cleanly.
+    """
+    from src.agent.critic import _detect_ascii_umlaut_violation
+
+    mixed = (
+        "Drei Nächte unter 6 Stunden - das ist dein Koerper. Defizit "
+        "ueber drei Naechte. Wir koennten uebermorgen reden."
+    )
+    offending = _detect_ascii_umlaut_violation(mixed)
+    assert offending is not None, (
+        "Mixed-umlaut response must surface at least one ASCII translit"
+    )
+
+
+def test_hard_inspect_catches_umlauts_with_mixed_real_and_ascii():
+    """Mixed umlaut response trips the ``umlauts`` hard rule.
+
+    User wrote German ("ich schlafe seit drei Naechten morgen heute"),
+    coach response mixes ``Nächte`` and ``Naechte``. The umlauts rule
+    must still fire.
+    """
+    user_msg = "Andere Sache: ich schlafe seit drei Naechten morgen heute schlecht."
+    coach_resp = (
+        "Drei Nächte unter 6 Stunden - das ist dein Koerper. Defizit "
+        "ueber drei Naechte. Wir koennten uebermorgen reden."
+    )
+    out = hard_inspect(coach_resp, user_msg)
+    assert any(v.rule == "umlauts" for v in out)
+
+
+def test_sanitize_hard_repairs_koerper_naechte_koennten_uebermorgen():
+    """Regression for Sprint G Bug 2.
+
+    The pre-fix replacement table missed `Naecht`, `Koerper`,
+    `koennten`, `uebermorgen`, `Uebertraining`, etc. After Sprint G
+    these are all repaired by the deterministic table.
+    """
+    user_msg = "ich schlafe seit drei Naechten morgen heute"
+    coach_resp = (
+        "Drei Naechte unter 6 Stunden, dein Koerper, ueber drei Naechte. "
+        "Wir koennten uebermorgen reden. Vorsicht vor Uebertraining."
+    )
+    cleaned = sanitize_hard(coach_resp, user_msg)
+    # The known transliterations MUST be repaired.
+    assert "Naechte" not in cleaned
+    assert "Naecht" not in cleaned or "Nächt" in cleaned
+    assert "Koerper" not in cleaned
+    assert "koennten" not in cleaned
+    assert "uebermorgen" not in cleaned
+    assert "Uebertraining" not in cleaned
+    # Real umlauts present after repair.
+    assert "Nächte" in cleaned
+    assert "Körper" in cleaned
+    assert "könnten" in cleaned
+    assert "übermorgen" in cleaned
+    assert "Übertraining" in cleaned
+    # Residual hard_inspect must return clean.
+    assert hard_inspect(cleaned, user_msg) == ()
+
+
+def test_sanitize_hard_em_dash_with_spaces_yields_single_spaces():
+    """Regression for Sprint G Bug 4.
+
+    Em-dash surrounded by spaces must collapse to a single canonical
+    ' - ' (one space, hyphen, one space), never '  -  ' (two spaces).
+    """
+    text = "Hello world — what a day."
+    cleaned = sanitize_hard(text, "hi")
+    assert "—" not in cleaned
+    assert "  -  " not in cleaned
+    assert " - " in cleaned
+
+
+def test_sanitize_hard_idempotent_on_clean_text():
+    """A clean response must pass through sanitize_hard unchanged."""
+    text = "Heute ist ein klarer Tag. Lauf bei 4:30/km."
+    user = "Was ist heute mein Training?"
+    assert sanitize_hard(text, user) == text
+
+
+def test_sanitize_hard_in_english_context_does_not_apply_umlauts():
+    """English conversation must not get German umlaut replacements applied."""
+    text = "Aerobic threshold today. Process is good."
+    cleaned = sanitize_hard(text, "How is my plan today?")
+    assert cleaned == text
+
+
+# ---------------------------------------------------------------------------
+# Sprint G: _finalize_response (always-on pre-emit sanitization)
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_response_strips_all_hard_violations():
+    """The finalize helper must remove em-dash, markdown, and ASCII umlauts."""
+    from src.agent.agent_loop import _finalize_response
+
+    user_msg = "Was ist heute mein Training? ich morgen heute"
+    bad = (
+        "## Heute\n"
+        "**Drei Naechte** unter 6 Stunden — das ist dein Koerper. Wir "
+        "koennten uebermorgen reden."
+    )
+    out = _finalize_response(bad, user_msg)
+    assert "—" not in out
+    assert "**" not in out
+    assert out.lstrip()[:2] != "##"
+    assert "Naechte" not in out
+    assert "Koerper" not in out
+    assert "koennten" not in out
+    assert "uebermorgen" not in out
+    # Residual inspection clean.
+    assert hard_inspect(out, user_msg) == ()
+
+
+def test_finalize_response_idempotent_on_clean_text():
+    from src.agent.agent_loop import _finalize_response
+
+    text = "Heute ist Easy Run, 60 min bei 5:30/km."
+    user = "Was ist heute mein Training?"
+    assert _finalize_response(text, user) == text
+
+
+def test_finalize_response_handles_empty():
+    from src.agent.agent_loop import _finalize_response
+    assert _finalize_response("", "hi") == ""
+    assert _finalize_response(None, "hi") in (None, "")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Sprint G: end-to-end SSE integration test
+# ---------------------------------------------------------------------------
+
+
+def test_process_message_sse_emits_sanitized_message(monkeypatch):
+    """End-to-end regression: a violating response goes through the full
+    SSE pipeline and the ``message`` event payload is clean.
+
+    Stubs ``AsyncAgentLoop.process_message`` to return a hard-violating
+    AgentResult, then asserts the emitted ``message`` event contains
+    NO em-dash, NO markdown, and NO ASCII-umlaut transliterations.
+    This is the canonical "hard_inspect actually blocks" guarantee.
+    """
+    import asyncio
+    from src.agent.agent_loop import AgentResult, AgentTurn, AsyncAgentLoop
+
+    user_msg = (
+        "Andere Sache: ich schlafe seit drei Naechten morgen heute "
+        "schlecht. Soll ich morgen meinen Tempolauf trotzdem ziehen?"
+    )
+
+    bad_response = (
+        "## Schlaf-Defizit\n"
+        "**Drei Naechte** unter 6 Stunden — das ist dein Koerper, der "
+        "dir sagt, dass etwas nicht stimmt. Wir koennten uebermorgen "
+        "reden. Vorsicht vor Uebertraining."
+    )
+
+    def _fake_process_message(self, msg):
+        return AgentResult(
+            response_text=bad_response,
+            turns=[AgentTurn(role="assistant", content=bad_response)],
+            tool_calls_made=0,
+        )
+
+    monkeypatch.setattr(AsyncAgentLoop, "process_message", _fake_process_message)
+
+    # Force critic and gates OFF so we test the ALWAYS-ON finalize step
+    # rather than the LLM-driven regenerate paths.
+    from src.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("CRITIC_ENABLED", "false")
+    monkeypatch.setenv("RESPONSE_GATES_ENABLED", "false")
+
+    loop = AsyncAgentLoop.__new__(AsyncAgentLoop)
+    # Minimal state init - skip __init__ to avoid Supabase/LLM setup.
+    loop._messages = []
+    loop._gates_regenerated_this_turn = False
+    loop._active_alert_ids = ()
+    from collections import deque
+    loop._recent_tools_window = deque(maxlen=3)
+    loop.user_model = SimpleNamespace(tier="free")
+    loop.on_progress = None
+    loop.tools = {}
+    loop.context = "coach"
+
+    events: list[tuple[str, dict]] = []
+
+    async def emit_fn(event_type: str, data: dict) -> None:
+        events.append((event_type, data))
+
+    asyncio.run(loop.process_message_sse(user_msg, emit_fn))
+
+    get_settings.cache_clear()
+
+    # Find the ``message`` event payload.
+    message_events = [e for e in events if e[0] == "message"]
+    assert len(message_events) == 1
+    payload_text = message_events[0][1]["text"]
+
+    # ZERO TOLERANCE on hard violations.
+    assert "—" not in payload_text
+    assert "–" not in payload_text
+    assert "**" not in payload_text
+    assert "__" not in payload_text
+    # No heading marker at line start.
+    for line in payload_text.splitlines():
+        assert not line.lstrip().startswith("#")
+    # ASCII translit words must be repaired.
+    assert "Naechte" not in payload_text
+    assert "Koerper" not in payload_text
+    assert "koennten" not in payload_text
+    assert "uebermorgen" not in payload_text
+    assert "Uebertraining" not in payload_text
+    # Real umlauts present.
+    assert "Nächte" in payload_text
+    assert "Körper" in payload_text
+    assert "könnten" in payload_text
+    assert "übermorgen" in payload_text
+    # Residual inspection passes.
+    assert hard_inspect(payload_text, user_msg) == ()
+
+
+def test_process_message_sse_finalize_runs_when_critic_disabled(monkeypatch):
+    """Bug 3 regression: the always-on finalize step is NOT gated on CRITIC_ENABLED.
+
+    If a deployment turns the critic off (e.g. cost-control toggle),
+    the deterministic hard sanitization MUST still run. The finalize
+    step is the safety net that protects the SSE invariant regardless
+    of feature flags.
+    """
+    import asyncio
+    from src.agent.agent_loop import AgentResult, AgentTurn, AsyncAgentLoop
+
+    user_msg = "ich morgen heute Training?"
+    bad = "Heute — easy run."
+
+    def _fake(self, msg):
+        return AgentResult(
+            response_text=bad,
+            turns=[AgentTurn(role="assistant", content=bad)],
+        )
+
+    monkeypatch.setattr(AsyncAgentLoop, "process_message", _fake)
+    from src.config import get_settings
+    get_settings.cache_clear()
+    monkeypatch.setenv("CRITIC_ENABLED", "false")
+    monkeypatch.setenv("RESPONSE_GATES_ENABLED", "false")
+
+    loop = AsyncAgentLoop.__new__(AsyncAgentLoop)
+    loop._messages = []
+    loop._gates_regenerated_this_turn = False
+    loop._active_alert_ids = ()
+    from collections import deque
+    loop._recent_tools_window = deque(maxlen=3)
+    loop.user_model = SimpleNamespace(tier="free")
+    loop.on_progress = None
+    loop.tools = {}
+    loop.context = "coach"
+
+    events: list[tuple[str, dict]] = []
+
+    async def emit_fn(event_type: str, data: dict) -> None:
+        events.append((event_type, data))
+
+    asyncio.run(loop.process_message_sse(user_msg, emit_fn))
+    get_settings.cache_clear()
+
+    msg_events = [e for e in events if e[0] == "message"]
+    assert len(msg_events) == 1
+    text = msg_events[0][1]["text"]
+    assert "—" not in text
+    assert "  -  " not in text  # No double-space dash artefact.
+    assert " - " in text  # Canonical single-space hyphen.
