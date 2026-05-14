@@ -1009,6 +1009,86 @@ class AgentLoop:
         self._messages.append({"role": oai_role, "content": text})
         self._save_turn(role, text, {"injected": True})
 
+    # -- Constitutional Critique Regeneration (Feature 2) -------------------
+
+    def regenerate_after_critique(
+        self,
+        original_response: str,
+        violations: list[dict],
+    ) -> str:
+        """Rewrite *original_response* so it no longer violates *violations*.
+
+        Used by the constitutional critic (src/agent/critic.py) when the
+        first-draft coach response failed the 8-rule check. The retry is
+        a SINGLE tool-free LLM call against the existing conversation
+        history, so cost is bounded at one extra completion (no extra
+        tool rounds).
+
+        The bad first-draft is NOT removed from ``self._messages``; we
+        feed it back to the model as context and ask for a fix. This is
+        cheaper than rerunning the full tool loop and avoids any risk
+        of triggering a different tool path.
+
+        Args:
+            original_response: The response text the critic rejected.
+                Used in the prompt so the model sees what to fix.
+            violations: A list of {"rule": str, "reason": str} dicts
+                from the critic. Inlined verbatim into the prompt.
+
+        Returns:
+            The rewritten response text. May be empty if the LLM
+            returns nothing; the caller should fall back to
+            ``original_response`` in that case.
+        """
+        violation_lines = "\n".join(
+            f"- {v.get('rule')}: {v.get('reason', '')}"[:300]
+            for v in violations
+        )
+        retry_prompt = (
+            "SYSTEM CHECK: your previous response violated these "
+            "constitution rules:\n"
+            f"{violation_lines}\n\n"
+            "Rewrite your previous response so it fixes ALL listed "
+            "violations while keeping the substantive content and "
+            "answer to the athlete intact. Mirror the athlete's "
+            "language. Do NOT call any tools. Output ONLY the rewritten "
+            "response, no preamble, no apology, no meta-comment."
+        )
+        retry_messages = list(self._messages) + [
+            {"role": "user", "content": retry_prompt}
+        ]
+        runtime_ctx = build_runtime_context(
+            user_model=self.user_model,
+            date=None,
+            startup_context=self.startup_context,
+            context=self.context,
+        )
+        try:
+            response = chat_completion(
+                messages=retry_messages,
+                system_prompt=STATIC_SYSTEM_PROMPT,
+                temperature=AGENT_TEMPERATURE,
+                runtime_context=runtime_ctx,
+            )
+        except Exception:
+            logger.warning("Critique-driven regenerate raised, keeping original", exc_info=True)
+            return original_response
+
+        if not response.choices:
+            return original_response
+        msg = response.choices[0].message
+        new_text = (getattr(msg, "content", None) or "").strip()
+        if not new_text:
+            return original_response
+
+        # Splice the corrected response into the persisted history so
+        # downstream summarization / replay sees the user-facing answer,
+        # not the rejected draft. The bad draft itself stays in
+        # self._messages for the model's short-term memory of this turn
+        # (it informs follow-up turns to avoid the same mistake).
+        self._messages.append({"role": "assistant", "content": new_text})
+        return new_text
+
 
 # -- Async Agent Loop (SSE streaming) ----------------------------------------
 
@@ -1169,9 +1249,29 @@ class AsyncAgentLoop(AgentLoop):
                 logger.warning("emit_fn raised on tool_group_end (exception)", exc_info=True)
             raise outcome
 
+        # -- Constitutional critique (Feature 2) -------------------------
+        # Pro-tier only, master-switch gated. Fails open on any error so
+        # the user never sees a critic-induced failure. See critic.py for
+        # the rule list and decision logic.
+        final_text = outcome.response_text or ""
+        if final_text and _should_run_critic_safe(self.user_model):
+            try:
+                final_text = await self._run_critique_pass(
+                    response_text=final_text,
+                    user_message=user_message,
+                    tool_names=_unique_tool_names(outcome),
+                    emit_fn=emit_fn,
+                )
+                # Mirror any rewrite back into the AgentResult so callers
+                # (push notifications, response logging) see the final
+                # user-facing text, not the rejected draft.
+                outcome.response_text = final_text
+            except Exception:
+                logger.warning("Critique pass raised, accepting original", exc_info=True)
+
         # Emit the final message event.
-        if outcome.response_text:
-            await emit_fn("message", {"text": outcome.response_text})
+        if final_text:
+            await emit_fn("message", {"text": final_text})
 
         # Close the tool group after the final response so the UI can
         # mark this turn's status panel as complete.
@@ -1182,8 +1282,118 @@ class AsyncAgentLoop(AgentLoop):
 
         return outcome
 
+    # -- Constitutional critique hook (Feature 2) ----------------------------
+
+    async def _run_critique_pass(
+        self,
+        response_text: str,
+        user_message: str,
+        tool_names: list[str],
+        emit_fn: Callable,
+    ) -> str:
+        """Score *response_text* against the constitution and act.
+
+        Decision logic (DESIGN.md section 3):
+        - accept -> return original
+        - regenerate (first time) -> rewrite the response, score AGAIN,
+          and return the rewrite (regardless of the second verdict)
+        - if the rewrite still violates, emit a ``critic_review`` SSE
+          event so the frontend can log it; do NOT block the message.
+
+        Fail-open: any exception from the critic is treated as accept.
+        Metrics are recorded for every decision so /admin/critic-stats
+        stays accurate even when the critic fails.
+        """
+        from src.agent.critic import get_critic  # local import: avoids cycle
+        from src.services.critic_metrics import get_metrics
+
+        critic = get_critic()
+        metrics = get_metrics()
+
+        # First pass.
+        first = await asyncio.to_thread(
+            critic.review,
+            response_text,
+            user_message,
+            tool_names,
+        )
+
+        if first.error or first.action == "accept":
+            metrics.record(
+                action="critic_error" if first.error else "accept",
+                violations=first.violation_ids(),
+                latency_ms=first.latency_ms,
+            )
+            return response_text
+
+        # action == "regenerate" -> one retry.
+        rewritten = await asyncio.to_thread(
+            self.regenerate_after_critique,
+            response_text,
+            [{"rule": v.rule, "reason": v.reason} for v in first.violations],
+        )
+        # Second critic pass on the rewrite. If it still violates, we
+        # annotate via SSE but do NOT regenerate again (cost cap).
+        second = await asyncio.to_thread(
+            critic.review,
+            rewritten,
+            user_message,
+            tool_names,
+        )
+        if second.error or second.action == "accept":
+            metrics.record(
+                action="regenerate",
+                violations=first.violation_ids(),
+                latency_ms=first.latency_ms + second.latency_ms,
+            )
+            return rewritten
+
+        # Still violating after retry. Send the rewritten response (best
+        # we have) and emit a critic_review event for observability.
+        metrics.record(
+            action="regenerate_failed",
+            violations=second.violation_ids(),
+            latency_ms=first.latency_ms + second.latency_ms,
+        )
+        try:
+            await emit_fn("critic_review", second.to_event_payload())
+        except Exception:
+            logger.warning("emit_fn raised on critic_review", exc_info=True)
+        return rewritten
+
 
 # -- Helpers ------------------------------------------------------------------
+
+
+def _should_run_critic_safe(user_model) -> bool:
+    """Fail-safe wrapper around ``critic.should_run_critic``.
+
+    The critic must never break the agent loop, even at the gating
+    check. Any exception is logged and treated as "do not run".
+    """
+    try:
+        from src.agent.critic import should_run_critic
+        return should_run_critic(user_model)
+    except Exception:
+        logger.warning("should_run_critic raised, skipping critique", exc_info=True)
+        return False
+
+
+def _unique_tool_names(result: "AgentResult") -> list[str]:
+    """Extract the ordered, de-duplicated list of tools called this turn.
+
+    Used by the constitutional critic to validate rules that depend on
+    tool-call evidence (no_fabricated_stats, details_before_metrics,
+    sync_then_status).
+    """
+    seen: list[str] = []
+    for turn in result.turns:
+        name = getattr(turn, "tool_name", None)
+        if not name or name in seen:
+            continue
+        seen.append(name)
+    return seen
+
 
 def _progress_to_sse_data(
     event_type: str,

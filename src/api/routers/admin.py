@@ -1,7 +1,8 @@
 """Admin/internal endpoints for observability.
 
-Read-only diagnostics over the in-memory LLM telemetry buffer. No PII,
-no auth: a reverse proxy on Hetzner restricts access at the network layer.
+Read-only diagnostics over the in-memory LLM telemetry buffers. No PII,
+no auth: a reverse proxy on Hetzner restricts access at the network
+layer.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 
 from src.services.cache_telemetry import get_telemetry
+from src.services.critic_metrics import get_metrics as get_critic_metrics
 from src.services.prompt_metrics import get_prompt_metrics
 
 router = APIRouter(tags=["admin"])
@@ -32,6 +34,18 @@ async def prompt_metrics(
 
     Returns counts per rule, per model, per prompt variant, plus the
     rolling violation rate and a small sample of recent violations
-    (with snippets) for inspection. See DESIGN.md for the JSON shape.
+    (with snippets) for inspection.
     """
     return get_prompt_metrics().summary(window_seconds=window_minutes * 60)
+
+
+@router.get("/critic-stats")
+async def critic_stats() -> dict:
+    """Per-action and per-rule constitutional critic stats.
+
+    Returns:
+        Dict with action rates (accept / regenerate / regenerate_failed /
+        critic_error), per-rule violation counts over the last ~500
+        critic calls, and the average critic latency in milliseconds.
+    """
+    return get_critic_metrics().summary()
