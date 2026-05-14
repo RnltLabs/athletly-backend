@@ -4,6 +4,11 @@
 # Environment
 .env
 
+# Persona test framework runtime artefacts
+.env.persona_test
+.persona_test_jwt/
+.persona_test_session/
+
 # Supabase local state (contains project ref, pooler URL)
 supabase/.temp/
 
