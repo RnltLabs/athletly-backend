@@ -623,7 +623,6 @@ class AgentLoop:
                 temperature=AGENT_TEMPERATURE,
                 runtime_context=runtime_ctx,
                 tier="routine",
-                user_id=self._user_id,
             )
 
             # Track usage (non-blocking, fire-and-forget)
@@ -689,7 +688,6 @@ class AgentLoop:
                     temperature=AGENT_TEMPERATURE,
                     runtime_context=runtime_ctx,
                     tier="routine",
-                    user_id=self._user_id,
                 )
                 fb_message = fallback_response.choices[0].message
                 if fb_message.content:

@@ -3,13 +3,14 @@ coaching lessons from a conversation.
 
 Public entry points:
 
-- ``run_pro_reflexion(user_id, session_id)``: per-session reflection
-  for Pro-tier users. Fire-and-forget from the chat router.
-- ``run_free_monthly_reflexion(user_id)``: monthly batch for Free-tier
-  users. Same fire-and-forget pattern.
-- ``maybe_run_reflexion(user_id, prev_session_id)``: tier-aware wrapper
-  used by the chat router. Picks Pro or Free based on the profile
-  ``subscription_tier`` and short-circuits when nothing is due.
+- ``run_session_reflexion(user_id, session_id)``: per-session reflection.
+  Fire-and-forget from the chat router.
+- ``run_free_monthly_reflexion(user_id)``: monthly batch over the last
+  N days of session summaries. Retained as an opt-in code path for a
+  future cron job; NOT auto-invoked today.
+- ``maybe_run_reflexion(user_id, prev_session_id)``: wrapper used by
+  the chat router. Enforces the global daily cap, then runs the
+  per-session reflection.
 
 The whole module is non-blocking: every call swallows internal
 exceptions, logs them, and returns. A failed reflection MUST NOT break
@@ -138,17 +139,16 @@ Respond now with the JSON object.
 
 
 async def maybe_run_reflexion(user_id: str, prev_session_id: str | None) -> None:
-    """Tier-aware reflection entry point.
+    """Reflection entry point. Called from the chat router on new session.
 
-    Called from the chat router when a NEW session is detected.
-    Determines tier from the user's profile and routes to either
-    :func:`run_pro_reflexion` (per-session) or
-    :func:`run_free_monthly_reflexion` (monthly batch).
+    Runs the per-session reflection for every user, with a daily cap to
+    prevent runaway cost or repeated rewrites. The monthly batch path
+    (:func:`run_free_monthly_reflexion`) is retained as an opt-in code
+    path for future cron-based reflection but is not auto-invoked.
 
     Always returns None. Exceptions are caught and logged.
     """
     try:
-        # Daily cap regardless of tier.
         from src.db.lessons_db import count_runs_since
 
         since_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
@@ -162,15 +162,10 @@ async def maybe_run_reflexion(user_id: str, prev_session_id: str | None) -> None
             )
             return
 
-        tier = await asyncio.to_thread(_get_tier, user_id)
-
-        if tier == "pro":
-            if prev_session_id is None:
-                logger.debug("Reflexion: no previous session id, skipping pro run")
-                return
-            await run_pro_reflexion(user_id, prev_session_id)
-        else:
-            await run_free_monthly_reflexion(user_id)
+        if prev_session_id is None:
+            logger.debug("Reflexion: no previous session id, skipping run")
+            return
+        await run_session_reflexion(user_id, prev_session_id)
     except Exception:
         logger.warning(
             "maybe_run_reflexion swallowed exception for user %s",
@@ -179,7 +174,7 @@ async def maybe_run_reflexion(user_id: str, prev_session_id: str | None) -> None
         )
 
 
-async def run_pro_reflexion(user_id: str, session_id: str) -> int:
+async def run_session_reflexion(user_id: str, session_id: str) -> int:
     """Run a single-session reflection. Returns number of lessons stored.
 
     Skips if the run has already been recorded for this (user, session)
@@ -342,34 +337,6 @@ def _summaries_to_synthetic_transcript(summaries: list[dict]) -> list[dict]:
             continue
         msgs.append({"role": "user", "content": text})
     return msgs
-
-
-# ---------------------------------------------------------------------------
-# Helpers: tier resolution
-# ---------------------------------------------------------------------------
-
-
-def _get_tier(user_id: str) -> str:
-    """Return ``"pro"`` or ``"free"`` (default ``"free"``)."""
-    try:
-        from src.db.client import get_supabase
-
-        result = (
-            get_supabase()
-            .table("profiles")
-            .select("meta")
-            .eq("user_id", user_id)
-            .maybe_single()
-            .execute()
-        )
-        if result is None or not result.data:
-            return "free"
-        meta = result.data.get("meta") or {}
-        tier = str(meta.get("subscription_tier") or "free").lower()
-        return tier if tier in {"pro", "free"} else "free"
-    except Exception:
-        logger.debug("tier lookup failed for %s", user_id[:8], exc_info=True)
-        return "free"
 
 
 # ---------------------------------------------------------------------------

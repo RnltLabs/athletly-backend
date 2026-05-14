@@ -6,7 +6,7 @@ Covers:
 - _evidence_in_user_blob: substring + joined-quote handling.
 - _generate_and_validate_lessons: end-to-end LLM call mocked, with
   topic coercion and hallucination drop.
-- run_pro_reflexion: idempotency, short-session skip, happy path.
+- run_session_reflexion: idempotency, short-session skip, happy path.
 - maybe_run_reflexion: tier routing and daily cap.
 - lesson_retrieval.fetch_relevant_lessons: ranking + decay + fallback.
 - lesson_retrieval.format_lessons_block: bullet rendering, cap.
@@ -332,7 +332,7 @@ class TestGenerateAndValidate:
 
 
 # ---------------------------------------------------------------------------
-# run_pro_reflexion: idempotency + short-session skip
+# run_session_reflexion: idempotency + short-session skip
 # ---------------------------------------------------------------------------
 
 
@@ -341,7 +341,7 @@ class TestRunProReflexion:
         from src.services import reflexion
 
         with patch("src.db.lessons_db.has_reflexion_run", return_value=True):
-            out = asyncio.run(reflexion.run_pro_reflexion(USER_ID, SESSION_ID))
+            out = asyncio.run(reflexion.run_session_reflexion(USER_ID, SESSION_ID))
         assert out == 0
 
     def test_skips_when_session_too_short(self) -> None:
@@ -355,7 +355,7 @@ class TestRunProReflexion:
             ),
             patch("src.db.lessons_db.record_reflexion_run") as mock_record,
         ):
-            out = asyncio.run(reflexion.run_pro_reflexion(USER_ID, SESSION_ID))
+            out = asyncio.run(reflexion.run_session_reflexion(USER_ID, SESSION_ID))
         assert out == 0
         mock_record.assert_not_called()
 
@@ -397,7 +397,7 @@ class TestRunProReflexion:
             ),
             patch("src.db.lessons_db.record_reflexion_run") as mock_record,
         ):
-            out = asyncio.run(reflexion.run_pro_reflexion(USER_ID, SESSION_ID))
+            out = asyncio.run(reflexion.run_session_reflexion(USER_ID, SESSION_ID))
         assert out == 1
         mock_record.assert_called_once()
         kwargs = mock_record.call_args.kwargs
@@ -417,14 +417,15 @@ class TestMaybeRunReflexion:
 
         with (
             patch("src.db.lessons_db.count_runs_since", return_value=5),
-            patch("src.services.reflexion.run_pro_reflexion") as mock_pro,
+            patch("src.services.reflexion.run_session_reflexion") as mock_pro,
             patch("src.services.reflexion.run_free_monthly_reflexion") as mock_free,
         ):
             asyncio.run(reflexion.maybe_run_reflexion(USER_ID, SESSION_ID))
         mock_pro.assert_not_called()
         mock_free.assert_not_called()
 
-    def test_routes_pro(self) -> None:
+    def test_runs_session_reflexion_for_every_user(self) -> None:
+        """No tier branching: per-session reflection runs for everyone."""
         from src.services import reflexion
 
         async def _stub(*_a, **_k) -> int:
@@ -432,54 +433,24 @@ class TestMaybeRunReflexion:
 
         with (
             patch("src.db.lessons_db.count_runs_since", return_value=0),
-            patch("src.services.reflexion._get_tier", return_value="pro"),
             patch(
-                "src.services.reflexion.run_pro_reflexion",
+                "src.services.reflexion.run_session_reflexion",
                 side_effect=_stub,
-            ) as mock_pro,
-            patch(
-                "src.services.reflexion.run_free_monthly_reflexion",
-                side_effect=_stub,
-            ) as mock_free,
+            ) as mock_session,
         ):
             asyncio.run(reflexion.maybe_run_reflexion(USER_ID, SESSION_ID))
-        mock_pro.assert_called_once_with(USER_ID, SESSION_ID)
-        mock_free.assert_not_called()
+        mock_session.assert_called_once_with(USER_ID, SESSION_ID)
 
-    def test_routes_free(self) -> None:
-        from src.services import reflexion
-
-        async def _stub(*_a, **_k) -> int:
-            return 0
-
-        with (
-            patch("src.db.lessons_db.count_runs_since", return_value=0),
-            patch("src.services.reflexion._get_tier", return_value="free"),
-            patch(
-                "src.services.reflexion.run_pro_reflexion",
-                side_effect=_stub,
-            ) as mock_pro,
-            patch(
-                "src.services.reflexion.run_free_monthly_reflexion",
-                side_effect=_stub,
-            ) as mock_free,
-        ):
-            asyncio.run(reflexion.maybe_run_reflexion(USER_ID, None))
-        mock_free.assert_called_once_with(USER_ID)
-        mock_pro.assert_not_called()
-
-    def test_pro_without_prev_session_id_is_noop(self) -> None:
+    def test_no_prev_session_id_is_noop(self) -> None:
+        """Without a previous session there is nothing to reflect on."""
         from src.services import reflexion
 
         with (
             patch("src.db.lessons_db.count_runs_since", return_value=0),
-            patch("src.services.reflexion._get_tier", return_value="pro"),
-            patch("src.services.reflexion.run_pro_reflexion") as mock_pro,
-            patch("src.services.reflexion.run_free_monthly_reflexion") as mock_free,
+            patch("src.services.reflexion.run_session_reflexion") as mock_session,
         ):
             asyncio.run(reflexion.maybe_run_reflexion(USER_ID, None))
-        mock_pro.assert_not_called()
-        mock_free.assert_not_called()
+        mock_session.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

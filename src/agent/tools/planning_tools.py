@@ -167,20 +167,6 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
             or _settings.agenticsports_user_id
         )
 
-    def _resolve_tier() -> str:
-        """Read the athlete's subscription tier with a safe default.
-
-        Tier infrastructure is owned outside this feature. We read from
-        the project profile and fall back to 'free' so existing users
-        keep the current behaviour until tiering ships.
-        """
-        try:
-            profile = user_model.project_profile()
-        except Exception:
-            return "free"
-        tier = profile.get("tier") or profile.get("subscription_tier")
-        return (tier or "free").lower()
-
     def save_plan(plan: dict) -> dict:
         """Persist a training plan and emit an inline plan_preview card."""
         if not isinstance(plan, dict) or not plan:
@@ -188,23 +174,19 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
 
         # Plan-and-Execute pre-processing. The agent's tool surface is
         # unchanged; we transparently expand a skinny multi-week request
-        # into a full plan via the planner pipeline.
+        # into a full plan via the planner pipeline when the request is
+        # complex enough (>= 14 session slots).
         try:
             from src.agent.planner import (
-                clamp_for_free_tier,
                 generate_training_plan,
                 should_use_plan_and_execute,
             )
             profile = user_model.project_profile()
-            tier = _resolve_tier()
 
-            if tier != "pro":
-                plan = clamp_for_free_tier(plan)
-
-            if should_use_plan_and_execute(plan, profile, tier):
+            if should_use_plan_and_execute(plan, profile):
                 logger.info(
-                    "save_plan: invoking Plan-and-Execute (tier=%s, weeks=%s)",
-                    tier, plan.get("duration_weeks"),
+                    "save_plan: invoking Plan-and-Execute (weeks=%s)",
+                    plan.get("duration_weeks"),
                 )
                 result = generate_training_plan(request=plan, profile=profile)
                 if result.mode == "plan_and_execute":

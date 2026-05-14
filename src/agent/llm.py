@@ -163,7 +163,6 @@ def chat_completion(
     runtime_context: str | None = None,
     *,
     tier: str = "routine",
-    user_id: str | None = None,
 ) -> litellm.ModelResponse:
     """Perform a synchronous chat completion via LiteLLM.
 
@@ -187,30 +186,28 @@ def chat_completion(
             Anthropic models it is prepended to the first user message.
         tier: Declared call tier for the hybrid router. One of
             ``"routine"`` (default), ``"complex"``, ``"compression"``,
-            ``"subagent"``. See :mod:`src.agent.model_router`.
-        user_id: Optional Supabase user id. Combined with ``tier`` to
-            decide whether the call may use Sonnet. ``None`` -> treated
-            as the cost-safe default tier ("free" unless overridden).
+            ``"subagent"``. See :mod:`src.agent.model_router`. Pure
+            call-site signal, no user identity involved.
 
     Returns:
         litellm.ModelResponse (OpenAI-compatible response object).
     """
     # Router decision: explicit ``model=`` always wins (backward compat).
-    # Otherwise the router picks Haiku-or-Sonnet from tier + user_tier.
+    # Otherwise the router picks Haiku-or-Sonnet from the call-site tier.
     thinking_budget = 0
     is_premium = False
     if model:
         resolved_model = model
     else:
         # Imported lazily so test code that monkeypatches ``litellm.completion``
-        # does not need to also stub out the router/db path.
+        # does not need to also stub out the router path.
         from src.agent.model_router import log_choice, resolve_model
 
-        choice = resolve_model(tier=tier, user_id=user_id)
+        choice = resolve_model(tier=tier)
         resolved_model = choice.model
         thinking_budget = choice.thinking_budget
         is_premium = choice.is_premium
-        log_choice(choice, user_id)
+        log_choice(choice)
 
         # Anthropic-key safety net: if the router picked an anthropic model
         # but no API key is configured (e.g. local dev without Anthropic

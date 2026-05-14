@@ -172,35 +172,17 @@ class CriticResult:
         )
 
 
-# --- Pro-tier gating --------------------------------------------------------
+# --- Feature flag -----------------------------------------------------------
 
 
-def should_run_critic(user_model) -> bool:
-    """Return True iff the constitutional critic should run for this user.
+def should_run_critic(user_model=None) -> bool:
+    """Return True iff the constitutional critic should run.
 
-    Today this is a simple gate. Feature 5/6 will replace the stub with
-    real subscription-store lookups.
+    Single global feature flag (``settings.critic_enabled``), no user
+    distinction. ``user_model`` is accepted for backwards compatibility
+    with existing call sites but ignored.
     """
-    settings = get_settings()
-    if not settings.critic_enabled:
-        return False
-    # Dev override: CRITIC_FORCE_PRO=1 or critic_force_pro=true in settings.
-    if settings.critic_force_pro or os.environ.get("CRITIC_FORCE_PRO") == "1":
-        return True
-    return _is_pro_tier(user_model)
-
-
-def _is_pro_tier(user_model) -> bool:
-    """Stub: return whether the user has an active Pro subscription.
-
-    Until Feature 5 wires the subscription store, we look for a
-    `tier` attribute on the user model and treat "pro" / "premium" as
-    Pro. Anything else (including None) is Free.
-    """
-    tier = getattr(user_model, "tier", None)
-    if isinstance(tier, str):
-        return tier.lower() in {"pro", "premium"}
-    return False
+    return get_settings().critic_enabled
 
 
 # --- Critic ----------------------------------------------------------------

@@ -305,30 +305,23 @@ def test_should_run_critic_disabled_by_default(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_should_run_critic_force_pro_env(monkeypatch):
+def test_should_run_critic_no_user_distinction(monkeypatch):
+    """Critic runs for every user when the feature flag is on.
+
+    No tier checks, no user identity. Pure global feature flag.
+    """
     from src.config import get_settings
     get_settings.cache_clear()
     monkeypatch.setenv("CRITIC_ENABLED", "true")
-    monkeypatch.setenv("CRITIC_FORCE_PRO", "1")
-
-    user = SimpleNamespace(tier=None)
-    assert should_run_critic(user) is True
-    get_settings.cache_clear()
-
-
-def test_should_run_critic_pro_tier_user(monkeypatch):
-    from src.config import get_settings
-    get_settings.cache_clear()
-    monkeypatch.setenv("CRITIC_ENABLED", "true")
-    monkeypatch.delenv("CRITIC_FORCE_PRO", raising=False)
 
     free_user = SimpleNamespace(tier="free")
     pro_user = SimpleNamespace(tier="pro")
-    premium_user = SimpleNamespace(tier="PREMIUM")  # case-insensitive
+    user_without_tier = SimpleNamespace()
 
-    assert should_run_critic(free_user) is False
+    assert should_run_critic(free_user) is True
     assert should_run_critic(pro_user) is True
-    assert should_run_critic(premium_user) is True
+    assert should_run_critic(user_without_tier) is True
+    assert should_run_critic(None) is True
     get_settings.cache_clear()
 
 
@@ -336,7 +329,6 @@ def test_should_run_critic_master_switch_off(monkeypatch):
     from src.config import get_settings
     get_settings.cache_clear()
     monkeypatch.setenv("CRITIC_ENABLED", "false")
-    monkeypatch.setenv("CRITIC_FORCE_PRO", "1")  # ignored when master is off
 
     user = SimpleNamespace(tier="pro")
     assert should_run_critic(user) is False

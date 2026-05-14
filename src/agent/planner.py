@@ -49,9 +49,6 @@ logger = logging.getLogger(__name__)
 # coherence and Plan-and-Execute pays off (see RESEARCH.md section 4).
 _COMPLEXITY_SESSION_THRESHOLD = 14
 
-# Free tier clamp: plans never exceed 1 week.
-_FREE_TIER_MAX_WEEKS = 1
-
 # Default models. Env overrides:
 #   ATHLETLY_PLANNER_MODEL, ATHLETLY_EXECUTOR_MODEL
 _DEFAULT_PLANNER_MODEL = "anthropic/claude-sonnet-4-5-20250929"
@@ -102,22 +99,20 @@ class PlannerResult:
 def should_use_plan_and_execute(
     plan_request: dict,
     profile: dict,
-    tier: str,
 ) -> bool:
     """Return True when the Plan-and-Execute pipeline should run.
 
-    Triggers when ALL hold:
-      - tier == 'pro' (Free tier is always inline)
-      - duration_weeks * training_days_per_week >= 14
+    Pure complexity gate: triggers when the requested plan would produce
+    at least ``_COMPLEXITY_SESSION_THRESHOLD`` session slots
+    (duration_weeks * training_days_per_week). Smaller plans stay
+    inline because the planner overhead does not pay off below the
+    coherence cliff.
 
-    `duration_weeks` is read from `plan_request['duration_weeks']` first,
-    else inferred from the supplied `sessions` list length divided by
-    training days, else from a `weeks` key. Returns False on any
-    missing/unparseable input.
+    `duration_weeks` is read from `plan_request['duration_weeks']`
+    first, else inferred from the supplied `sessions` list length
+    divided by training days, else from a `weeks` key. Returns False
+    on any missing/unparseable input.
     """
-    if (tier or "free").lower() != "pro":
-        return False
-
     weeks = _infer_duration_weeks(plan_request)
     if not weeks:
         return False
@@ -130,21 +125,6 @@ def should_use_plan_and_execute(
         days = 5
 
     return weeks * days >= _COMPLEXITY_SESSION_THRESHOLD
-
-
-def clamp_for_free_tier(plan_request: dict) -> dict:
-    """Return a new request capped at `_FREE_TIER_MAX_WEEKS`.
-
-    Used when a Free-tier user accidentally asks for a multi-week plan.
-    Returns a new dict; the input is not mutated.
-    """
-    weeks = _infer_duration_weeks(plan_request)
-    if not weeks or weeks <= _FREE_TIER_MAX_WEEKS:
-        return dict(plan_request)
-    clamped = dict(plan_request)
-    clamped["duration_weeks"] = _FREE_TIER_MAX_WEEKS
-    clamped["_free_tier_clamped_from"] = weeks
-    return clamped
 
 
 # ---------------------------------------------------------------------------
