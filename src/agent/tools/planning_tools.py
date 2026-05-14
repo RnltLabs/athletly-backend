@@ -173,6 +173,34 @@ def _build_plan_preview(plan: dict, plan_id: str | int | None) -> dict:
     }
 
 
+_MAX_SNAPSHOT_SESSIONS = 7
+
+
+def _build_plan_snapshot(plan: dict) -> dict:
+    sessions = _coerce_sessions(plan)
+    snapshot_sessions: list[dict] = []
+    for s in sessions[:_MAX_SNAPSHOT_SESSIONS]:
+        if not isinstance(s, dict):
+            continue
+        slim = {
+            k: s.get(k)
+            for k in (
+                "day", "date", "sport", "name",
+                "description", "duration_minutes", "intensity",
+            )
+            if s.get(k) is not None
+        }
+        if slim:
+            snapshot_sessions.append(slim)
+    return {
+        "start_date": plan.get("start_date") or plan.get("period_start"),
+        "focus": plan.get("focus") or plan.get("name"),
+        "duration_weeks": plan.get("duration_weeks") or plan.get("weeks"),
+        "sessions": snapshot_sessions,
+        "total_sessions": len(sessions),
+    }
+
+
 def register_planning_tools(registry: ToolRegistry, user_model) -> None:
     """Register plan persistence and read tools."""
     _settings = get_settings()
@@ -276,6 +304,11 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
             # Surface truncation to the agent so it knows the inline card
             # only shows the first N sessions; the saved plan is full.
             result["truncated_in_ui"] = True
+
+        # Surface the first week so the post-save_plan reply can ground
+        # "morgen ist X" in the actual saved structure instead of
+        # fabricating session details from training-knowledge defaults.
+        result["plan_snapshot"] = _build_plan_snapshot(plan)
 
         # The agent loop strips ``_ui_component`` before the result goes
         # back to the LLM and forwards it as an SSE ``ui_component`` event
