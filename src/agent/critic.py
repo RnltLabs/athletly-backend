@@ -1,8 +1,8 @@
 """Constitutional critique pass (Feature 2).
 
-A small Haiku 4.5 LLM call that scores the coach response against an
-8-rule constitution extracted from `src/agent/system_prompt.py`. The
-output is a structured JSON object the agent loop uses to decide
+A small Haiku 4.5 LLM call that scores the coach response against the
+STRICT-rule constitution extracted from `src/agent/system_prompt.py`.
+The output is a structured JSON object the agent loop uses to decide
 whether to (a) accept the response, (b) regenerate it once, or
 (c) annotate it with a `critic_review` SSE event.
 
@@ -69,6 +69,13 @@ _RULE_DESCRIPTIONS: dict[str, str] = {
     "sync_then_status":
         "sync_then_status: if tools_called includes sync_garmin_data, it "
         "MUST also include get_provider_status.",
+    "pace_format_correct":
+        "pace_format_correct: pace values in response_text MUST be in "
+        "mm:ss notation with a colon (e.g. '4:30/km' or '4:30 /km'). A "
+        "decimal-form pace like '4.50/km', '4.50 min/km', or '4.5/km' "
+        "is a STRICT violation: profile decimals are pre-converted to "
+        "mm:ss in the runtime context, so the model MUST quote the "
+        "pretty form verbatim.",
 }
 
 # Defensive assertion: keep critic_metrics and critic.py in sync.
@@ -78,8 +85,9 @@ assert tuple(_RULE_DESCRIPTIONS.keys()) == RULE_IDS, (
 
 
 _CRITIC_SYSTEM_PROMPT = (
-    "You are a STRICT rule-checker. Score a coach response against 8 "
-    "rules. Respond ONLY with valid JSON. No prose, no Markdown.\n\n"
+    f"You are a STRICT rule-checker. Score a coach response against "
+    f"{len(_RULE_DESCRIPTIONS)} rules. Respond ONLY with valid JSON. No "
+    f"prose, no Markdown.\n\n"
     "Rules:\n"
     + "\n".join(f"{i + 1}. {desc}" for i, desc in enumerate(_RULE_DESCRIPTIONS.values()))
     + "\n\n"

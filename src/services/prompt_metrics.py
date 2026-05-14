@@ -10,6 +10,7 @@ They cover the easy STRICT rules:
     - Markdown headers
     - Markdown bold and italic
     - German ASCII transliteration ('ueber' instead of 'ueber'... ahem, 'ue' instead of umlaut)
+    - Decimal-pace leak (Sprint C): "4.50/km" instead of "4:30/km"
 
 Hard rules (fabricated stats, mid-response language switch, claims
 without enough data) are deferred to a future LLM-as-judge worker that
@@ -110,6 +111,19 @@ _MD_HEADER_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
 _MD_BOLD_RE = re.compile(r"\*\*[^*\n]+\*\*")
 _MD_ITALIC_RE = re.compile(r"(?<![*\\])\*[^*\n]+\*(?!\*)")
 
+# Decimal-pace leak detector (Sprint C). Catches the exact failure mode
+# from the Elena bug: a coach response that emits a decimal-minutes pace
+# like "4.50/km" or "4.50 min/km" instead of the correct mm:ss form
+# "4:30/km". The /km qualifier makes the context unambiguous regardless
+# of the minute digit, so we accept any single- or double-digit whole
+# minute. The decimal must have exactly TWO digits to keep the pattern
+# specific to pace notation (vs. "4.5km" the distance, which we tolerate
+# but only as plain km, not "min/km" pace).
+_DECIMAL_PACE_RE = re.compile(
+    r"\b\d{1,2}\.\d{1,2}\s*(?:min\s*)?/\s*km\b",
+    re.IGNORECASE,
+)
+
 # German ASCII transliteration: the German-context detector fires on
 # words that read like umlaut transliteration. We avoid English false
 # positives ("user", "feature") by requiring the words to be
@@ -207,6 +221,9 @@ def scan_response(text: str, language_hint: str | None = None) -> list[Violation
     violations.extend(_scan_pattern(text, _MD_HEADER_RE, "no_markdown_header", "strict"))
     violations.extend(_scan_pattern(text, _MD_BOLD_RE, "no_markdown_bold", "strict"))
     violations.extend(_scan_pattern(text, _MD_ITALIC_RE, "no_markdown_italic", "warn"))
+    violations.extend(
+        _scan_pattern(text, _DECIMAL_PACE_RE, "decimal_pace_leak", "strict")
+    )
 
     is_german = (language_hint or "").lower().startswith("de") or _looks_german(text)
     if is_german:

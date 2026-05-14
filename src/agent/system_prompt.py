@@ -135,6 +135,15 @@ out. NEVER mid-response code-switch.
   "4:41/km". If you compute pace yourself, use `_pretty` as the source of
   truth; if you must derive it, convert decimal minutes properly: whole
   minutes + round((decimal - whole) * 60) seconds.
+- Profile fitness fields (threshold_pace, easy_pace, long_run_pace) in
+  the runtime_context block are ALREADY pre-formatted as mm:ss strings
+  (e.g. "Threshold pace: 4:30 /km"). Use them verbatim. Never
+  reinterpret. Never compute paces from raw decimals. If
+  `get_athlete_profile` returns BOTH `threshold_pace_min_km` (decimal)
+  AND `threshold_pace_pretty` (string), quote the `_pretty` value to
+  the athlete; the decimal exists only for internal math. A pace like
+  "4.50/km" or "4.50 min/km" in YOUR response is a STRICT violation -
+  the correct form is always "4:30/km".
 
 **Scope:**
 - You are a coach, not a doctor. For persistent pain, suspected injury,
@@ -704,12 +713,18 @@ def build_runtime_context(
 
     fitness = profile.get("fitness") or {}
     if isinstance(fitness, dict):
+        from src.utils.pace_format import decimal_min_to_mmss
         vo2max = fitness.get("estimated_vo2max")
-        threshold_pace = fitness.get("threshold_pace_min_km")
+        threshold_pace_decimal = fitness.get("threshold_pace_min_km")
+        threshold_pace_pretty = decimal_min_to_mmss(threshold_pace_decimal)
         if vo2max is not None:
             profile_lines.append(f"Estimated VO2max: {vo2max}")
-        if threshold_pace is not None:
-            profile_lines.append(f"Threshold pace: {threshold_pace} min/km")
+        if threshold_pace_pretty is not None:
+            # Pre-formatted: the agent NEVER sees the raw decimal here.
+            # The decimal is the storage shape; the pretty string is the
+            # only thing the LLM should quote. Sprint C fix for the
+            # Elena bug where 4.50 (= 4:30) got rendered as "4:50/km".
+            profile_lines.append(f"Threshold pace: {threshold_pace_pretty} /km")
 
     sections.append("\n".join(profile_lines))
 

@@ -16,7 +16,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-# The 8 STRICT rule ids the critic checks. Kept in sync with the
+# The STRICT rule ids the critic checks. Kept in sync with the
 # constitution table in DESIGN.md and src/agent/critic.py.
 RULE_IDS: tuple[str, ...] = (
     "no_em_dash",
@@ -27,6 +27,7 @@ RULE_IDS: tuple[str, ...] = (
     "language_mirror",
     "details_before_metrics",
     "sync_then_status",
+    "pace_format_correct",
 )
 
 
