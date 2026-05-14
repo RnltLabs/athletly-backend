@@ -37,6 +37,13 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # Read context (cheap, often needed)
     "get_activities",
     "get_athlete_profile",
+    # Provider freshness: the STRICT proactive-sync rule in system_prompt
+    # tells the agent to call these when the athlete reports a
+    # just-completed activity. Without the schema visible, the model
+    # either skips the call or constructs it with wrong params
+    # (e.g. missing mode="auto"). Always-loaded fixes both.
+    "sync_garmin_data",
+    "get_provider_status",
     # Skill invocation - opens any other workflow
     "invoke_skill",
     # Tool discovery - lets the agent find deferred tools
