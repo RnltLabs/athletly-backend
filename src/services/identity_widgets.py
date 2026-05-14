@@ -383,7 +383,7 @@ WORKED EXAMPLE 1
 Input markdown:
   # Roman
   ## Identity
-  27 Jahre, Karlsruhe, Laeufer und Radfahrer.
+  27 Jahre, Karlsruhe, Läufer und Radfahrer.
   ## Current Goal
   Karlsruher Halbmarathon am 20.09.2026. Ziel 1:24:00, Pace 3:58 /km.
   Verifiziert ueber strava-club Karlsruhe.
@@ -437,7 +437,7 @@ Output JSON:
     {
       "type": "chip_list",
       "props": {
-        "title": "Praeferenzen",
+        "title": "Präferenzen",
         "chips": [
           {"label": "Lange Laeufe am Sonntag", "color": "green"},
           {"label": "Keine Intervalle am Freitag", "color": "orange"}
@@ -476,7 +476,7 @@ Output JSON:
     "0": "Lass uns mein Profil anpassen: ",
     "1": "Lass uns mein Ziel anpassen: ",
     "2": "Lass uns meine Trainingswerte anpassen: ",
-    "3": "Lass uns meine Praeferenzen anpassen: ",
+    "3": "Lass uns meine Präferenzen anpassen: ",
     "4": "Lass uns die offenen Themen anpassen: ",
     "5": "Lass uns das Learning anpassen: ",
     "6": "Lass uns die Ziel-Historie anpassen: "
@@ -616,7 +616,7 @@ Output JSON:
     {
       "type": "chip_list",
       "props": {
-        "title": "Praeferenzen",
+        "title": "Präferenzen",
         "chips": [
           {"label": "Training nach 19 Uhr", "color": "green"},
           {"label": "Lange Touren nur Samstag", "color": "green"},
@@ -659,7 +659,7 @@ Output JSON:
     "1": "Lass uns mein Ziel anpassen: ",
     "2": "Lass uns meine Trainingswerte anpassen: ",
     "3": "Lass uns den Trainingsschwerpunkt anpassen: ",
-    "4": "Lass uns meine Praeferenzen anpassen: ",
+    "4": "Lass uns meine Präferenzen anpassen: ",
     "5": "Lass uns die offenen Themen anpassen: ",
     "6": "Lass uns das Learning anpassen: ",
     "7": "Lass uns die Ziel-Historie anpassen: "
@@ -768,7 +768,7 @@ Output JSON:
     {
       "type": "chip_list",
       "props": {
-        "title": "Praeferenzen",
+        "title": "Präferenzen",
         "chips": [
           {"label": "Schwimmen 3x im Verein", "color": "green"},
           {"label": "Lange Radausfahrt Samstag", "color": "green"},
@@ -824,7 +824,7 @@ Output JSON:
     "0": "Lass uns mein Profil anpassen: ",
     "1": "Lass uns mein Ziel anpassen: ",
     "2": "Lass uns meine Trainingswerte anpassen: ",
-    "3": "Lass uns meine Praeferenzen anpassen: ",
+    "3": "Lass uns meine Präferenzen anpassen: ",
     "4": "Lass uns die offenen Themen anpassen: ",
     "5": "Lass uns das Learning anpassen: ",
     "6": "Lass uns das anpassen: ",
@@ -833,11 +833,16 @@ Output JSON:
 }
 
 STYLE NOTES FOR GERMAN OUTPUT:
-- Use plain ASCII: "Praeferenzen", "Laeufer", "Trainings-Plaene" with "ae"
-  "oe" "ue" rather than umlauts. The frontend handles display correctly
-  for both, but ASCII keeps the JSON robust across encoding boundaries.
-- Section titles in German: "Performance", "Praeferenzen", "Offene Themen",
-  "Ziel-Historie", "Was wir gelernt haben", "Trainingsschwerpunkt".
+- Use REAL German umlauts (ä, ö, ü, ß), NOT ASCII transliteration. The
+  frontend renders UTF-8 properly. NEVER write "Präferenzen", "Läufer",
+  "ueberfaellig". Always write "Präferenzen", "Läufer", "überfällig",
+  "Größe", "Fußball". The JSON is UTF-8 and umlauts pass through.
+- Banned punctuation: NEVER use em-dash (—, U+2014) or en-dash (–, U+2013)
+  in any string. Use a regular hyphen (-), colon (:), or restructure.
+  These are AI-tells the user has banned globally.
+- Section titles in German with proper umlauts: "Performance", "Präferenzen",
+  "Offene Themen", "Ziel-Historie", "Was wir gelernt haben",
+  "Trainingsschwerpunkt".
 - Status semantics for checklist items:
     "open"        - todo, nothing started
     "in_progress" - currently tracking or experimenting
@@ -1142,7 +1147,7 @@ _DEFAULT_HINTS: dict[str, str] = {
     "stat_grid": "Lass uns meine Trainingswerte anpassen: ",
     "timeline": "Lass uns die Historie anpassen: ",
     "checklist": "Lass uns die offenen Themen anpassen: ",
-    "chip_list": "Lass uns meine Praeferenzen anpassen: ",
+    "chip_list": "Lass uns meine Präferenzen anpassen: ",
     "info_card": "Lass uns das anpassen: ",
     "quote_card": "Lass uns das Learning anpassen: ",
 }
