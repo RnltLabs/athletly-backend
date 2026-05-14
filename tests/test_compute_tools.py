@@ -20,6 +20,7 @@ import pytest
 
 from src.agent.tools.compute_tools import (
     SUPPORTED_FORMULAS,
+    compare_paces,
     compute_sport_math,
     css_paces,
     ftp_zones,
@@ -287,6 +288,104 @@ def test_pace_target_rejects_zero_distance() -> None:
 
 
 # ---------------------------------------------------------------------------
+# compare_paces (Iter 2 Sprint I)
+# ---------------------------------------------------------------------------
+
+
+def test_compare_paces_elena_bug_predicted_faster_than_target() -> None:
+    """The Elena Iter 1 Turn 2 bug: predicted 4:27, target 4:59.
+
+    4:27 is FASTER than 4:59 (267 sec vs 299 sec). The agent inverted
+    this and claimed Elena was not fit enough. The compare_paces helper
+    must produce a verdict that makes inversion impossible.
+    """
+    result = compare_paces("4:27", "4:59")
+    assert result["status"] == "success"
+    assert result["predicted_pace"] == "4:27"
+    assert result["target_pace"] == "4:59"
+    assert result["predicted_seconds_per_km"] == 267.0
+    assert result["target_seconds_per_km"] == 299.0
+    assert result["delta_seconds"] == -32.0
+    assert result["direction"] == "faster"
+    # Verdict and interpretation must both encode the correct direction.
+    assert "FASTER" in result["verdict"]
+    assert "32" in result["verdict"]
+    assert "SCHNELLER" in result["interpretation"]
+
+
+def test_compare_paces_slower_predicted() -> None:
+    """Predicted 5:30 against target 5:00 -> 30 sec/km slower."""
+    result = compare_paces("5:30", "5:00")
+    assert result["status"] == "success"
+    assert result["direction"] == "slower"
+    assert result["delta_seconds"] == 30.0
+    assert "SLOWER" in result["verdict"]
+    assert "LANGSAMER" in result["interpretation"]
+
+
+def test_compare_paces_equal_within_tolerance() -> None:
+    """Paces within half a second per km are reported as equal."""
+    result = compare_paces("4:30", "4:30")
+    assert result["status"] == "success"
+    assert result["direction"] == "equal"
+    assert abs(result["delta_seconds"]) < 0.5
+
+
+def test_compare_paces_accepts_decimal_minutes() -> None:
+    """4.45 decimal minutes (= 4:27) compared to 4.98 (= 4:59)."""
+    result = compare_paces(4.45, 4.98)
+    assert result["status"] == "success"
+    # Decimal 4.45 -> 4 min + 0.45*60 = 27 sec.
+    assert result["predicted_seconds_per_km"] == 267.0
+    # Decimal 4.98 -> 4 min + 0.98*60 = 58.8 sec -> 59 sec.
+    assert result["target_seconds_per_km"] == 299.0
+    assert result["direction"] == "faster"
+
+
+def test_compare_paces_mixed_input_types() -> None:
+    """One mm:ss string, one decimal; both must coerce identically."""
+    result = compare_paces("4:27", 4.98)
+    assert result["status"] == "success"
+    assert result["direction"] == "faster"
+    assert result["delta_seconds"] == -32.0
+
+
+def test_compare_paces_rejects_garbage_strings() -> None:
+    """Bad inputs return a structured error - never a crash."""
+    result = compare_paces("not a pace", "4:30")
+    assert result["status"] == "error"
+    assert "mm:ss" in result["message"]
+
+
+def test_compare_paces_rejects_impossible_seconds() -> None:
+    """mm:ss with seconds >= 60 is rejected as malformed."""
+    result = compare_paces("4:63", "4:30")
+    assert result["status"] == "error"
+
+
+def test_compare_paces_rejects_none() -> None:
+    result = compare_paces(None, "4:30")
+    assert result["status"] == "error"
+
+
+def test_compare_paces_marathon_target_vs_vdot_prediction() -> None:
+    """End-to-end: Elena's VDOT 52 (~marathon 4:27) vs target 4:59/km.
+
+    Wire paces_from_vdot output into compare_paces; the agent should
+    only ever quote the interpretation string.
+    """
+    paces = paces_from_vdot(52.0)
+    assert paces["status"] == "success"
+    predicted = paces["marathon_per_km_seconds"]
+    target_sec = (4 * 60) + 59  # 4:59/km
+    result = compare_paces(predicted, target_sec)
+    assert result["status"] == "success"
+    # VDOT 52 marathon pace is faster than 4:59 -> direction is "faster".
+    assert result["direction"] == "faster"
+    assert result["delta_seconds"] < 0
+
+
+# ---------------------------------------------------------------------------
 # Dispatch entrypoint
 # ---------------------------------------------------------------------------
 
@@ -324,7 +423,7 @@ def test_dispatch_handles_none_inputs() -> None:
 
 
 def test_supported_formulas_set() -> None:
-    """The contract: seven formulas, exact names."""
+    """The contract: eight formulas, exact names (Iter 2 Sprint I)."""
     assert set(SUPPORTED_FORMULAS.keys()) == {
         "vdot_from_race_time",
         "paces_from_vdot",
@@ -333,6 +432,7 @@ def test_supported_formulas_set() -> None:
         "hr_zones_karvonen",
         "css_paces",
         "pace_target_from_goal",
+        "compare_paces",
     }
 
 

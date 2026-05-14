@@ -75,7 +75,19 @@ _RULE_DESCRIPTIONS: dict[str, str] = {
         "decimal-form pace like '4.50/km', '4.50 min/km', or '4.5/km' "
         "is a STRICT violation: profile decimals are pre-converted to "
         "mm:ss in the runtime context, so the model MUST quote the "
-        "pretty form verbatim.",
+        "pretty form verbatim. Also flag impossible mm:ss values where "
+        "the seconds part is >=60 (e.g. '1:63/100m' - 63 seconds does "
+        "not exist).",
+    "pace_comparison_directional":
+        "pace_comparison_directional: if response_text compares two "
+        "paces (e.g. predicted vs target, current vs threshold), the "
+        "direction MUST be correct. Lower mm:ss values mean FASTER "
+        "pace. Calling a 4:27 predicted pace 'too slow' relative to a "
+        "4:59 target is a STRICT violation (4:27 is 32 sec/km FASTER "
+        "than 4:59). When in doubt, the response should have called "
+        "compute_sport_math(formula='compare_paces') and quoted the "
+        "interpretation verbatim. Flag inversions and any verdict "
+        "that contradicts the seconds-per-km math.",
 }
 
 # Defensive assertion: keep critic_metrics and critic.py in sync.

@@ -462,6 +462,151 @@ def css_paces(css_pace_per_100m: float) -> dict:
     }
 
 
+def _coerce_pace_to_seconds_per_km(value: Any) -> float | None:
+    """Coerce a pace value to seconds per kilometre.
+
+    Accepts:
+    - mm:ss strings ("4:27", "04:27", "12:30").
+    - decimal-minute floats (4.45 -> 4 min 27 sec -> 267 sec).
+    - explicit seconds when wrapped via the caller (rare).
+
+    Returns None on anything we cannot parse. Negative values are
+    treated as invalid.
+    """
+    if value is None:
+        return None
+    # String path: mm:ss notation.
+    if isinstance(value, str):
+        s = value.strip()
+        if ":" in s:
+            try:
+                mins_str, secs_str = s.split(":", 1)
+                mins = int(mins_str)
+                secs = int(secs_str)
+            except ValueError:
+                return None
+            if mins < 0 or secs < 0 or secs >= 60:
+                return None
+            return float(mins * 60 + secs)
+        # Bare number-as-string falls through to float coercion.
+        try:
+            v = float(s)
+        except ValueError:
+            return None
+    else:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return None
+    if v < 0:
+        return None
+    # Heuristic: pace decimals for endurance running fit comfortably
+    # under 30 min/km. Anything bigger is almost certainly seconds.
+    if v >= 30:
+        return v
+    # Decimal minutes -> seconds.
+    whole = int(v)
+    secs = round((v - whole) * 60)
+    if secs == 60:
+        whole += 1
+        secs = 0
+    return float(whole * 60 + secs)
+
+
+def compare_paces(predicted_pace: Any, target_pace: Any) -> dict:
+    """Directional comparison of two paces in seconds per km.
+
+    Iter 2 Sprint I: the agent has been observed inverting pace
+    comparisons (claiming a 4:27 predicted pace is too slow versus a
+    4:59 target). Pace strings look like clock time and "smaller =
+    faster" is a load-bearing inversion the model breaks under
+    reasoning pressure. This helper takes the comparison out of the
+    LLM entirely.
+
+    Both inputs accept mm:ss strings ("4:27") and decimal minutes
+    (4.45). The result includes a load-bearing ``interpretation``
+    string the model is expected to quote verbatim.
+
+    Args:
+        predicted_pace: The pace produced by analysis (e.g. paces from
+            VDOT, current training pace, race-equivalent pace).
+        target_pace: The pace required for a goal time, threshold
+            target, or any reference pace.
+
+    Returns:
+        dict with status, predicted/target seconds, delta_seconds,
+        direction ("faster" / "slower" / "equal"), magnitude_label,
+        verdict, and a German-language interpretation.
+    """
+    p_sec = _coerce_pace_to_seconds_per_km(predicted_pace)
+    t_sec = _coerce_pace_to_seconds_per_km(target_pace)
+    if p_sec is None or t_sec is None:
+        return {
+            "status": "error",
+            "message": (
+                "predicted_pace and target_pace must be mm:ss strings "
+                "(e.g. '4:27') or decimal minutes (e.g. 4.45). Got "
+                f"predicted={predicted_pace!r}, target={target_pace!r}."
+            ),
+        }
+    if p_sec <= 0 or t_sec <= 0:
+        return {"status": "error", "message": "paces must be positive"}
+
+    delta = p_sec - t_sec  # negative -> predicted is faster
+    # Equality tolerance: half a second per km. Below that the
+    # difference is noise vs reporting precision.
+    if abs(delta) < 0.5:
+        direction = "equal"
+        magnitude_label = "gleichschnell"
+        verdict = "predicted and target paces are effectively equal"
+        interpretation = (
+            f"Vorhergesagte Pace {_format_mmss(p_sec)}/km und Zielpace "
+            f"{_format_mmss(t_sec)}/km sind praktisch identisch. "
+            f"Die Athletin liegt genau auf Zielniveau."
+        )
+    elif delta < 0:
+        direction = "faster"
+        magnitude = abs(delta)
+        magnitude_label = f"{magnitude:.0f} sec/km schneller"
+        verdict = (
+            f"predicted is FASTER than target by "
+            f"{magnitude:.0f} sec/km"
+        )
+        interpretation = (
+            f"Vorhergesagte Pace {_format_mmss(p_sec)}/km ist "
+            f"{magnitude:.0f} sec/km SCHNELLER als die Zielpace "
+            f"{_format_mmss(t_sec)}/km. Die Athletin liegt auf oder "
+            f"vor Zielniveau."
+        )
+    else:
+        direction = "slower"
+        magnitude = delta
+        magnitude_label = f"{magnitude:.0f} sec/km langsamer"
+        verdict = (
+            f"predicted is SLOWER than target by "
+            f"{magnitude:.0f} sec/km"
+        )
+        interpretation = (
+            f"Vorhergesagte Pace {_format_mmss(p_sec)}/km ist "
+            f"{magnitude:.0f} sec/km LANGSAMER als die Zielpace "
+            f"{_format_mmss(t_sec)}/km. Die Athletin braucht noch "
+            f"einen Fitness-Schritt, um das Ziel zu erreichen."
+        )
+
+    return {
+        "status": "success",
+        "predicted_pace": _format_mmss(p_sec),
+        "target_pace": _format_mmss(t_sec),
+        "predicted_seconds_per_km": round(p_sec, 1),
+        "target_seconds_per_km": round(t_sec, 1),
+        "delta_seconds": round(delta, 1),
+        "direction": direction,
+        "magnitude_label": magnitude_label,
+        "verdict": verdict,
+        "interpretation": interpretation,
+    }
+
+
 def pace_target_from_goal(distance_km: float, target_time_seconds: float) -> dict:
     """Required pace per km for a goal time over a distance.
 
@@ -507,6 +652,7 @@ SUPPORTED_FORMULAS: dict[str, Any] = {
     "hr_zones_karvonen": hr_zones_karvonen,
     "css_paces": css_paces,
     "pace_target_from_goal": pace_target_from_goal,
+    "compare_paces": compare_paces,
 }
 
 
@@ -568,7 +714,10 @@ def register_compute_tools(registry: ToolRegistry, user_model=None) -> None:
             "ftp_watts=optional), "
             "hr_zones_karvonen(rhr, max_hr), "
             "css_paces(css_pace_per_100m), "
-            "pace_target_from_goal(distance_km, target_time_seconds). "
+            "pace_target_from_goal(distance_km, target_time_seconds), "
+            "compare_paces(predicted_pace, target_pace) - REQUIRED when "
+            "comparing a predicted pace against a target pace (lower "
+            "mm:ss means FASTER; never reason about this inline). "
             "Returns a dict with the computed values and a one-line "
             "interpretation. If the tool returns a sanity_warning, "
             "surface it to the athlete instead of suppressing it."
