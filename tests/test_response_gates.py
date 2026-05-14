@@ -80,7 +80,9 @@ def _ctx(
 
 
 def test_five_gates_registered():
-    assert len(GATES) == 5
+    # Sprint Q added the post_save_plan_grounded gate, bringing the
+    # total to 6. Test name kept for git-blame continuity.
+    assert len(GATES) == 6
 
 
 def test_gate_ids_match_metrics_module():
