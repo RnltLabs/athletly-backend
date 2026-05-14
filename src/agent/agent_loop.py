@@ -64,6 +64,12 @@ AGENT_TEMPERATURE = 0.7       # Creative for coaching, lower for analysis
 COMPRESSION_THRESHOLD = 12
 COMPRESSION_KEEP_ROUNDS = 4   # Keep last N full tool-call rounds verbatim
 TOOL_CALL_SUMMARY_THRESHOLD = 8  # Inject summary reminder after N consecutive tool rounds
+# Sprint F: Tool-Forcing Regenerate. Bounded forced tool loop that runs
+# AFTER a tool-required gate failure. One LLM call per round; at most
+# this many rounds per turn. Three is enough for: round 1 model calls
+# tools, round 2 model may chain a follow-up tool, round 3 model writes
+# the final text. Hard ceiling, never bypassed.
+_FORCED_REGEN_MAX_ROUNDS = 3
 # When purging stale tool_result payloads inside a single user turn, keep
 # this many of the most recent rounds intact. Older tool results get
 # replaced with a short outcome string while preserving message shape
@@ -1670,12 +1676,17 @@ class AsyncAgentLoop(AgentLoop):
     ) -> str:
         """Run the deterministic response gates over *response_text*.
 
-        Decision logic:
+        Decision logic (Sprint D + Sprint F):
         - All gates pass -> return original.
-        - One or more gates fail AND no regenerate yet this turn ->
-          rewrite once with the combined instruction, re-check gates.
-          If the rewrite still fails, emit ``critic_review`` SSE event
-          for observability but ship the rewrite.
+        - One or more gates fail AND no regenerate yet this turn:
+          - If at least one failure is a tool-required gate
+            (Sprint F): run the tool-forcing regenerate path, which
+            re-enters the tool loop with an explicit "REQUIRED: call
+            X then Y" system reminder.
+          - Otherwise: text-only rewrite (Sprint D path A).
+          Re-check gates after either path. If still failing, emit
+          ``critic_review`` SSE event for observability but ship the
+          new text.
         - Two-pass cap. We never regenerate twice in one turn.
 
         Fail-open: any exception bubbles up to the caller's try/except.
@@ -1683,7 +1694,9 @@ class AsyncAgentLoop(AgentLoop):
         """
         from src.agent.response_gates import (
             GateContext,
+            needs_tool_forcing,
             record_regenerate_outcome,
+            record_tool_forced_outcome,
             run_gates,
         )
 
@@ -1709,9 +1722,75 @@ class AsyncAgentLoop(AgentLoop):
         if batch.passed:
             return response_text
 
-        # One or more gates failed. Regenerate once with the combined
-        # instruction text from the failing gates.
         self._gates_regenerated_this_turn = True
+
+        # -- Sprint F: route tool-required failures to the tool loop --------
+        if needs_tool_forcing(batch.failures):
+            tool_required_ids = tuple(
+                f.gate_id for f in batch.failures
+                if _is_tool_required_safe(f.gate_id)
+            )
+            try:
+                rewritten, post_tool_names = await self._handle_tool_required_gate_failure(
+                    failing_batch=batch,
+                    pre_tool_names=list(tool_names),
+                )
+            except Exception:
+                logger.warning(
+                    "Tool-forcing regenerate raised, keeping original",
+                    exc_info=True,
+                )
+                record_regenerate_outcome(batch.failure_ids(), success=False)
+                record_tool_forced_outcome(tool_required_ids, success=False)
+                return response_text
+
+            if not rewritten:
+                # The forced retry produced no text. Ship the original.
+                record_regenerate_outcome(batch.failure_ids(), success=False)
+                record_tool_forced_outcome(tool_required_ids, success=False)
+                return response_text
+
+            second_ctx = replace(
+                context,
+                response_text=rewritten,
+                tools_called_this_turn=tuple(sorted(set(tool_names) | set(post_tool_names))),
+                tools_called_recent=_flatten_recent_tools(
+                    self._recent_tools_window,
+                    list(set(tool_names) | set(post_tool_names)),
+                ),
+            )
+
+            try:
+                second = run_gates(second_ctx)
+            except Exception:
+                logger.warning(
+                    "Second-pass run_gates raised, accepting tool-forced rewrite",
+                    exc_info=True,
+                )
+                record_regenerate_outcome(batch.failure_ids(), success=True)
+                record_tool_forced_outcome(tool_required_ids, success=True)
+                return rewritten
+
+            if second.passed:
+                record_regenerate_outcome(batch.failure_ids(), success=True)
+                record_tool_forced_outcome(tool_required_ids, success=True)
+                return rewritten
+
+            record_regenerate_outcome(batch.failure_ids(), success=False)
+            record_tool_forced_outcome(tool_required_ids, success=False)
+            try:
+                payload = second.to_event_payload()
+                payload["degraded"] = True
+                payload["source"] = "response_gates_tool_forced"
+                await emit_fn("critic_review", payload)
+            except Exception:
+                logger.warning(
+                    "emit_fn raised on critic_review (tool-forced gates)",
+                    exc_info=True,
+                )
+            return rewritten
+
+        # -- Sprint D: text-only regenerate path (unchanged) ---------------
         action_text = batch.combined_action or "Fix the policy violations."
 
         try:
@@ -1750,6 +1829,204 @@ class AsyncAgentLoop(AgentLoop):
             )
         return rewritten
 
+    # -- Sprint F: Tool-Forcing Regenerate ---------------------------------
+
+    async def _handle_tool_required_gate_failure(
+        self,
+        failing_batch,
+        pre_tool_names: list[str],
+    ) -> tuple[str, list[str]]:
+        """Re-enter the tool loop to gather data a tool-required gate needs.
+
+        Composes the per-gate "REQUIRED: call X then Y" system reminder
+        from ``failing_batch.failures``, appends it as a synthetic user
+        turn, then runs a bounded tool loop (at most
+        ``_FORCED_REGEN_MAX_ROUNDS`` rounds). Returns the final assistant
+        text plus the union of tool names invoked during the forced
+        loop. Either return value may be empty on a failure path; the
+        caller treats both as "could not satisfy" and ships the
+        original response with a degraded annotation.
+
+        Cost: at most THREE chat_completion calls + each tool execution.
+        Bounded by ``_FORCED_REGEN_MAX_ROUNDS`` and by
+        ``_gates_regenerated_this_turn`` which prevents a re-entry.
+
+        Args:
+            failing_batch: The ``GateBatchResult`` returned by the
+                first-pass ``run_gates``. We use its ``failures`` to
+                compose the instruction.
+            pre_tool_names: Tools that ran in this turn BEFORE the
+                forced retry. Not used by this method directly; the
+                caller unions it with our return value.
+
+        Returns:
+            ``(final_text, forced_tool_names)``. ``final_text`` is the
+            new candidate response (may be empty). ``forced_tool_names``
+            is the set of tool names invoked during the forced rounds.
+        """
+        from src.agent.response_gates import _compose_tool_force_instruction
+
+        instruction = _compose_tool_force_instruction(failing_batch.failures)
+        forced_tool_names: list[str] = []
+
+        # Append the synthetic instruction as a user turn so the tool
+        # loop sees it as the next message. The model will respond with
+        # either tool_calls (desired) or text (fallback path).
+        self._messages.append({"role": "user", "content": instruction})
+
+        runtime_ctx = build_runtime_context(
+            user_model=self.user_model,
+            date=None,
+            startup_context=self.startup_context,
+            context=self.context,
+        )
+
+        # Run the bounded forced tool loop in a worker thread so we keep
+        # the async caller responsive. The loop is small and synchronous
+        # to keep the implementation close to the existing one.
+        def _run_forced_loop() -> tuple[str, list[str]]:
+            return self._forced_tool_loop_sync(
+                runtime_ctx=runtime_ctx,
+            )
+
+        try:
+            text, tools_used = await asyncio.to_thread(_run_forced_loop)
+        except Exception:
+            logger.warning(
+                "Forced tool loop raised, returning empty",
+                exc_info=True,
+            )
+            return "", forced_tool_names
+
+        forced_tool_names = list(tools_used)
+        return text, forced_tool_names
+
+    def _forced_tool_loop_sync(
+        self,
+        runtime_ctx: str,
+    ) -> tuple[str, list[str]]:
+        """Run up to ``_FORCED_REGEN_MAX_ROUNDS`` rounds of the tool loop.
+
+        Mirrors the body of :meth:`process_message` but limited to a
+        small number of rounds and with no telemetry / hook plumbing
+        beyond what is required to actually execute the tools. Splices
+        the resulting assistant + tool messages into ``self._messages``
+        exactly like the main loop so downstream replay / summarisation
+        sees a consistent history.
+
+        Returns ``(last_assistant_text, tool_names_invoked)``.
+        """
+        openai_tools = self.tools.get_openai_tools(defer_non_core=True)
+        last_text: str = ""
+        tools_used: list[str] = []
+
+        for _round in range(_FORCED_REGEN_MAX_ROUNDS):
+            try:
+                response = chat_completion(
+                    messages=self._messages,
+                    system_prompt=STATIC_SYSTEM_PROMPT,
+                    tools=openai_tools if openai_tools else None,
+                    temperature=AGENT_TEMPERATURE,
+                    runtime_context=runtime_ctx,
+                )
+            except Exception:
+                logger.warning(
+                    "Forced tool loop: chat_completion raised",
+                    exc_info=True,
+                )
+                break
+
+            if not response.choices:
+                break
+
+            message = response.choices[0].message
+            content = message.content
+            tool_calls = message.tool_calls
+
+            if not tool_calls:
+                # Model produced final text. Persist and stop.
+                last_text = (content or "").strip()
+                if last_text:
+                    self._messages.append(
+                        {"role": "assistant", "content": last_text}
+                    )
+                break
+
+            # Filter server-side tools (same logic as main loop).
+            client_tool_calls = [
+                tc for tc in tool_calls
+                if not str(getattr(tc, "id", "") or "").startswith("srvtoolu_")
+            ]
+
+            assistant_msg: dict = {"role": "assistant", "content": content or ""}
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in client_tool_calls
+            ]
+            if not assistant_msg["tool_calls"]:
+                assistant_msg.pop("tool_calls")
+            self._messages.append(assistant_msg)
+
+            if not client_tool_calls:
+                # Only server tools fired; loop back so the model can
+                # finalize on the next round.
+                continue
+
+            # Execute the client tools.
+            for tc in client_tool_calls:
+                tool_name = tc.function.name
+                try:
+                    tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except json.JSONDecodeError:
+                    tool_args = {}
+
+                hook_ctx = HookContext(
+                    user_id=self._user_id,
+                    session_id=self._session_id,
+                    user_model=self.user_model,
+                    tool_name=tool_name,
+                )
+
+                pre_decision = run_pre_hooks(tool_name, tool_args, hook_ctx)
+                if pre_decision.action == "block":
+                    tool_result: Any = {
+                        "blocked": True,
+                        "reason": pre_decision.reason or "Pre-hook blocked this call.",
+                    }
+                else:
+                    effective_args = (
+                        {**tool_args, **pre_decision.replace_args}
+                        if pre_decision.replace_args
+                        else tool_args
+                    )
+                    try:
+                        tool_result = execute_with_budget(
+                            self.tools, tool_name, effective_args,
+                        )
+                        run_post_hooks(tool_name, effective_args, tool_result, hook_ctx)
+                    except Exception as e:
+                        tool_result = {"error": str(e)}
+
+                tools_used.append(tool_name)
+
+                self._messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(tool_result, ensure_ascii=False, default=str),
+                })
+
+            # Continue the loop so the model can produce the final
+            # answer or call follow-up tools.
+
+        return last_text, tools_used
+
 
 # -- Helpers ------------------------------------------------------------------
 
@@ -1761,6 +2038,21 @@ def _gates_layer_enabled_safe() -> bool:
         return is_gates_layer_enabled()
     except Exception:
         logger.warning("is_gates_layer_enabled raised, skipping gates", exc_info=True)
+        return False
+
+
+def _is_tool_required_safe(gate_id: str) -> bool:
+    """Return True iff the gate with *gate_id* has needs_tools=True.
+
+    Defensive: a missing or unknown gate id returns False so the
+    tool-forced metrics never record a phantom outcome.
+    """
+    try:
+        from src.agent.response_gates import gate_by_id
+
+        gate = gate_by_id(gate_id)
+        return bool(gate and gate.needs_tools)
+    except Exception:
         return False
 
 

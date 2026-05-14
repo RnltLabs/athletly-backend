@@ -28,6 +28,9 @@ GATE_IDS: tuple[str, ...] = (
 
 # Possible outcome values per record. Anything else is silently dropped
 # so a typo in caller code cannot corrupt the buffer.
+# Sprint F (Tool-Forcing Regenerate) adds the ``tool_forced_*`` pair so
+# the dashboard can distinguish the new regenerate path from the
+# existing text-only one.
 _VALID_OUTCOMES: frozenset[str] = frozenset(
     {
         "pass",
@@ -35,6 +38,8 @@ _VALID_OUTCOMES: frozenset[str] = frozenset(
         "gate_error",
         "regenerate_success",
         "regenerate_failed",
+        "tool_forced_regenerate_success",
+        "tool_forced_regenerate_failed",
     }
 )
 
@@ -82,6 +87,8 @@ class GatesMetrics:
         total_fails = 0
         total_regen_success = 0
         total_regen_failed = 0
+        total_tool_forced_success = 0
+        total_tool_forced_failed = 0
         for r in recent:
             bucket = per_gate.get(r.gate_id)
             if bucket is None:
@@ -93,6 +100,10 @@ class GatesMetrics:
                 total_regen_success += 1
             elif r.outcome == "regenerate_failed":
                 total_regen_failed += 1
+            elif r.outcome == "tool_forced_regenerate_success":
+                total_tool_forced_success += 1
+            elif r.outcome == "tool_forced_regenerate_failed":
+                total_tool_forced_failed += 1
 
         # Derived rates: each gate's fail / pass ratio.
         rates: dict[str, dict[str, float]] = {}
@@ -113,6 +124,8 @@ class GatesMetrics:
                 "fails": total_fails,
                 "regenerate_success": total_regen_success,
                 "regenerate_failed": total_regen_failed,
+                "tool_forced_regenerate_success": total_tool_forced_success,
+                "tool_forced_regenerate_failed": total_tool_forced_failed,
             },
         }
 

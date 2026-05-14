@@ -22,14 +22,19 @@ from src.agent.response_gates import (
     GateBatchResult,
     GateContext,
     GateResult,
+    TOOL_REQUIREMENTS,
+    _compose_tool_force_instruction,
     _gate_holistic_alert,
     _gate_injury_persistence,
     _gate_language_mirror,
     _gate_stats_grounding,
     _gate_temporal_freshness,
     _looks_german,
+    gate_by_id,
     is_gates_layer_enabled,
+    needs_tool_forcing,
     record_regenerate_outcome,
+    record_tool_forced_outcome,
     run_gates,
 )
 from src.services.gates_metrics import (
@@ -704,3 +709,178 @@ def test_run_gates_records_holistic_alert_fail_for_marco():
         f"Sprint J expectation: holistic_alert fail_rate must be > 0 "
         f"after a Marco-style run; got {rates}"
     )
+# Sprint F: Tool-Forcing Regenerate
+# ---------------------------------------------------------------------------
+
+
+def test_gate_taxonomy_needs_tools_flags():
+    """Three gates require tools, two are text-only."""
+    by_id = {g.gate_id: g for g in GATES}
+    assert by_id["temporal_freshness"].needs_tools is True
+    assert by_id["injury_persistence"].needs_tools is True
+    assert by_id["stats_grounding"].needs_tools is True
+    assert by_id["holistic_alert"].needs_tools is False
+    assert by_id["language_mirror"].needs_tools is False
+
+
+def test_gate_by_id_returns_registered_gate():
+    g = gate_by_id("stats_grounding")
+    assert g is not None
+    assert g.gate_id == "stats_grounding"
+    assert g.needs_tools is True
+
+
+def test_gate_by_id_unknown_returns_none():
+    assert gate_by_id("does_not_exist") is None
+
+
+def test_tool_requirements_cover_every_tool_required_gate():
+    """Every gate marked needs_tools=True has an entry in TOOL_REQUIREMENTS."""
+    for g in GATES:
+        if g.needs_tools:
+            assert g.gate_id in TOOL_REQUIREMENTS, (
+                f"Tool-required gate {g.gate_id!r} is missing from TOOL_REQUIREMENTS"
+            )
+            tools = TOOL_REQUIREMENTS[g.gate_id]
+            assert len(tools) >= 1, f"{g.gate_id} has empty tool list"
+
+
+def test_needs_tool_forcing_true_when_tool_required_gate_fails():
+    failures = (
+        GateResult(passed=False, gate_id="stats_grounding", reason="x"),
+        GateResult(passed=False, gate_id="language_mirror", reason="y"),
+    )
+    assert needs_tool_forcing(failures) is True
+
+
+def test_needs_tool_forcing_false_for_text_only_failures():
+    failures = (
+        GateResult(passed=False, gate_id="language_mirror", reason="y"),
+        GateResult(passed=False, gate_id="holistic_alert", reason="z"),
+    )
+    assert needs_tool_forcing(failures) is False
+
+
+def test_needs_tool_forcing_empty_failures_is_false():
+    assert needs_tool_forcing(()) is False
+
+
+def test_compose_tool_force_instruction_stats_grounding():
+    failures = (
+        GateResult(passed=False, gate_id="stats_grounding", reason="x"),
+    )
+    text = _compose_tool_force_instruction(failures)
+    assert "SYSTEM REMINDER" in text
+    assert "get_activities" in text
+    assert "get_activity_details" in text
+    assert "get_health_summary" in text
+    assert "REQUIRED" in text
+
+
+def test_compose_tool_force_instruction_temporal_freshness():
+    failures = (
+        GateResult(passed=False, gate_id="temporal_freshness", reason="x"),
+    )
+    text = _compose_tool_force_instruction(failures)
+    assert "sync_garmin_data" in text
+    assert "get_provider_status" in text
+    assert "get_activities" in text
+
+
+def test_compose_tool_force_instruction_injury_persistence():
+    failures = (
+        GateResult(passed=False, gate_id="injury_persistence", reason="x"),
+    )
+    text = _compose_tool_force_instruction(failures)
+    assert "annotate_activity" in text
+    assert "append_to_journal" in text
+
+
+def test_compose_tool_force_instruction_combines_multiple_failures():
+    failures = (
+        GateResult(passed=False, gate_id="temporal_freshness", reason="x"),
+        GateResult(passed=False, gate_id="stats_grounding", reason="y"),
+    )
+    text = _compose_tool_force_instruction(failures)
+    assert "sync_garmin_data" in text
+    assert "get_health_summary" in text
+
+
+def test_compose_tool_force_instruction_skips_text_only_failures():
+    """Text-only gates contribute no fragment to the tool-force prompt."""
+    failures = (
+        GateResult(passed=False, gate_id="stats_grounding", reason="x"),
+        GateResult(passed=False, gate_id="language_mirror", reason="y"),
+    )
+    text = _compose_tool_force_instruction(failures)
+    assert "get_activities" in text
+    # The text-only fragment is not the source of the SYSTEM REMINDER and
+    # carries no tool list; ensure the prompt does not invent one.
+    assert "language_mirror" not in text
+
+
+def test_compose_tool_force_instruction_idempotent_over_duplicates():
+    """A failure list with duplicates yields the same instruction once."""
+    failures = (
+        GateResult(passed=False, gate_id="stats_grounding", reason="x"),
+        GateResult(passed=False, gate_id="stats_grounding", reason="y"),
+    )
+    text = _compose_tool_force_instruction(failures)
+    # Only one fragment for stats_grounding.
+    assert text.count("get_activities") == 1
+
+
+def test_compose_tool_force_instruction_uses_real_umlauts():
+    """No ASCII transliteration in agent-facing instruction text."""
+    failures = (
+        GateResult(passed=False, gate_id="injury_persistence", reason="x"),
+    )
+    text = _compose_tool_force_instruction(failures)
+    # Real umlauts present (German body-issue keyword).
+    assert "ähnlich" in text
+    # No em-dashes / en-dashes per project policy.
+    assert "—" not in text
+    assert "–" not in text
+
+
+def test_compose_tool_force_instruction_empty_when_only_text_failures():
+    """If only text-only gates fail, instruction has preamble + closer only."""
+    failures = (
+        GateResult(passed=False, gate_id="language_mirror", reason="y"),
+    )
+    text = _compose_tool_force_instruction(failures)
+    assert "SYSTEM REMINDER" in text
+    # No tool-required fragment leaked in.
+    assert "sync_garmin_data" not in text
+    assert "annotate_activity" not in text
+
+
+# ---------------------------------------------------------------------------
+# Sprint F: tool_forced metric outcomes
+# ---------------------------------------------------------------------------
+
+
+def test_record_tool_forced_outcome_success():
+    record_tool_forced_outcome(("stats_grounding",), success=True)
+    summary = get_gates_metrics().summary()
+    bucket = summary["per_gate"]["stats_grounding"]
+    assert bucket["tool_forced_regenerate_success"] == 1
+    assert bucket["tool_forced_regenerate_failed"] == 0
+    assert summary["totals"]["tool_forced_regenerate_success"] == 1
+
+
+def test_record_tool_forced_outcome_failure():
+    record_tool_forced_outcome(
+        ("temporal_freshness", "stats_grounding"),
+        success=False,
+    )
+    summary = get_gates_metrics().summary()
+    assert summary["per_gate"]["temporal_freshness"]["tool_forced_regenerate_failed"] == 1
+    assert summary["per_gate"]["stats_grounding"]["tool_forced_regenerate_failed"] == 1
+    assert summary["totals"]["tool_forced_regenerate_failed"] == 2
+
+
+def test_record_tool_forced_outcome_ignores_unknown_gate():
+    record_tool_forced_outcome(("does_not_exist",), success=True)
+    summary = get_gates_metrics().summary()
+    assert summary["totals"]["tool_forced_regenerate_success"] == 0

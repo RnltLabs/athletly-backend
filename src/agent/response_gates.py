@@ -475,20 +475,166 @@ def _gate_language_mirror(ctx: GateContext) -> GateResult:
 
 @dataclass(frozen=True)
 class Gate:
-    """A registered gate. Holds id + config flag name + check callable."""
+    """A registered gate. Holds id + config flag name + check callable.
+
+    ``needs_tools=True`` marks a gate whose pass condition requires the
+    presence of one or more tool calls in the turn. When a tool-required
+    gate fails, a plain text rewrite cannot fix it; the agent loop must
+    re-enter the tool loop with an explicit "REQUIRED: call X then Y"
+    system reminder so the model can gather the missing data. See
+    docs/sprint-f/DESIGN.md (Tool-Forcing Regenerate).
+    """
 
     gate_id: str
     setting_attr: str
     check: Callable[[GateContext], GateResult]
+    needs_tools: bool = False
 
 
 GATES: tuple[Gate, ...] = (
-    Gate("temporal_freshness", "response_gate_temporal_freshness", _gate_temporal_freshness),
-    Gate("injury_persistence", "response_gate_injury_persistence", _gate_injury_persistence),
-    Gate("stats_grounding", "response_gate_stats_grounding", _gate_stats_grounding),
-    Gate("holistic_alert", "response_gate_holistic_alert", _gate_holistic_alert),
-    Gate("language_mirror", "response_gate_language_mirror", _gate_language_mirror),
+    Gate(
+        "temporal_freshness",
+        "response_gate_temporal_freshness",
+        _gate_temporal_freshness,
+        needs_tools=True,
+    ),
+    Gate(
+        "injury_persistence",
+        "response_gate_injury_persistence",
+        _gate_injury_persistence,
+        needs_tools=True,
+    ),
+    Gate(
+        "stats_grounding",
+        "response_gate_stats_grounding",
+        _gate_stats_grounding,
+        needs_tools=True,
+    ),
+    Gate(
+        "holistic_alert",
+        "response_gate_holistic_alert",
+        _gate_holistic_alert,
+        needs_tools=False,
+    ),
+    Gate(
+        "language_mirror",
+        "response_gate_language_mirror",
+        _gate_language_mirror,
+        needs_tools=False,
+    ),
 )
+
+
+# Map gate_id -> ordered tuple of tool names the regenerate must invoke.
+# Used by ``_compose_tool_force_instruction`` to assemble the agent-facing
+# system reminder when a tool-required gate fails.
+TOOL_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "temporal_freshness": (
+        "sync_garmin_data",
+        "get_provider_status",
+        "get_activities",
+    ),
+    "injury_persistence": (
+        "annotate_activity",
+        "append_to_journal",
+    ),
+    "stats_grounding": (
+        "get_activities",
+        "get_activity_details",
+        "get_health_summary",
+    ),
+}
+
+
+def gate_by_id(gate_id: str) -> Gate | None:
+    """Return the registered :class:`Gate` for *gate_id* or None."""
+    for g in GATES:
+        if g.gate_id == gate_id:
+            return g
+    return None
+
+
+def needs_tool_forcing(failures: tuple[GateResult, ...]) -> bool:
+    """Return True iff at least one *failure* belongs to a tool-required gate.
+
+    Pure function over the failure set. Caller (agent loop) routes to
+    the tool-forcing regenerate path when this returns True; otherwise
+    the existing text-only regenerate path runs.
+    """
+    for f in failures:
+        gate = gate_by_id(f.gate_id)
+        if gate is not None and gate.needs_tools:
+            return True
+    return False
+
+
+_FORCE_PREAMBLE = (
+    "SYSTEM REMINDER: Your previous answer failed deterministic policy "
+    "gates that require tool calls before responding. Do not apologise. "
+    "Gather the missing data with the tools listed, then re-answer the "
+    "athlete using only real results."
+)
+
+_FORCE_FRAGMENTS: dict[str, str] = {
+    "temporal_freshness": (
+        "The athlete just told you about a completed activity. "
+        "REQUIRED: call sync_garmin_data, then get_provider_status, "
+        "then get_activities, before re-answering. Quote only metrics "
+        "that come back from get_activities."
+    ),
+    "injury_persistence": (
+        "The athlete reported a body issue (Schmerz, Zwicken, Knie, "
+        "Wadenheber, oder ähnlich). REQUIRED: call annotate_activity "
+        "on the latest run AND append_to_journal(section=\"Open "
+        "Threads\", ...) so the next session remembers. Then re-answer "
+        "with empathy and a concrete adjustment."
+    ),
+    "stats_grounding": (
+        "Your previous answer quoted specific numbers (HR, pace, "
+        "distance, duration, recovery) with no read-tool to ground "
+        "them. REQUIRED: call get_activities (or get_activity_details "
+        "or get_health_summary if the question is about health) before "
+        "answering. Quote only numbers that come back from the tool. "
+        "If the tool returns nothing relevant, say so plainly instead "
+        "of inventing data."
+    ),
+}
+
+_FORCE_CLOSER = (
+    "Call the tools now. The athlete is waiting. Do not skip tools. "
+    "Do not invent stats."
+)
+
+
+def _compose_tool_force_instruction(failures: tuple[GateResult, ...]) -> str:
+    """Build the synthetic user message that re-enters the tool loop.
+
+    Concatenates the per-gate fragments for every failing tool-required
+    gate, wrapped with a common preamble and closer. Idempotent over
+    the failure order. Failures that are NOT tool-required are silently
+    ignored here; the agent loop routes those through the text-only
+    path.
+    """
+    fragments: list[str] = []
+    seen: set[str] = set()
+    for f in failures:
+        gate = gate_by_id(f.gate_id)
+        if gate is None or not gate.needs_tools:
+            continue
+        if f.gate_id in seen:
+            continue
+        frag = _FORCE_FRAGMENTS.get(f.gate_id)
+        if frag:
+            fragments.append(frag)
+            seen.add(f.gate_id)
+
+    if not fragments:
+        # Defensive: caller only invokes us when ``needs_tool_forcing``
+        # returned True, but a registry mismatch should not crash.
+        return _FORCE_PREAMBLE + "\n\n" + _FORCE_CLOSER
+
+    body = "\n\n".join(fragments)
+    return f"{_FORCE_PREAMBLE}\n\n{body}\n\n{_FORCE_CLOSER}"
 
 
 # Defensive consistency check: every gate_id is registered in metrics.
@@ -573,5 +719,24 @@ def record_regenerate_outcome(failure_ids: tuple[str, ...], success: bool) -> No
     """
     metrics = get_gates_metrics()
     outcome = "regenerate_success" if success else "regenerate_failed"
+    for gate_id in failure_ids:
+        metrics.record(gate_id, outcome)
+
+
+def record_tool_forced_outcome(failure_ids: tuple[str, ...], success: bool) -> None:
+    """Tag a tool-forcing regenerate cycle in metrics.
+
+    Distinct counter from the text-only regenerate path so dashboards
+    can show the lift from Sprint F directly. ``failure_ids`` is the
+    set of tool-required gate ids that fired the first pass. Recorded
+    in addition to (not instead of) ``record_regenerate_outcome`` so
+    the existing fail-rate aggregates remain comparable.
+    """
+    metrics = get_gates_metrics()
+    outcome = (
+        "tool_forced_regenerate_success"
+        if success
+        else "tool_forced_regenerate_failed"
+    )
     for gate_id in failure_ids:
         metrics.record(gate_id, outcome)
