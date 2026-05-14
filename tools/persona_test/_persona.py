@@ -48,6 +48,12 @@ class Persona:
     ftp_watts: int | None = None
     swim_css_min_per_100m: float | None = None
     injury_history: list[dict] = field(default_factory=list)
+    # Recovery profile drives synthetic metric generation. "normal" keeps
+    # the historic centered-around-baseline behaviour. "low" deterministically
+    # seeds the most-recent days with sub-baseline values that trip the
+    # recovery_alerts patterns (sleep_low_3d, hrv_drop, rhr_elevation,
+    # body_battery_chronic, stress_chronic). "high" keeps everything green.
+    recovery_profile: str = "normal"
     # Markdown sections keyed by H2 heading (e.g. "Identity", "Goal").
     sections: dict[str, str] = field(default_factory=dict)
     # Raw source path for diagnostics.
@@ -140,6 +146,9 @@ def load_persona(slug: str) -> Persona:
             frontmatter.get("swim_css_min_per_100m"),
         ),
         injury_history=list(frontmatter.get("injury_history") or []),
+        recovery_profile=str(
+            frontmatter.get("recovery_profile") or "normal"
+        ).lower(),
         sections=sections,
         source_path=str(path),
     )

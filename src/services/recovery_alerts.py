@@ -114,11 +114,31 @@ def detect_alerts(user_id: str) -> list[RecoveryAlert]:
     Failures in any single check are swallowed (DEBUG-logged) so the
     other patterns still run. Failure to fetch metrics at all returns
     an empty list rather than raising.
+
+    Observability: logs the metric-row count at INFO so production
+    traces can distinguish "no data" (gate cannot fire) from "all green"
+    (gate correctly idle). Sprint J root cause was the former masquerading
+    as the latter.
     """
     metrics = _load_metrics(user_id)
     load_summary_pair = _load_load_summary_pair(user_id)
 
-    return _detect_from_data(metrics, load_summary_pair)
+    if not metrics:
+        logger.info(
+            "recovery_alerts.detect: no metrics for user_id=%s -> 0 alerts",
+            user_id,
+        )
+        return []
+
+    alerts = _detect_from_data(metrics, load_summary_pair)
+    logger.info(
+        "recovery_alerts.detect user_id=%s metric_rows=%d alerts=%d ids=%s",
+        user_id,
+        len(metrics),
+        len(alerts),
+        [f"{a.severity}:{a.pattern}" for a in alerts],
+    )
+    return alerts
 
 
 def detect_alerts_from_metrics(

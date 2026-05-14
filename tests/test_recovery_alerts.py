@@ -802,6 +802,149 @@ class TestGetRecoveryAlertsTool:
 # ---------------------------------------------------------------------------
 
 
+class TestPersonaSeedTriggers:
+    """Sprint J: Marco's seed data MUST trigger the recovery_alerts patterns.
+
+    The holistic_alert gate fired 0% in production because Marco's
+    synthetic health metrics did not cross any pattern threshold. After
+    the recovery_profile = "low" wiring in fake_metrics.py, the recent
+    7 days must produce at least one warn-or-critical alert so the gate
+    has something to enforce.
+    """
+
+    def _marco_metrics(self) -> list[dict]:
+        from tools.persona_test._persona import load_persona
+        from tools.persona_test.fake_metrics import generate
+
+        persona = load_persona("marco")
+        rows = generate(persona, user_id="marco-test", days=30)
+        return [
+            {
+                "date": r.date,
+                "sleep_minutes": r.sleep_duration_minutes,
+                "hrv": r.hrv_avg,
+                "resting_hr": r.resting_heart_rate,
+                "stress": r.stress_avg,
+                "body_battery_high": r.body_battery_high,
+                "recovery_score": r.recovery_score,
+            }
+            for r in rows
+        ]
+
+    def test_marco_persona_is_low_profile(self) -> None:
+        from tools.persona_test._persona import load_persona
+
+        assert load_persona("marco").recovery_profile == "low"
+
+    def test_marco_seed_produces_actionable_alerts(self) -> None:
+        metrics = self._marco_metrics()
+        alerts = detect_alerts_from_metrics(metrics)
+        actionable = [a for a in alerts if a.severity in ("warn", "critical")]
+        assert actionable, (
+            "Marco's seed must produce at least one warn/critical alert "
+            "so the holistic_alert gate can enforce acknowledgement."
+        )
+
+    def test_marco_seed_produces_sleep_alert(self) -> None:
+        """The persona markdown says Marco chronically undersleeps."""
+        metrics = self._marco_metrics()
+        alerts = detect_alerts_from_metrics(metrics)
+        sleep_patterns = {"sleep_low_3d", "sleep_critical"}
+        fired = {a.pattern for a in alerts} & sleep_patterns
+        assert fired, (
+            "Marco's chronic under-sleep must trip at least one of: "
+            f"{sleep_patterns}. Got patterns: {[a.pattern for a in alerts]}"
+        )
+
+    def test_marco_seed_produces_recovery_alert(self) -> None:
+        """recovery_score should be in the warn or critical band."""
+        metrics = self._marco_metrics()
+        alerts = detect_alerts_from_metrics(metrics)
+        rec_patterns = {"recovery_score_low", "recovery_critical"}
+        fired = {a.pattern for a in alerts} & rec_patterns
+        assert fired, (
+            "Marco's chronic low recovery must trip at least one of: "
+            f"{rec_patterns}. Got patterns: {[a.pattern for a in alerts]}"
+        )
+
+    def test_marco_seed_produces_hrv_drop(self) -> None:
+        """HRV recent-7-avg must drop > 15% vs 30-day baseline."""
+        metrics = self._marco_metrics()
+        alerts = detect_alerts_from_metrics(metrics)
+        patterns = {a.pattern for a in alerts}
+        assert "hrv_drop" in patterns, (
+            f"Expected hrv_drop in Marco's alerts. Got: {patterns}"
+        )
+
+    def test_marco_seed_produces_rhr_elevation(self) -> None:
+        metrics = self._marco_metrics()
+        alerts = detect_alerts_from_metrics(metrics)
+        patterns = {a.pattern for a in alerts}
+        assert "rhr_elevation" in patterns, (
+            f"Expected rhr_elevation in Marco's alerts. Got: {patterns}"
+        )
+
+    def test_marco_seed_no_emdash_in_messages(self) -> None:
+        metrics = self._marco_metrics()
+        alerts = detect_alerts_from_metrics(metrics)
+        for a in alerts:
+            assert "—" not in a.message_de
+            assert "–" not in a.message_de
+
+
+class TestObservability:
+    """Sprint J: the gate fail-rate regression must be debuggable from logs."""
+
+    def test_detect_alerts_logs_metric_count_when_empty(self, caplog) -> None:
+        import logging as _logging
+
+        from src.services import recovery_alerts as mod
+
+        with (
+            patch.object(mod, "_load_metrics", return_value=[]),
+            patch.object(
+                mod, "_load_load_summary_pair", return_value=(None, None),
+            ),
+            caplog.at_level(_logging.INFO, logger="src.services.recovery_alerts"),
+        ):
+            mod.detect_alerts("user-empty")
+
+        assert any(
+            "no metrics" in rec.getMessage() and "user-empty" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    def test_detect_alerts_logs_count_when_alerts_fire(self, caplog) -> None:
+        import logging as _logging
+
+        from src.services import recovery_alerts as mod
+
+        metrics = _all_green_window(30)
+        for i in range(3):
+            metrics[i] = _metric_row(i, sleep_minutes=300)
+
+        with (
+            patch.object(mod, "_load_metrics", return_value=metrics),
+            patch.object(
+                mod, "_load_load_summary_pair", return_value=(None, None),
+            ),
+            caplog.at_level(_logging.INFO, logger="src.services.recovery_alerts"),
+        ):
+            mod.detect_alerts("user-with-alerts")
+
+        # At least one INFO record should mention the user id and an
+        # alerts=<N> count > 0.
+        matched = [
+            rec for rec in caplog.records
+            if "user-with-alerts" in rec.getMessage()
+            and "alerts=" in rec.getMessage()
+        ]
+        assert matched, (
+            f"Expected an observability log line; got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+
 class TestNoDashesAnywhere:
     """Regression guard: every alert message must use ASCII hyphens only."""
 

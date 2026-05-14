@@ -20,6 +20,7 @@ rhr_baseline_bpm: 65
 hrv_baseline_ms: 36
 sleep_hours_baseline: 6.0
 has_active_plan: false
+recovery_profile: low
 ---
 
 ## Identity
