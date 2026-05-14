@@ -271,12 +271,17 @@ class UserModel:
                 parts.append(f"in {goal['target_time']}")
             lines.append(" ".join(parts))
 
+        from src.utils.pace_format import decimal_min_to_mmss
         fitness = core.get("fitness", {})
         fit_parts = []
         if fitness.get("estimated_vo2max"):
             fit_parts.append(f"VO2max ~{fitness['estimated_vo2max']}")
-        if fitness.get("threshold_pace_min_km"):
-            fit_parts.append(f"threshold {fitness['threshold_pace_min_km']} min/km")
+        threshold_pretty = decimal_min_to_mmss(
+            fitness.get("threshold_pace_min_km")
+        )
+        if threshold_pretty is not None:
+            # Pre-formatted: never leak the decimal into the prompt.
+            fit_parts.append(f"threshold {threshold_pretty} /km")
         if fitness.get("weekly_volume_km"):
             fit_parts.append(f"{fitness['weekly_volume_km']} km/week")
         if fit_parts:

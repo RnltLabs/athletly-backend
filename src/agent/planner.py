@@ -495,15 +495,19 @@ def _build_planner_user_message(request: dict, profile: dict) -> str:
     parts.append(f"available_sports: {available_sports}")
 
     if fitness:
+        from src.utils.pace_format import decimal_min_to_mmss
         parts.append("")
         parts.append("# Athlete Fitness Snapshot")
         vo2 = fitness.get("estimated_vo2max")
         thresh = fitness.get("threshold_pace_min_km")
+        thresh_pretty = decimal_min_to_mmss(thresh)
         vol = fitness.get("weekly_volume_km")
         if vo2 is not None:
             parts.append(f"estimated_vo2max: {vo2}")
-        if thresh is not None:
-            parts.append(f"threshold_pace_min_km: {thresh}")
+        if thresh_pretty is not None:
+            # Pre-formatted mm:ss so the planner LLM cannot misread
+            # 4.50 as "four fifty per km" (Sprint C fix).
+            parts.append(f"threshold_pace: {thresh_pretty} /km")
         if vol is not None:
             parts.append(f"recent_weekly_volume_km: {vol}")
 

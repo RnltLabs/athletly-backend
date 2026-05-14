@@ -20,7 +20,18 @@ def register_data_tools(registry: ToolRegistry, user_model):
 
     def get_athlete_profile() -> dict:
         """Get the current athlete profile."""
+        from src.utils.pace_format import decimal_min_to_mmss
         profile = user_model.project_profile()
+        # Pre-format fitness decimals to a _pretty twin so the LLM cannot
+        # misread the raw decimal as mm:ss (Sprint C fix). The decimal
+        # stays in place for backwards compat / internal math.
+        fitness = profile.get("fitness")
+        if isinstance(fitness, dict):
+            threshold_pretty = decimal_min_to_mmss(
+                fitness.get("threshold_pace_min_km")
+            )
+            if threshold_pretty is not None:
+                fitness["threshold_pace_pretty"] = threshold_pretty
         profile["_has_activities"] = bool(profile.get("sports"))
         profile["_onboarding_complete"] = bool(
             profile.get("sports") and

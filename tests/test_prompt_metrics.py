@@ -147,6 +147,83 @@ def test_english_text_does_not_fire_german_detector():
 
 
 # ---------------------------------------------------------------------------
+# Decimal-pace leak detector (Sprint C)
+# ---------------------------------------------------------------------------
+
+
+def test_decimal_pace_leak_detects_basic_case():
+    # Elena's actual failure mode: "deine Schwellen-Pace liegt bei 4.50/km".
+    text = "Deine Schwellen-Pace liegt bei 4.50/km."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_detects_with_min_qualifier():
+    text = "Threshold is 4.50 min/km."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_detects_no_space():
+    text = "4.50min/km looks fast."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_detects_one_decimal_digit():
+    # 4.5/km is also a decimal-pace leak (means 4 min 30 sec).
+    text = "Run today was 4.5/km."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_does_not_fire_on_correct_mmss():
+    # The correct format must NOT trigger the detector.
+    text = "Deine Schwellen-Pace liegt bei 4:30/km."
+    vios = scan_response(text)
+    rule_ids = {v.rule_id for v in vios}
+    assert "decimal_pace_leak" not in rule_ids
+
+
+def test_decimal_pace_leak_does_not_fire_on_distance():
+    # 4.5km is a distance, not a pace. No /km after a decimal pace
+    # qualifier ("min/km", "/km"), so the detector must not fire.
+    text = "I ran 4.5km this morning."
+    vios = scan_response(text)
+    rule_ids = {v.rule_id for v in vios}
+    assert "decimal_pace_leak" not in rule_ids
+
+
+def test_decimal_pace_leak_does_not_fire_on_unit_free_decimal():
+    # "4.50" with no /km context cannot be confidently flagged.
+    text = "The value was 4.50, which is high."
+    vios = scan_response(text)
+    rule_ids = {v.rule_id for v in vios}
+    assert "decimal_pace_leak" not in rule_ids
+
+
+def test_decimal_pace_leak_severity_is_strict():
+    text = "4.50/km is wrong."
+    vios = scan_response(text)
+    leaks = [v for v in vios if v.rule_id == "decimal_pace_leak"]
+    assert leaks
+    assert leaks[0].severity == "strict"
+
+
+def test_decimal_pace_leak_double_digit_minute():
+    # Marathon-shuffle pace like 10.50/km should also trigger.
+    text = "He averaged 10.50/km on the descent."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_case_insensitive():
+    text = "Pace was 4.50 MIN/KM."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+# ---------------------------------------------------------------------------
 # Empty / boundary inputs
 # ---------------------------------------------------------------------------
 

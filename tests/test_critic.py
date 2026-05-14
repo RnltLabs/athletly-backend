@@ -74,8 +74,9 @@ def _critic(model: str = "anthropic/claude-haiku-4-5-20251001") -> Critic:
 # ---------------------------------------------------------------------------
 
 
-def test_rule_ids_count_is_eight():
-    assert len(RULE_IDS) == 8
+def test_rule_ids_count_is_nine():
+    # Sprint C added pace_format_correct (was 8, now 9).
+    assert len(RULE_IDS) == 9
 
 
 def test_rule_ids_match_design_spec():
@@ -88,8 +89,20 @@ def test_rule_ids_match_design_spec():
         "language_mirror",
         "details_before_metrics",
         "sync_then_status",
+        "pace_format_correct",
     }
     assert set(RULE_IDS) == expected
+
+
+def test_pace_format_correct_rule_description_loaded():
+    """The Sprint C rule must be in the critic system prompt body."""
+    from src.agent.critic import _CRITIC_SYSTEM_PROMPT
+
+    assert "pace_format_correct" in _CRITIC_SYSTEM_PROMPT
+    # Sanity: the description names mm:ss as the correct form so the
+    # critic LLM can flag decimal-pace responses.
+    assert "mm:ss" in _CRITIC_SYSTEM_PROMPT
+    assert "4:30" in _CRITIC_SYSTEM_PROMPT or "4.50" in _CRITIC_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
