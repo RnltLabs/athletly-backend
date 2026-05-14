@@ -26,6 +26,10 @@ from src.agent.complexity_detector import needs_complex_reasoning
     # Lisa case shape: triathlon + race strategy + FTP math.
     "Ich bereite mich auf Roth vor. Wie pace ich die Langdistanz "
     "bei FTP 240 W?",
+    # Sprint H production case: Lisa's exact iteration-2 turn-1 phrasing.
+    "8-Wochen Build bis Roth Langdistanz, ich brauche einen Plan.",
+    # Pure long-horizon Langdistanz request - sport-mix bug case.
+    "Bitte erstelle mir einen Trainingsplan fuer die Langdistanz.",
     # Multi-sport keyword alone triggers (Group A).
     "Mein erster Triathlon kommt im August, wie sehe ich aus?",
     # FTP + number-comparison.

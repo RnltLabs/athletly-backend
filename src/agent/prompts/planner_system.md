@@ -36,6 +36,15 @@ object that matches the schema below EXACTLY. Nothing else. No prose.
       "friday": "...",
       "saturday": "...",
       "sunday": "..."
+    },
+    "sport_per_day": {
+      "monday": "<sport or 'rest'>",
+      "tuesday": "...",
+      "wednesday": "...",
+      "thursday": "...",
+      "friday": "...",
+      "saturday": "...",
+      "sunday": "..."
     }
   },
   "constraints_acknowledged": {
@@ -54,12 +63,62 @@ object that matches the schema below EXACTLY. Nothing else. No prose.
   with lowercase keys. Use "rest" for off days.
 - The count of non-rest weekdays in `weekly_template` MUST equal
   `constraints_acknowledged.training_days_per_week`.
+- `sport_per_day` MUST have all seven weekday keys and the values MUST
+  align with `weekly_template`: every `"rest"` day in the template gets
+  `"rest"` in `sport_per_day`; every non-rest day gets a sport from
+  `available_sports`. For single-sport athletes (`available_sports` has
+  one entry) every non-rest day uses that sport. For multi-sport
+  athletes, see the next section.
 - `constraints_acknowledged` must echo the athlete's ACTUAL constraints
   (from the runtime context). Do not invent.
 - `start_date` must be a Monday in YYYY-MM-DD format. If the athlete did
   not specify one, use the next Monday from today.
 - Return JSON ONLY. No markdown fences, no commentary, no
   "Here is the outline:" preamble.
+
+## Sport-mix for multi-sport athletes (CRITICAL)
+
+When `available_sports` contains more than one sport, the plan MUST
+distribute sessions across ALL of those sports every week. Single-sport
+plans for a triathlete are a hard failure.
+
+Detect the triathlon discipline from `goal_event` (case-insensitive
+substring match):
+
+- "langdistanz", "ironman", "im", "140.6", "full distance" -> long_course
+- "mitteldistanz", "70.3", "half ironman", "halbdistanz" -> middle_distance
+- "sprint", "olympische", "kurzdistanz", "olympic" -> short_course
+- triathlon mentioned but distance unclear -> unknown_triathlon
+
+Per-week MINIMUM session floors per discipline (every week of the
+plan, including taper):
+
+| Discipline | swimming | cycling | running |
+|---|---|---|---|
+| long_course (Langdistanz / IM) | 1 | 2 | 2 |
+| middle_distance (70.3) | 1 | 2 | 2 |
+| short_course (Sprint / Olympic) | 1 | 1 | 1 |
+| unknown_triathlon | 1 | 1 | 1 |
+
+These are FLOORS, not targets. Spend extra days on the discipline that
+matters most for the goal. For Langdistanz that is usually cycling
+(180 km in race) or running (42.2 km off the bike).
+
+Worked example - Lisa: 6 training days/week, Langdistanz Roth:
+
+- 1 swim (Wednesday is a classic "skills" day)
+- 3 bikes (long Sat, threshold Tue, easy Fri)
+- 2 runs (long Sun off-bike brick, quality Thu)
+- 1 day is a brick: counts toward both bike and run
+
+The `sport_per_day` field expresses ONE primary sport per day. Bricks
+are noted via the executor (description field) but the `sport_per_day`
+entry stays single-sport for accounting purposes - pick the discipline
+whose volume is greater on that day.
+
+For non-triathlon multi-sport profiles (e.g. running + strength), apply
+the same logic: at minimum one session per sport per week unless the
+profile explicitly says otherwise.
 
 ## Periodization vocabulary (use these phase labels)
 

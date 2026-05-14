@@ -40,9 +40,12 @@ Return JSON ONLY. No markdown fences, no commentary.
     Peak/Race-Prep).
   - `long_or_quality` slot -> pick per phase (Base: long; Peak: quality).
   - `cross` slot -> `low` or `moderate`.
-- `sport` must be in `constraints.available_sports`. Default to the
-  first sport in that list if the slot type does not imply a different
-  sport.
+- `sport` MUST equal the value of `sport_per_day[<that weekday>]` from
+  the week slot, VERBATIM. The planner has already decided the sport
+  for each day to keep the multi-sport distribution balanced; you do
+  NOT get to substitute another sport from `available_sports`. If
+  `sport_per_day` is missing (single-sport plan), use the only entry in
+  `constraints.available_sports`.
 - Sum of `duration_minutes` across the week should approximate the
   phase's weekly volume target. For running: convert km to minutes
   using ~5:30 to 6:00 min/km for easy pace as a rough divisor.

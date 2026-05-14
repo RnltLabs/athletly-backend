@@ -355,11 +355,28 @@ def chat_completion(
     # settings.sonnet_thinking_budget). Cache prefix is invalidated by
     # changes to the thinking parameter, so the budget MUST stay stable
     # across the rounds of a single user turn.
+    #
+    # Anthropic REQUIRES temperature=1 when thinking is enabled. Any other
+    # value triggers a 400 BadRequestError ("temperature may only be set to 1
+    # when thinking is enabled"). The caller-supplied temperature is
+    # therefore overridden here. See:
+    # https://docs.claude.com/en/docs/build-with-claude/extended-thinking
+    # Sprint H bug: agent_loop was passing AGENT_TEMPERATURE=0.7 for
+    # tier="complex" calls, every Sonnet attempt was rejected, and every
+    # turn fell back to Haiku. Lisa's premium routing never fired in
+    # production because of this.
     if is_anthropic and thinking_budget > 0:
         kwargs["thinking"] = {
             "type": "enabled",
             "budget_tokens": thinking_budget,
         }
+        if kwargs.get("temperature") != 1.0:
+            logger.debug(
+                "extended thinking enabled: forcing temperature=1.0 "
+                "(was %s)",
+                kwargs.get("temperature"),
+            )
+            kwargs["temperature"] = 1.0
 
     response = _completion_with_rate_limit_retry(kwargs)
     _log_cache_usage(response, resolved_model, is_premium=is_premium)

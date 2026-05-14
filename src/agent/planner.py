@@ -106,6 +106,72 @@ _WEEKDAY_TO_OFFSET: dict[str, int] = {d: i for i, d in enumerate(_WEEKDAYS)}
 # misconfiguration; cap to a sane value.
 _MAX_PLAN_WEEKS = 32
 
+# ---------------------------------------------------------------------------
+# Multi-sport floor heuristic (Sprint H sport-mix fix)
+# ---------------------------------------------------------------------------
+
+# Minimum number of sessions per discipline, per week, by triathlon
+# distance label. These are FLOORS, not targets. See RESEARCH.md.
+# Sport keys are normalised to the lower-case strings the agent uses
+# across the codebase (running / cycling / swimming).
+_MULTI_SPORT_FLOORS: dict[str, dict[str, int]] = {
+    "long_course": {"swimming": 1, "cycling": 2, "running": 2},
+    "middle_distance": {"swimming": 1, "cycling": 2, "running": 2},
+    "short_course": {"swimming": 1, "cycling": 1, "running": 1},
+    "unknown_triathlon": {"swimming": 1, "cycling": 1, "running": 1},
+}
+
+# Substring keyword -> discipline label. Matched in order; first hit wins.
+# Longer / more-specific tokens come first so e.g. "ironman 70.3" maps to
+# middle_distance even though "ironman" alone is long_course.
+_DISCIPLINE_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("70.3", "middle_distance"),
+    ("halbdistanz", "middle_distance"),
+    ("mitteldistanz", "middle_distance"),
+    ("half ironman", "middle_distance"),
+    ("half-ironman", "middle_distance"),
+    ("halfironman", "middle_distance"),
+    ("langdistanz", "long_course"),
+    ("140.6", "long_course"),
+    ("full distance", "long_course"),
+    ("full-distance", "long_course"),
+    ("ironman", "long_course"),
+    ("iron man", "long_course"),
+    ("kona", "long_course"),
+    ("roth", "long_course"),
+    ("sprint", "short_course"),
+    ("kurzdistanz", "short_course"),
+    ("olympische", "short_course"),
+    ("olympic", "short_course"),
+)
+
+
+def _detect_triathlon_discipline(request: dict, outline: dict | None) -> str | None:
+    """Return the discipline label from `goal_event` / `focus`, or None.
+
+    None means "not a triathlon plan" (or distance not stated). When the
+    profile is multi-sport but the discipline is None we fall through to
+    `unknown_triathlon` floors so we still enforce min one session per
+    sport per week.
+    """
+    haystack_parts: list[str] = []
+    for key in ("goal_event", "focus", "name"):
+        val = request.get(key) if isinstance(request, dict) else None
+        if isinstance(val, str):
+            haystack_parts.append(val)
+    if outline:
+        for key in ("goal_event", "focus"):
+            val = outline.get(key) if isinstance(outline, dict) else None
+            if isinstance(val, str):
+                haystack_parts.append(val)
+    if not haystack_parts:
+        return None
+    haystack = " ".join(haystack_parts).lower()
+    for kw, label in _DISCIPLINE_KEYWORDS:
+        if kw in haystack:
+            return label
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Public dataclasses
@@ -303,8 +369,84 @@ def generate_training_plan(
         "planner_attempts": 0,
         "executor_retries": 0,
         "validation_notes": [],
+        "sport_mix_retries": 0,
     }
 
+    # Up to two attempts: the second one carries an extra annotation
+    # telling the planner which sports were missing. If the SECOND
+    # attempt still fails the multi-sport floor we fall back to inline
+    # rather than ship a broken plan.
+    sport_mix_hint: str | None = None
+    for sport_attempt in range(2):
+        attempt_result = _attempt_plan_generation(
+            request=request,
+            profile=profile,
+            on_progress=on_progress,
+            planner_model_resolved=planner_model_resolved,
+            executor_model_resolved=executor_model_resolved,
+            meta=meta,
+            sport_mix_hint=sport_mix_hint,
+        )
+        if attempt_result.mode == "inline_fallback":
+            return attempt_result
+        sport_errors = _validate_sport_distribution(
+            attempt_result.plan, profile, attempt_result.plan.get("outline") or {},
+            request,
+        )
+        if not sport_errors:
+            return attempt_result
+        # Violation: log, record, and either retry or fall back.
+        meta["validation_notes"].extend(sport_errors)
+        logger.warning(
+            "Sport-mix floor violation (attempt %d): %s",
+            sport_attempt + 1, "; ".join(sport_errors),
+        )
+        _emit_progress(on_progress, "validation_failed", "; ".join(sport_errors))
+        if sport_attempt == 0:
+            # Build a short, machine-readable hint for the planner retry.
+            meta["sport_mix_retries"] = 1
+            sport_mix_hint = (
+                "SPORT-MIX VIOLATION on previous attempt:\n"
+                + "\n".join(f"  - {e}" for e in sport_errors)
+                + "\nRe-emit the outline with a valid sport_per_day so EVERY "
+                  "week respects the multi-sport floors documented in the "
+                  "system prompt."
+            )
+            continue
+        # Second attempt also failed -> fall back closed.
+        return PlannerResult(
+            plan=dict(request),
+            mode="inline_fallback",
+            meta={**meta, "fallback_reason": "sport_mix_floor_violation"},
+        )
+
+    # Defensive: the loop above always returns. If we ever fall through,
+    # treat as inline fallback.
+    return PlannerResult(
+        plan=dict(request),
+        mode="inline_fallback",
+        meta={**meta, "fallback_reason": "exhausted_sport_mix_retries"},
+    )
+
+
+def _attempt_plan_generation(
+    *,
+    request: dict,
+    profile: dict,
+    on_progress: Callable[[str, str], None] | None,
+    planner_model_resolved: str,
+    executor_model_resolved: str,
+    meta: dict[str, Any],
+    sport_mix_hint: str | None,
+) -> PlannerResult:
+    """Run one full planner -> executors -> assemble cycle.
+
+    Encapsulates everything that used to live inline in
+    ``generate_training_plan``. Returns a PlannerResult that may be
+    ``inline_fallback`` (irrecoverable failure) or ``plan_and_execute``.
+    Sport-mix validation is handled by the OUTER loop in
+    ``generate_training_plan``.
+    """
     _emit_progress(on_progress, "planner_start", planner_model_resolved)
 
     try:
@@ -313,6 +455,7 @@ def generate_training_plan(
             profile=profile,
             model=planner_model_resolved,
             meta=meta,
+            extra_user_hint=sport_mix_hint,
         )
     except _PlannerError as exc:
         logger.warning("Planner failed: %s. Falling back to inline.", exc)
@@ -325,7 +468,6 @@ def generate_training_plan(
 
     duration_weeks = outline["duration_weeks"]
     meta["weeks"] = duration_weeks
-    start_date = outline["start_date"]
     _emit_progress(on_progress, "planner_done", f"{duration_weeks} weeks")
 
     # Executor: one call per week, sequential for ship.
@@ -397,10 +539,19 @@ def _run_planner(
     profile: dict,
     model: str,
     meta: dict,
+    extra_user_hint: str | None = None,
 ) -> dict:
-    """Invoke the planner LLM and return a validated outline."""
+    """Invoke the planner LLM and return a validated outline.
+
+    ``extra_user_hint`` is appended to the user message ON EVERY ATTEMPT
+    of this planner cycle. Used by the outer sport-mix retry loop to
+    tell the planner exactly which sports were missing on a previous
+    cycle. None means "no hint" (first attempt).
+    """
     system_prompt = _load_prompt("planner_system.md")
     user_message = _build_planner_user_message(request, profile)
+    if extra_user_hint:
+        user_message = user_message + "\n\n" + extra_user_hint
 
     # Audit log: this call burns Sonnet (or whatever planner model the
     # operator configured). Emit a structured line so premium spend is
@@ -579,6 +730,50 @@ def _validate_outline(payload: dict, request: dict, profile: dict) -> str | None
             f"athlete expects {expected_days}"
         )
 
+    # sport_per_day validation. Only ENFORCE shape when the profile is
+    # multi-sport; for single-sport profiles a missing sport_per_day is
+    # tolerated and the executor falls back to the lone sport. The
+    # planner prompt still asks for it, but we do not block on it for
+    # single-sport (backward-compat).
+    available_sports = (
+        constraints.get("available_sports")
+        or profile.get("sports")
+        or ["running"]
+    )
+    available_lower = [s.lower() for s in available_sports]
+    multi_sport = len(set(available_lower)) > 1
+    sport_per_day = outline.get("sport_per_day")
+    if multi_sport:
+        if not isinstance(sport_per_day, dict):
+            return (
+                "sport_per_day must be a dict when available_sports has "
+                ">1 entry (got %r)" % type(sport_per_day).__name__
+            )
+        for day in _WEEKDAYS:
+            sport = sport_per_day.get(day)
+            if not isinstance(sport, str):
+                return f"sport_per_day.{day} must be a string"
+            sport_lc = sport.lower()
+            if template[day] == "rest":
+                if sport_lc != "rest":
+                    return (
+                        f"sport_per_day.{day} must be 'rest' when "
+                        f"weekly_template.{day} is rest"
+                    )
+            else:
+                if sport_lc == "rest":
+                    return (
+                        f"sport_per_day.{day} cannot be 'rest' when "
+                        f"weekly_template.{day} is {template[day]!r}"
+                    )
+                if sport_lc not in available_lower:
+                    return (
+                        f"sport_per_day.{day}={sport_lc!r} not in "
+                        f"available_sports {available_lower}"
+                    )
+    elif sport_per_day is not None and not isinstance(sport_per_day, dict):
+        return "sport_per_day must be a dict when present"
+
     ack = payload.get("constraints_acknowledged")
     if not isinstance(ack, dict):
         return "constraints_acknowledged must be a dict"
@@ -667,7 +862,7 @@ def _build_week_slot(outline: dict, week_index: int, profile: dict) -> dict:
     week_start = start_date + timedelta(days=(week_index - 1) * 7)
     constraints = profile.get("constraints") or {}
 
-    return {
+    slot: dict = {
         "week_index": week_index,
         "week_start_date": week_start.isoformat(),
         "phase": phase["phase"],
@@ -683,6 +878,15 @@ def _build_week_slot(outline: dict, week_index: int, profile: dict) -> dict:
                 or ["running"],
         },
     }
+
+    # Sprint H: pass through the per-day sport assignment so the executor
+    # cannot drift from the planner's multi-sport distribution decision.
+    sport_per_day = outline.get("sport_per_day")
+    if isinstance(sport_per_day, dict):
+        slot["sport_per_day"] = {
+            d: (sport_per_day.get(d) or "rest") for d in _WEEKDAYS
+        }
+    return slot
 
 
 def _build_executor_user_message(week_slot: dict, language: str) -> str:
@@ -710,6 +914,11 @@ def _sanitize_executor_sessions(
     week_start = _date_cls.fromisoformat(week_slot["week_start_date"])
     max_minutes = int(week_slot["constraints"]["max_session_minutes"])
     available_sports = week_slot["constraints"]["available_sports"] or ["running"]
+    available_lower = [s.lower() for s in available_sports]
+    # Sprint H: the planner's outline assigns sport per day. If present,
+    # the executor's per-session `sport` field is overridden to whatever
+    # the planner decided so the multi-sport distribution stays correct.
+    sport_per_day: dict[str, str] = week_slot.get("sport_per_day") or {}
 
     sanitized: list[dict] = []
     seen_days: set[str] = set()
@@ -743,9 +952,16 @@ def _sanitize_executor_sessions(
                 f"max_session_minutes {max_minutes}"
             )
 
-        sport = (entry.get("sport") or available_sports[0] or "running").lower()
-        if available_sports and sport not in [s.lower() for s in available_sports]:
-            sport = available_sports[0].lower()
+        # Sprint H: prefer the planner's per-day sport assignment over the
+        # executor's free-text guess. This eliminates the failure mode
+        # where Haiku defaults every day to running.
+        assigned = (sport_per_day.get(day) or "").lower()
+        if assigned and assigned != "rest" and assigned in available_lower:
+            sport = assigned
+        else:
+            sport = (entry.get("sport") or available_sports[0] or "running").lower()
+            if available_lower and sport not in available_lower:
+                sport = available_lower[0]
 
         intensity = (entry.get("intensity") or "low").lower()
         if intensity not in {"low", "moderate", "high"}:
@@ -828,6 +1044,86 @@ def _summarize_focus(outline: dict, request: dict) -> str:
     if weeks:
         return f"{weeks}-week training block"
     return "Training plan"
+
+
+def _validate_sport_distribution(
+    plan: dict,
+    profile: dict,
+    outline: dict,
+    request: dict,
+) -> list[str]:
+    """Per-week multi-sport floor check (Sprint H).
+
+    Returns an empty list when the plan is OK, otherwise a list of human
+    readable error strings. The caller decides whether to retry the
+    planner or fail closed.
+
+    Single-sport profiles ALWAYS pass (no constraint to violate).
+
+    Multi-sport profiles are validated against ``_MULTI_SPORT_FLOORS``
+    keyed by triathlon discipline. Unknown discipline -> default
+    ``unknown_triathlon`` floors (>=1 per declared sport).
+    """
+    constraints = profile.get("constraints") or {}
+    available_sports = [
+        s.lower()
+        for s in (constraints.get("available_sports")
+                  or profile.get("sports") or [])
+    ]
+    if len(set(available_sports)) < 2:
+        return []  # single-sport: nothing to validate.
+
+    discipline = _detect_triathlon_discipline(request, outline) or "unknown_triathlon"
+    floors = _MULTI_SPORT_FLOORS.get(discipline, _MULTI_SPORT_FLOORS["unknown_triathlon"])
+
+    # Only enforce floors for sports the athlete ACTUALLY declared.
+    enforced = {
+        sport: floor for sport, floor in floors.items() if sport in available_sports
+    }
+    if not enforced:
+        return []
+
+    sessions = plan.get("sessions") or []
+    try:
+        start_date = _date_cls.fromisoformat(plan["start_date"])
+    except (KeyError, TypeError, ValueError):
+        return ["plan missing valid start_date"]
+    duration_weeks = outline.get("duration_weeks") or 1
+
+    # week_index (1-based) -> sport -> count
+    per_week: dict[int, dict[str, int]] = {
+        wk: {sport: 0 for sport in enforced}
+        for wk in range(1, duration_weeks + 1)
+    }
+    for s in sessions:
+        try:
+            d = _date_cls.fromisoformat(s.get("date"))
+        except (TypeError, ValueError):
+            continue
+        wk = (d - start_date).days // 7 + 1
+        if wk not in per_week:
+            continue
+        sport = (s.get("sport") or "").lower()
+        if sport in enforced:
+            per_week[wk][sport] = per_week[wk].get(sport, 0) + 1
+
+    errors: list[str] = []
+    for wk in sorted(per_week.keys()):
+        counts = per_week[wk]
+        deficits: list[str] = []
+        for sport, floor in enforced.items():
+            got = counts.get(sport, 0)
+            if got < floor:
+                deficits.append(f"{sport} {got}/{floor}")
+        if deficits:
+            errors.append(f"week {wk}: " + ", ".join(deficits))
+    if errors:
+        errors.insert(
+            0,
+            f"sport-mix floor violation (discipline={discipline}, "
+            f"floors={enforced}):",
+        )
+    return errors
 
 
 def _validate_against_constraints(
