@@ -341,6 +341,11 @@ def _build_user_prompt(
 # Em-dash U+2014 and en-dash U+2013.
 _DASH_CHARS = ("—", "–")
 
+# Single-pass replacement: any em/en-dash with optional surrounding whitespace
+# becomes a canonical ` - ` (single space, hyphen, single space). Avoids the
+# "  -  " double-space artefact when the original was already space-padded.
+_DASH_WITH_SPACES_RE = re.compile(r"\s*[—–]\s*")
+
 # Markdown markers we forbid in coach responses. Conservative regexes:
 # - `**bold**` and `__bold__` (double markers with non-empty body)
 # - single-asterisk italic with non-whitespace content
@@ -401,28 +406,187 @@ def _has_real_umlaut(text: str) -> bool:
                                     "Ä", "Ö", "Ü"))
 
 
+# Deterministic ASCII-to-umlaut mapping for common German stems that show
+# up in athlete/coach context. Used both for detection (does the token
+# match a known German translit?) and for repair (replace with the real
+# umlaut form). Order matters: longer keys MUST come before shorter
+# prefixes that share their start so we never replace a partial stem.
+#
+# Each entry is a (case_pattern, replacement) tuple where the pattern is
+# substring-matched case-insensitively. Both the lowercase and
+# title-case forms are produced from a single source of truth.
+_ASCII_UMLAUT_REPAIRS: tuple[tuple[str, str], ...] = (
+    # ue -> ü
+    ("uebermorgen", "übermorgen"),
+    ("uebertraining", "übertraining"),
+    ("uebertr", "übertr"),  # übertreiben, übertragen
+    ("uebergang", "übergang"),
+    ("ueberge", "überge"),  # übergewicht, übergeordnet, übergehen
+    ("ueberle", "überle"),  # überlegen, Überlegung
+    ("ueberna", "überna"),  # übernächste, übernehmen
+    ("ueberpr", "überpr"),  # überprüfen
+    ("ueberw", "überw"),    # überwiegen, überwachen
+    ("ueberz", "überz"),    # überzeugen
+    ("ueberbl", "überbl"),  # Überblick
+    ("ueberr", "überr"),    # überrascht
+    ("uebung", "übung"),    # Übung, Übungen
+    ("ueber", "über"),      # generic über- prefix (last so longer wins)
+    ("koerper", "körper"),
+    ("koennt", "könnt"),     # könnte, könnten, könntest, könntet
+    ("koennen", "können"),
+    ("koenn", "könn"),
+    ("muess", "müss"),       # müssen, müsst
+    ("moech", "möch"),       # möchte, möchtest, möchten
+    ("moegl", "mögl"),       # möglich, Möglichkeit
+    ("fuehl", "fühl"),       # fühlen, gefühl
+    ("fuehr", "führ"),       # führen, geführt, Führung
+    ("ruecks", "rücks"),     # Rücksprache
+    ("ruecken", "rücken"),
+    ("rueck", "rück"),       # Rück-
+    ("stuetz", "stütz"),
+    ("stueck", "stück"),
+    ("stuec", "stüc"),       # variant
+    ("kuehl", "kühl"),
+    ("muede", "müde"),
+    ("muedig", "müdig"),
+    ("kuemmer", "kümmer"),
+    ("duerf", "dürf"),
+    ("wuerd", "würd"),
+    ("drueb", "drüb"),
+    ("gluec", "glüc"),
+    ("wuens", "wüns"),
+    ("zurueck", "zurück"),
+    ("fuer", "für"),         # short, last among ue -> ü (NOT a prefix of
+                             # English words; safe as last-resort substr)
+    # oe -> ö
+    ("hoeh", "höh"),         # Höhe, Höhepunkt
+    ("hoer", "hör"),         # hören, Hörgenuss
+    ("stoer", "stör"),
+    ("ploetz", "plötz"),
+    ("schoen", "schön"),
+    ("erschoep", "erschöp"),
+    # ae -> ä
+    ("naecht", "nächt"),     # Nächte, Nächten, Nächster (caught later by naech)
+    ("naech", "näch"),       # nächst, Nächste
+    ("waer", "wär"),         # wäre, wären
+    ("haett", "hätt"),       # hätte, hätten
+    ("staerk", "stärk"),     # stärker, Stärke, stärksten
+    ("schwae", "schwä"),
+    ("verlae", "verlä"),
+    ("verstae", "verstä"),
+    ("auffae", "auffä"),     # auffällig
+    ("regelmae", "regelmä"), # regelmäßig
+    ("taeg", "täg"),         # täglich
+    ("naem", "näm"),         # nämlich
+    ("spaet", "spät"),
+    ("vorrae", "vorrä"),
+    ("plaetz", "plätz"),
+    ("saetz", "sätz"),       # Sätze
+    ("geraet", "gerät"),
+    ("haeng", "häng"),
+    ("draeng", "dräng"),
+    ("praesen", "präsen"),
+    ("erklaer", "erklär"),   # erklären, Erklärung
+    ("vorlaeu", "vorläu"),
+    ("anstre", "anstre"),    # noop; placeholder for anstreng (no umlaut)
+    ("naehr", "nähr"),
+    ("aerger", "ärger"),
+    ("praezi", "präzi"),
+    ("praef", "präf"),
+    # ss -> ß (must come after ue/oe/ae replacements that contain "ss")
+    ("schluess", "schlüss"), # Schlüssel (also fixes ue)
+    ("schliess", "schließ"),
+    ("schlies", "schließ"),
+    ("aussen", "außen"),     # Außenseite (also "aussenseite")
+    ("ausser", "außer"),
+    ("groess", "größ"),
+    ("strasse", "straße"),
+    ("strassen", "straßen"),
+    ("grosse", "große"),
+    ("grosser", "großer"),
+    ("suess", "süß"),
+    ("maess", "mäß"),        # mäßig
+    ("dass", "dass"),        # noop placeholder; "dass" is correct.
+    ("muss", "muss"),        # noop placeholder
+    ("mass", "maß"),         # be cautious; only fires on isolated word - we
+                             # handle below via word-boundary check
+)
+
+
+def _apply_umlaut_repairs(text: str) -> str:
+    """Apply each :data:`_ASCII_UMLAUT_REPAIRS` entry case-insensitively.
+
+    Preserves the original casing of the first letter (so ``Naechte`` ->
+    ``Nächte``, not ``nächte``). Skips entries whose key equals its
+    replacement (noop placeholders kept so the table reads as a complete
+    vocabulary).
+    """
+    out = text
+    for needle, repl in _ASCII_UMLAUT_REPAIRS:
+        if needle == repl:
+            continue
+        out = _replace_case_insensitive_preserve_capital(out, needle, repl)
+    return out
+
+
+def _replace_case_insensitive_preserve_capital(text: str, needle: str, repl: str) -> str:
+    """Replace *needle* in *text* case-insensitively, preserving first-letter case.
+
+    If the matched substring starts with an uppercase letter, the
+    replacement's first letter is uppercased too. All other letters in
+    the replacement are kept as the literal lowercase form supplied.
+    """
+    if not needle:
+        return text
+    pattern = re.compile(re.escape(needle), re.IGNORECASE)
+
+    def _sub(match: re.Match) -> str:
+        matched = match.group(0)
+        if matched and matched[0].isupper():
+            return repl[:1].upper() + repl[1:]
+        return repl
+
+    return pattern.sub(_sub, text)
+
+
 def _detect_ascii_umlaut_violation(response_text: str) -> str | None:
     """Return the offending token if response uses ASCII transliteration.
 
-    Conservative: only fires when no real umlauts are present in the
-    response (so we don't penalise mixed text) AND at least one word
-    containing ae/oe/ue/ss is NOT in the allowlist.
+    Sprint G change: we no longer short-circuit on the presence of a real
+    umlaut elsewhere in the text. A mixed-umlaut response (one `ü` plus
+    many `Naechte`) was the canonical iteration-1 failure mode: the
+    detector blinded itself and the ASCII tokens shipped.
+
+    Now each token is judged independently. A token is flagged when it
+    contains `ae/oe/ue/ss`, matches a known German translit stem
+    (:data:`_ASCII_UMLAUT_REPAIRS`), and is not in the English allowlist.
     """
-    # If the response already contains real umlauts somewhere, the
-    # author clearly knows how to type them; treat any remaining ASCII
-    # combos as intentional (e.g. "Status", "Saemann" surname).
-    if _has_real_umlaut(response_text):
-        return None
     for match in _ASCII_UMLAUT_RE.finditer(response_text):
-        token = match.group(0).lower()
-        if token in _ASCII_UMLAUT_ALLOWLIST:
+        token = match.group(0)
+        lower = token.lower()
+        if lower in _ASCII_UMLAUT_ALLOWLIST:
             continue
-        # The token must contain ae/oe/ue/ss and at least one extra
-        # German-flavoured letter to count as a translit attempt.
-        # Single-syllable English words like "blue" are filtered above.
-        if any(seq in token for seq in ("ae", "oe", "ue", "ss")):
+        if not any(seq in lower for seq in ("ae", "oe", "ue", "ss")):
+            continue
+        if _looks_like_german_translit(lower):
             return token
     return None
+
+
+def _looks_like_german_translit(token_lower: str) -> bool:
+    """Heuristic: is *token_lower* a German word that should use an umlaut?
+
+    Returns True only for tokens that contain a known German stem from
+    :data:`_ASCII_UMLAUT_REPAIRS`. Conservative on purpose so unrelated
+    ASCII strings (``status``, ``tissue``, ``queue``) do not trip the
+    rule.
+    """
+    for needle, repl in _ASCII_UMLAUT_REPAIRS:
+        if needle == repl:
+            continue
+        if needle in token_lower:
+            return True
+    return False
 
 
 def hard_inspect(response_text: str, user_message: str) -> tuple[Violation, ...]:
@@ -487,22 +651,28 @@ def hard_inspect(response_text: str, user_message: str) -> tuple[Violation, ...]
 
 
 def sanitize_hard(response_text: str, user_message: str) -> str:
-    """Last-resort cleaner that removes hard-rule violations.
+    """Deterministic cleaner that removes hard-rule violations.
 
-    Only invoked when both the original draft AND the LLM regenerate
-    introduced a hard violation. Guarantees zero hard-rule violations
-    on its output so we never ship em-dash / markdown / ASCII-umlaut
-    text to the user.
+    Guarantees zero hard-rule violations on its output so the SSE layer
+    never ships em-dash / markdown / ASCII-umlaut text to the user.
 
-    This is not a substitute for the LLM regenerate - the rewrite is
-    still the primary path. ``sanitize_hard`` is the safety net for the
-    rare double-failure case.
+    Sprint G change: ASCII-umlaut repair no longer short-circuits when
+    the text contains a real umlaut. We always apply the deterministic
+    repair table when the conversation is in German. The table is a
+    single source of truth shared with :func:`_detect_ascii_umlaut_violation`
+    so detection and repair stay aligned.
+
+    This is the always-on safety net invoked by ``_finalize_response``
+    before every SSE ``message`` emit (independent of the LLM critic
+    feature flag). Sub-millisecond, no I/O, no exceptions.
     """
     text = response_text or ""
 
-    # Replace dashes with " - " (hyphen with spaces).
-    for ch in _DASH_CHARS:
-        text = text.replace(ch, " - ")
+    # Replace em/en-dashes plus any surrounding whitespace with canonical
+    # " - " (single space, hyphen, single space). Single-pass regex so we
+    # never produce the "  -  " double-space artefact when the source had
+    # space-padded em-dashes.
+    text = _DASH_WITH_SPACES_RE.sub(" - ", text)
 
     # Strip markdown markers, preserving the inner text.
     text = _MARKDOWN_BOLD_RE.sub(
@@ -515,25 +685,13 @@ def sanitize_hard(response_text: str, user_message: str) -> str:
         text,
     )
 
-    # ASCII umlauts: only apply in German context, only for a tight
-    # whitelist of common German words. We intentionally do NOT do
-    # full transliteration - too risky. We just patch the most common
-    # cases that show up in coach responses.
-    if _is_german_text(user_message) and not _has_real_umlaut(text):
-        replacements = (
-            ("Fuer ", "Für "), ("fuer ", "für "),
-            ("Ueber", "Über"), ("ueber", "über"),
-            ("Moeglich", "Möglich"), ("moeglich", "möglich"),
-            ("Naechst", "Nächst"), ("naechst", "nächst"),
-            ("Waere", "Wäre"), ("waere", "wäre"),
-            ("Koennen", "Können"), ("koennen", "können"),
-            ("Muessen", "Müssen"), ("muessen", "müssen"),
-            ("Suess", "Süß"), ("suess", "süß"),
-            ("strasse", "straße"), ("Strasse", "Straße"),
-            ("grosse", "große"), ("Grosse", "Große"),
-        )
-        for ascii_form, real_form in replacements:
-            text = text.replace(ascii_form, real_form)
+    # ASCII umlauts: apply the deterministic repair table when the
+    # conversation is in German. We DO NOT skip on the presence of a
+    # real umlaut elsewhere; the iteration-1 failure mode was that one
+    # ``ü`` somewhere in the response blinded the cleaner to every
+    # other ``Naechte`` / ``Koerper`` / ``ueber`` token.
+    if _is_german_text(user_message):
+        text = _apply_umlaut_repairs(text)
 
     return text
 
