@@ -215,3 +215,46 @@ def register_health_tools(registry: ToolRegistry, user_id: str = None) -> None:
         category="data",
         display_label="Lese Schlaf und Recovery",
     ))
+
+    def get_recovery_alerts() -> dict:
+        """Run the deterministic whole-athlete pattern checks.
+
+        Returns the same alert list that powers the `# Coach Alerts`
+        section of the runtime context. Use this when the athlete
+        mentions feeling off and the runtime context did not include
+        an alerts section (data may have synced since context build),
+        or before agreeing to a hard session to confirm recovery is OK.
+        """
+        from src.services.recovery_alerts import detect_alerts
+
+        user_id = _resolved_uid
+        if not user_id:
+            return {"count": 0, "alerts": []}
+
+        alerts = detect_alerts(user_id)
+        return {
+            "count": len(alerts),
+            "alerts": [a.to_dict() for a in alerts],
+        }
+
+    registry.register(Tool(
+        name="get_recovery_alerts",
+        description=(
+            "Run the deterministic whole-athlete pattern checks (sleep "
+            "deficit, HRV drop, RHR elevation, body battery chronic, "
+            "stress chronic, low recovery score, training load spike). "
+            "Returns active alerts with severity (info/warn/critical), "
+            "pattern id, German one-liner message, and evidence numbers. "
+            "Use this when the athlete reports feeling off and the "
+            "runtime context did not surface an alert, or before "
+            "agreeing to a hard session. Detection is fully "
+            "deterministic - no LLM judgement involved."
+        ),
+        handler=get_recovery_alerts,
+        parameters={
+            "type": "object",
+            "properties": {},
+        },
+        category="data",
+        display_label="Lese Recovery-Warnungen",
+    ))
