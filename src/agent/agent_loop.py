@@ -610,13 +610,19 @@ class AgentLoop:
                 "model": MODEL,
             })
 
-            # Call LLM with conversation history + tools via LiteLLM
+            # Call LLM with conversation history + tools via LiteLLM.
+            # tier="routine" is the default. To use Sonnet for a planning
+            # turn, call a higher-level service that sets tier="complex".
+            # Mid-turn switching is intentionally NOT supported here (it
+            # would invalidate the Anthropic prompt cache; see DESIGN.md).
             response = chat_completion(
                 messages=self._messages,
                 system_prompt=system_prompt,
                 tools=openai_tools if openai_tools else None,
                 temperature=AGENT_TEMPERATURE,
                 runtime_context=runtime_ctx,
+                tier="routine",
+                user_id=self._user_id,
             )
 
             # Track usage (non-blocking, fire-and-forget)
@@ -681,6 +687,8 @@ class AgentLoop:
                     system_prompt=fallback_prompt,
                     temperature=AGENT_TEMPERATURE,
                     runtime_context=runtime_ctx,
+                    tier="routine",
+                    user_id=self._user_id,
                 )
                 fb_message = fallback_response.choices[0].message
                 if fb_message.content:

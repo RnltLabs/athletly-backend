@@ -75,6 +75,8 @@ def register_meta_tools(registry: ToolRegistry, user_model):
             messages=[{"role": "user", "content": prompt}],
             system_prompt=specialist_prompts[type],
             temperature=0.3,
+            # Specialist is a single-shot leaf call: no tools, narrow task.
+            tier="subagent",
         )
 
         try:
@@ -211,6 +213,8 @@ def register_meta_tools(registry: ToolRegistry, user_model):
                 system_prompt=sub_system_prompt,
                 tools=openai_tools,
                 temperature=0.3,
+                # Subagents are leaf tasks. Always cheap, never premium.
+                tier="subagent",
             )
             if not response.choices:
                 logger.info(
