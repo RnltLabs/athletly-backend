@@ -200,23 +200,35 @@ def _render_journal(persona: Persona) -> str:
         f"- Zielzeit: {persona.goal_target_time}",
         f"- Goal-Type: {persona.goal_type}",
     ]
+    # Iter 2 Sprint I: pre-format pace decimals to mm:ss before writing
+    # the journal so the agent cannot mis-render 4.50 as "4:50/km" or
+    # 1.63 as "1:63/100m". The decimals stay on the persona for math.
+    from src.utils.pace_format import decimal_min_to_mmss
     if persona.goal_pace_min_km:
-        lines.append(f"- Goal-Pace: {persona.goal_pace_min_km:.2f} min/km")
+        goal_pace_pretty = decimal_min_to_mmss(persona.goal_pace_min_km)
+        if goal_pace_pretty:
+            lines.append(f"- Goal-Pace: {goal_pace_pretty} /km")
     lines.append("")
     if goal:
         lines += [goal, ""]
 
+    threshold_pretty = decimal_min_to_mmss(persona.threshold_pace_min_km)
     lines += [
         "## What I know about my training",
         "",
-        f"- Threshold-Pace: {persona.threshold_pace_min_km:.2f} min/km",
+        f"- Threshold-Pace: {threshold_pretty or '?'} /km",
         f"- VO2max (Garmin): {persona.estimated_vo2max:.0f}",
         f"- Wochenvolumen Ziel: {persona.weekly_volume_km:.0f} km",
     ]
     if persona.ftp_watts:
         lines.append(f"- FTP Rad: {persona.ftp_watts} W")
     if persona.swim_css_min_per_100m:
-        lines.append(f"- Schwimm-CSS: {persona.swim_css_min_per_100m:.2f} min/100m")
+        # decimal_min_to_mmss(1.63) -> "1:38" (the agent saw "1:63/100m"
+        # before this fix because the raw decimal leaked into the
+        # journal).
+        css_pretty = decimal_min_to_mmss(persona.swim_css_min_per_100m)
+        if css_pretty:
+            lines.append(f"- Schwimm-CSS: {css_pretty} /100m")
     if persona.injury_history:
         lines.append("- Verletzungshistorie:")
         for inj in persona.injury_history:

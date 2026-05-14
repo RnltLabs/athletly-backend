@@ -76,9 +76,10 @@ def _critic(model: str = "anthropic/claude-haiku-4-5-20251001") -> Critic:
 # ---------------------------------------------------------------------------
 
 
-def test_rule_ids_count_is_nine():
-    # Sprint C added pace_format_correct (was 8, now 9).
-    assert len(RULE_IDS) == 9
+def test_rule_ids_count_is_ten():
+    # Sprint C added pace_format_correct (8 -> 9). Iter 2 Sprint I
+    # added pace_comparison_directional (9 -> 10).
+    assert len(RULE_IDS) == 10
 
 
 def test_rule_ids_match_design_spec():
@@ -92,6 +93,7 @@ def test_rule_ids_match_design_spec():
         "details_before_metrics",
         "sync_then_status",
         "pace_format_correct",
+        "pace_comparison_directional",
     }
     assert set(RULE_IDS) == expected
 
@@ -105,6 +107,17 @@ def test_pace_format_correct_rule_description_loaded():
     # critic LLM can flag decimal-pace responses.
     assert "mm:ss" in _CRITIC_SYSTEM_PROMPT
     assert "4:30" in _CRITIC_SYSTEM_PROMPT or "4.50" in _CRITIC_SYSTEM_PROMPT
+
+
+def test_pace_comparison_directional_rule_description_loaded():
+    """Iter 2 Sprint I rule must be in the critic system prompt body."""
+    from src.agent.critic import _CRITIC_SYSTEM_PROMPT
+
+    assert "pace_comparison_directional" in _CRITIC_SYSTEM_PROMPT
+    # Sanity: the description references the direction rule the LLM
+    # judge must apply (faster = lower mm:ss).
+    assert "FASTER" in _CRITIC_SYSTEM_PROMPT
+    assert "compare_paces" in _CRITIC_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

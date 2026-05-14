@@ -83,6 +83,25 @@ def test_mmss_large_value():
     assert decimal_min_to_mmss(12.5) == "12:30"
 
 
+def test_mmss_lisa_css_163_is_one_thirty_eight():
+    # Iter 2 Sprint I bug: Lisa's CSS = 1.63 (decimal minutes per 100m)
+    # surfaced as "1:63/100m" in the runtime context. 1.63 min =
+    # 1 min 37.8 sec, which rounds to 1:38. The same helper that fixes
+    # run pace must also fix swim CSS - same conversion path, just a
+    # different surface.
+    assert decimal_min_to_mmss(1.63) == "1:38"
+
+
+def test_mmss_swim_css_range():
+    # Round-trip a handful of plausible CSS values. Any value with
+    # a fractional minute portion >= 1.0 is impossible mm:ss and the
+    # bug we are guarding against.
+    assert decimal_min_to_mmss(1.30) == "1:18"
+    assert decimal_min_to_mmss(1.50) == "1:30"
+    assert decimal_min_to_mmss(1.80) == "1:48"
+    assert decimal_min_to_mmss(2.00) == "2:00"
+
+
 # ---------------------------------------------------------------------------
 # decimal_min_to_hms
 # ---------------------------------------------------------------------------

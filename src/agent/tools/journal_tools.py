@@ -16,6 +16,7 @@ Five tools, one document per user:
 from __future__ import annotations
 
 import logging
+import re
 
 from src.agent.athlete_journal import (
     append_to_section,
@@ -27,6 +28,28 @@ from src.agent.tools.registry import Tool, ToolRegistry
 from src.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+# Canonical UUID v1-v5 format check. Activity rows in Supabase use the
+# uuid type; anything not matching this pattern is necessarily a
+# hallucinated id and gets rejected with a recovery hint.
+_UUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _is_uuid(value: str) -> bool:
+    """Return True iff *value* is a canonical UUID string.
+
+    Defensive: rejects None, non-strings, and anything that does not
+    match the 8-4-4-4-12 hex pattern. The point is to catch the agent
+    inventing slug-like ids ("today-easy-run-0515") before we send a
+    no-op update to Supabase.
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_UUID_PATTERN.match(value.strip()))
 
 
 def register_journal_tools(registry: ToolRegistry, user_model) -> None:
@@ -189,7 +212,34 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
         Used for context the coach wants attached to a single session:
         'knee pain during this run', 'felt great today', 'cut short due
         to weather'. Stored on activities.notes.
+
+        Defensive validation (Iter 2 Sprint I): rejects non-UUID
+        activity_id values BEFORE touching Supabase. The agent has been
+        observed synthesising slug-like ids ('today-easy-run-0515') when
+        forced to annotate without a prior get_activities call. The
+        error response carries a recovery hint so the next round can
+        self-correct.
         """
+        if not isinstance(note, str) or not note.strip():
+            return {
+                "error": "note must be a non-empty string",
+                "hint": "Provide a short free-form note describing what happened.",
+            }
+        if not _is_uuid(activity_id):
+            return {
+                "error": (
+                    f"activity_id '{activity_id}' is not a valid UUID. "
+                    f"Synthetic ids like 'today-easy-run-0515' are not "
+                    f"accepted."
+                ),
+                "hint": (
+                    "Call get_activities(limit=5) first to find the real "
+                    "activity_id (uuid format, e.g. "
+                    "'4f3c1b2a-90de-4abc-9123-fedcba987654'). Then retry "
+                    "annotate_activity with that id."
+                ),
+            }
+
         from src.db.client import get_supabase
 
         client = get_supabase()
@@ -205,11 +255,17 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
         name="annotate_activity",
         description=(
             "Attach a free-form note to a specific activity (pain, RPE, "
-            "weather, cut-short reason). Use when athlete reports something "
-            "about a specific session or coach spots a trend-worthy "
-            "observation. Follow-up: append_to_journal('Open Threads') if "
-            "needs next-session check; update_journal_section('What I know...') "
-            "for a lasting fitness fact. activity_id is the UUID of the row."
+            "weather, cut-short reason). "
+            "REQUIRED FIRST STEP: call get_activities(limit=5) to find "
+            "the real activity_id. NEVER pass a synthetic id like "
+            "'today-easy-run-0515' or 'last-run' - the handler rejects "
+            "non-UUID ids and the call will fail. activity_id must be a "
+            "canonical UUID (8-4-4-4-12 hex). "
+            "Use when athlete reports something about a specific session "
+            "or coach spots a trend-worthy observation. Follow-up: "
+            "append_to_journal('Open Threads') if needs next-session "
+            "check; update_journal_section('What I know...') for a "
+            "lasting fitness fact."
         ),
         handler=annotate_activity,
         parameters={
@@ -217,7 +273,11 @@ def register_journal_tools(registry: ToolRegistry, user_model) -> None:
             "properties": {
                 "activity_id": {
                     "type": "string",
-                    "description": "UUID of the activity row to annotate.",
+                    "description": (
+                        "Canonical UUID of the activity row to annotate "
+                        "(8-4-4-4-12 hex). Find it via "
+                        "get_activities(limit=5) - never synthesise it."
+                    ),
                 },
                 "note": {
                     "type": "string",

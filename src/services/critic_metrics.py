@@ -28,6 +28,7 @@ RULE_IDS: tuple[str, ...] = (
     "details_before_metrics",
     "sync_then_status",
     "pace_format_correct",
+    "pace_comparison_directional",
 )
 
 
