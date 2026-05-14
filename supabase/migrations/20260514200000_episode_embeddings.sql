@@ -1,3 +1,5 @@
+SET search_path TO public, extensions;
+
 -- Episode Replay: semantic retrieval over past coaching episodes.
 --
 -- Adds:

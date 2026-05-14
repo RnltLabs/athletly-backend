@@ -1,3 +1,5 @@
+SET search_path TO public, extensions;
+
 -- ============================================================================
 -- Feature 3: Reflexion Loop
 --
