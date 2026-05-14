@@ -173,54 +173,6 @@ def _build_plan_preview(plan: dict, plan_id: str | int | None) -> dict:
     }
 
 
-# Max sessions to surface back to the agent so its post-save_plan reply
-# can ground "morgen ist X" / "diese Woche steht Y" in the saved plan.
-# One week is enough for the immediate-next-session question and keeps
-# the context-window cost predictable for long-horizon plans (a 24-week
-# build may carry 100+ session dicts; we never echo them all).
-_MAX_SNAPSHOT_SESSIONS = 7
-
-
-def _build_plan_snapshot(plan: dict) -> dict:
-    """Return a compact snapshot of the saved plan for the agent.
-
-    Sprint Q: post-save_plan responses fabricated session paces and
-    distances because the tool result carried only {"saved": True,
-    "id": ...} - the agent had no source of truth for "morgen ist X"
-    in context. This snapshot surfaces start_date, focus, and the
-    first ``_MAX_SNAPSHOT_SESSIONS`` sessions (week 1) so the agent
-    can reference real session names, distances, and paces.
-
-    Keep the per-session fields tight: ``day``, ``date``, ``sport``,
-    ``name``, ``description``, ``duration_minutes``, ``intensity``.
-    No nested steps, no notes. The plan_preview card already carries
-    the rich detail for the frontend; this snapshot is text-only
-    context for the agent.
-    """
-    sessions = _coerce_sessions(plan)
-    snapshot_sessions: list[dict] = []
-    for s in sessions[:_MAX_SNAPSHOT_SESSIONS]:
-        if not isinstance(s, dict):
-            continue
-        slim = {
-            k: s.get(k)
-            for k in (
-                "day", "date", "sport", "name",
-                "description", "duration_minutes", "intensity",
-            )
-            if s.get(k) is not None
-        }
-        if slim:
-            snapshot_sessions.append(slim)
-    return {
-        "start_date": plan.get("start_date") or plan.get("period_start"),
-        "focus": plan.get("focus") or plan.get("name"),
-        "duration_weeks": plan.get("duration_weeks") or plan.get("weeks"),
-        "sessions": snapshot_sessions,
-        "total_sessions": len(sessions),
-    }
-
-
 def register_planning_tools(registry: ToolRegistry, user_model) -> None:
     """Register plan persistence and read tools."""
     _settings = get_settings()
@@ -324,15 +276,6 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
             # Surface truncation to the agent so it knows the inline card
             # only shows the first N sessions; the saved plan is full.
             result["truncated_in_ui"] = True
-
-        # Sprint Q: surface a plan_snapshot (week-1 sessions) so the
-        # agent's post-save_plan reply can ground "morgen ist X" /
-        # "diese Woche steht Y an" in the actual saved structure
-        # instead of fabricating session details from training-knowledge.
-        # We bound the snapshot to at most 7 entries (one week) to keep
-        # the context-window cost predictable across long-horizon plans
-        # where the full sessions[] expansion may contain 100+ entries.
-        result["plan_snapshot"] = _build_plan_snapshot(plan)
 
         # The agent loop strips ``_ui_component`` before the result goes
         # back to the LLM and forwards it as an SSE ``ui_component`` event

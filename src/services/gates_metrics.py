@@ -16,18 +16,14 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-# The registered gate ids. Kept in sync with
-# ``src.agent.response_gates.GATES``; a module-level assert in that file
-# enforces the agreement. Sprint Q adds ``post_save_plan_grounded``
-# which fires when the agent fabricates session specifics after
-# ``save_plan`` was called this turn.
+# The 5 gate ids. Kept in sync with ``src.agent.response_gates.GATES``;
+# a module-level assert in that file enforces the agreement.
 GATE_IDS: tuple[str, ...] = (
     "temporal_freshness",
     "injury_persistence",
     "stats_grounding",
     "holistic_alert",
     "language_mirror",
-    "post_save_plan_grounded",
 )
 
 # Possible outcome values per record. Anything else is silently dropped

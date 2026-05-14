@@ -125,9 +125,6 @@ class Settings(BaseSettings):
     response_gate_stats_grounding: bool = True
     response_gate_holistic_alert: bool = True
     response_gate_language_mirror: bool = True
-    # Sprint Q: after save_plan returns, the agent's reply must
-    # reference only sessions actually in the saved plan_snapshot.
-    response_gate_post_save_plan_grounded: bool = True
 
     # -- Product Recommendations / Affiliate -----------------------------------
     amazon_affiliate_tag: str = ""

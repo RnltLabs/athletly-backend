@@ -1390,7 +1390,6 @@ class AsyncAgentLoop(AgentLoop):
                     response_text=final_text,
                     user_message=user_message,
                     tool_names=unique_tools,
-                    saved_plan=_extract_saved_plan(outcome),
                     emit_fn=emit_fn,
                 )
                 outcome.response_text = final_text
@@ -1781,7 +1780,6 @@ class AsyncAgentLoop(AgentLoop):
         user_message: str,
         tool_names: list[str],
         emit_fn: Callable,
-        saved_plan: dict | None = None,
     ) -> str:
         """Run the deterministic response gates over *response_text*.
 
@@ -1820,7 +1818,6 @@ class AsyncAgentLoop(AgentLoop):
             tools_called_this_turn=tuple(tool_names),
             tools_called_recent=_flatten_recent_tools(self._recent_tools_window, tool_names),
             runtime_context_alerts=tuple(self._active_alert_ids),
-            saved_plan=saved_plan or {},
         )
 
         try:
@@ -2324,32 +2321,6 @@ def _unique_tool_names(result: "AgentResult") -> list[str]:
             continue
         seen.append(name)
     return seen
-
-
-def _extract_saved_plan(result: "AgentResult") -> dict:
-    """Return the most recent save_plan tool result as a dict.
-
-    Walks ``result.turns`` looking for a ``tool_call`` whose
-    ``tool_name`` is ``save_plan`` and parses its JSON content. Returns
-    the empty dict when save_plan did not run this turn or the
-    payload cannot be parsed. The dict is consumed by the
-    ``post_save_plan_grounded`` gate which inspects its
-    ``plan_snapshot.sessions`` field.
-    """
-    last: dict = {}
-    for turn in result.turns:
-        if getattr(turn, "tool_name", None) != "save_plan":
-            continue
-        raw = getattr(turn, "content", None)
-        if not isinstance(raw, str) or not raw:
-            continue
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(parsed, dict):
-            last = parsed
-    return last
 
 
 def _progress_to_sse_data(
