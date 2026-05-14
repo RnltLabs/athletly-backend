@@ -19,6 +19,14 @@ _RETRY_HINT = " [Analyze the error and try a different approach.]"
 # every turn). Everything else is deferred and fetched via tool_search
 # on demand. Keep this list tight - each entry adds tokens to every call.
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
+    # ------------------------------------------------------------------
+    # Rule: every tool that is named verbatim in the STATIC system prompt
+    # MUST live in this set. If the prompt says "call save_plan" but the
+    # schema is deferred, the agent sees only the name and either skips
+    # the call or invents the params. The test in
+    # tests/test_core_tools_coverage.py enforces this contract.
+    # ------------------------------------------------------------------
+
     # Identity / memory (most-used)
     "update_journal_section",
     "append_to_journal",
@@ -37,6 +45,11 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # Read context (cheap, often needed)
     "get_activities",
     "get_athlete_profile",
+    # Activity detail: STRICT rule "MUST first call get_activity_details"
+    # before discussing VO2max / threshold pace / FTP / per-session metrics.
+    # Without the schema the model cannot construct the call and either
+    # skips the rule or falls back to estimation.
+    "get_activity_details",
     # Provider freshness: the STRICT proactive-sync rule in system_prompt
     # tells the agent to call these when the athlete reports a
     # just-completed activity. Without the schema visible, the model
@@ -44,10 +57,29 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # (e.g. missing mode="auto"). Always-loaded fixes both.
     "sync_garmin_data",
     "get_provider_status",
+    # Subagent spawn: referenced multiple times in the prompt for race
+    # research and deeper context fetches. Cannot afford the extra
+    # tool_search round-trip every time the model considers research.
+    "spawn_subagent",
     # Skill invocation - opens any other workflow
     "invoke_skill",
     # Tool discovery - lets the agent find deferred tools
     # (the tool_search helper itself is added at request build time)
+
+    # ------------------------------------------------------------------
+    # Onboarding-only tools. These are only registered when
+    # get_default_tools(context="onboarding") runs, so listing them here
+    # is a no-op outside onboarding. Listed for completeness so the
+    # coverage test passes and so they get full schema visibility when
+    # the onboarding playbook references them by name.
+    # ------------------------------------------------------------------
+    "ask_choice",
+    "ask_date",
+    "ask_number",
+    "complete_onboarding",
+    "request_garmin_connect",
+    "recommend_products",
+    "define_config",
 })
 
 
