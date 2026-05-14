@@ -285,6 +285,10 @@ class GarminProvider(Provider):
                         "resting_heart_rate": _int(stats.get("restingHeartRate")),
                         "steps": _int(stats.get("totalSteps")),
                         "stress_avg": _int(stats.get("averageStressLevel")),
+                        # NOTE: `stats.hrvSummary` is NOT populated by the
+                        # daily get_stats endpoint on most Garmin accounts.
+                        # We fetch the real HRV summary via the dedicated
+                        # get_hrv_data() call below and overwrite this.
                         "hrv_avg": (stats.get("hrvSummary") or {}).get("weeklyAvg"),
                         "body_battery_high": _int(stats.get("bodyBatteryChargedValue")),
                         "body_battery_low": _int(stats.get("bodyBatteryDrainedValue")),
@@ -292,6 +296,60 @@ class GarminProvider(Provider):
                         "total_calories": _int(stats.get("totalKilocalories")),
                         "floors_climbed": _int(stats.get("floorsAscended")),
                     }
+
+                    # HRV: real source is the dedicated endpoint. Prefer
+                    # lastNightAvg (last night's resting HRV), fall back to
+                    # weeklyAvg if last night is not yet available.
+                    try:
+                        hrv = garmin.get_hrv_data(day)
+                        if isinstance(hrv, dict):
+                            summary = hrv.get("hrvSummary") or {}
+                            hrv_value = (
+                                summary.get("lastNightAvg")
+                                or summary.get("weeklyAvg")
+                            )
+                            if hrv_value is not None:
+                                row["hrv_avg"] = _int(hrv_value)
+                            # Garmin's HRV status maps cleanly onto a
+                            # recovery readiness score:
+                            #   BALANCED  -> 75
+                            #   UNBALANCED -> 50
+                            #   LOW       -> 30
+                            #   POOR      -> 20
+                            #   UNKNOWN/None -> leave null
+                            status = summary.get("status")
+                            hrv_status_score = {
+                                "BALANCED": 75,
+                                "UNBALANCED": 50,
+                                "LOW": 30,
+                                "POOR": 20,
+                            }.get(status)
+                            if hrv_status_score is not None:
+                                row["recovery_score"] = hrv_status_score
+                    except Exception:
+                        logger.debug("HRV unavailable for %s", day, exc_info=True)
+
+                    # Training Readiness is Garmin's first-class "recovery"
+                    # surface (newer watches). When present it overrides
+                    # the HRV-status heuristic above because it already
+                    # blends HRV + sleep + load + stress into a 0-100 score.
+                    try:
+                        if hasattr(garmin, "get_training_readiness"):
+                            tr = garmin.get_training_readiness(day)
+                            if isinstance(tr, list) and tr:
+                                tr = tr[0]
+                            if isinstance(tr, dict):
+                                tr_score = tr.get("score") or tr.get(
+                                    "trainingReadinessScore"
+                                )
+                                if tr_score is not None:
+                                    row["recovery_score"] = _int(tr_score)
+                    except Exception:
+                        logger.debug(
+                            "Training readiness unavailable for %s",
+                            day,
+                            exc_info=True,
+                        )
 
                     try:
                         spo2 = garmin.get_spo2_data(day)
