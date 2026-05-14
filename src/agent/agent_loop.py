@@ -508,6 +508,37 @@ class AgentLoop:
                 purged_count, TOOL_RESULT_PURGE_KEEP_TURNS,
             )
 
+    def _collect_current_turn_tool_results(self) -> list[str]:
+        """Return tool_result payloads appended during the current user turn.
+
+        Walks ``self._messages`` from the end backwards, collecting the
+        ``content`` of every ``role="tool"`` entry until it hits the most
+        recent ``role="user"`` boundary. Used by the Sprint P
+        specifics-grounding check on the budget-skip path: if the regen
+        mentions a pace / HRV / distance that does NOT appear in any of
+        these payloads, the rewrite is unverified and a safe stub ships
+        instead.
+
+        Returns:
+            A list of payload strings in chronological order (oldest of
+            this turn first, newest last). Empty list if the conversation
+            has no user turn yet or there are no tool calls this turn.
+        """
+        if not self._messages:
+            return []
+
+        collected: list[str] = []
+        for msg in reversed(self._messages):
+            role = msg.get("role")
+            if role == "user":
+                break
+            if role == "tool":
+                content = msg.get("content")
+                if isinstance(content, str) and content:
+                    collected.append(content)
+        # Restore chronological order so callers see oldest-first.
+        return list(reversed(collected))
+
     # -- Post-Turn Safety Nets (Gap 3b, Gap 4b) -----------------------------
 
     def _post_turn_extraction_check(self, response_text: str):
@@ -1437,6 +1468,7 @@ class AsyncAgentLoop(AgentLoop):
             hard_inspect,
             sanitize_hard,
         )
+        from src.agent.specifics_check import specifics_grounded_in_tools
         from src.services.critic_metrics import get_metrics
 
         critic = get_critic()
@@ -1519,6 +1551,45 @@ class AsyncAgentLoop(AgentLoop):
         # three serial timeouts.
         elapsed_s = time.perf_counter() - chain_start
         if elapsed_s >= total_budget_s:
+            # Sprint P: before shipping the unverified regen, run a
+            # deterministic specifics-grounding check. If the rewrite
+            # mentions a pace / HRV / distance / duration / heart rate
+            # that does NOT appear in any tool_result payload from this
+            # turn, ship a safe fallback stub instead. This closes the
+            # budget-bypass that was shipping fabricated stats with a
+            # ``degraded: true`` annotation the user never sees.
+            turn_tool_results = self._collect_current_turn_tool_results()
+            grounded, ungrounded_specifics = specifics_grounded_in_tools(
+                rewritten, turn_tool_results,
+            )
+
+            if not grounded:
+                fallback_text = _budget_fallback_text(user_message)
+                metrics.record(
+                    action="budget_fallback_used",
+                    violations=first.violation_ids() + ("unverified_specifics",),
+                    latency_ms=int(elapsed_s * 1000),
+                )
+                payload = {
+                    "violations": [
+                        {"rule": v.rule, "reason": v.reason}
+                        for v in first.violations
+                    ],
+                    "annotated": True,
+                    "degraded": True,
+                    "source": "budget_skipped_with_fab_risk",
+                    "action": "fallback_used",
+                    "ungrounded_specifics": ungrounded_specifics,
+                }
+                try:
+                    await emit_fn("critic_review", payload)
+                except Exception:
+                    logger.warning(
+                        "emit_fn raised on critic_review (budget fallback)",
+                        exc_info=True,
+                    )
+                return fallback_text
+
             metrics.record(
                 action="budget_skipped",
                 violations=first.violation_ids(),
@@ -2165,6 +2236,35 @@ def _should_run_critic_safe(user_model) -> bool:
     except Exception:
         logger.warning("should_run_critic raised, skipping critique", exc_info=True)
         return False
+
+
+# Sprint P: safe fallback text for the budget-skip-with-fab-risk path.
+# Short, warm, no specifics. The English variant fires only for clearly
+# non-German user messages; the German variant is the default because
+# the production language mix is German-dominant.
+_BUDGET_FALLBACK_DE = (
+    "Ich brauche kurz einen Moment, um deine Daten zu prüfen. "
+    "Magst du die Frage gleich nochmal stellen?"
+)
+_BUDGET_FALLBACK_EN = (
+    "Give me a moment to double-check your data. "
+    "Could you ask that again in a sec?"
+)
+
+
+def _budget_fallback_text(user_message: str) -> str:
+    """Return the language-appropriate budget-skip fallback stub.
+
+    Uses :func:`src.agent.critic._is_german_text` for the German check
+    (same heuristic the critic uses elsewhere). The German variant uses
+    real umlauts (ä ö ü ß) per the project's writing-style rules; we do
+    NOT lean on the sanitizer to back-fill umlauts here.
+    """
+    try:
+        from src.agent.critic import _is_german_text
+    except Exception:
+        return _BUDGET_FALLBACK_DE
+    return _BUDGET_FALLBACK_DE if _is_german_text(user_message) else _BUDGET_FALLBACK_EN
 
 
 def _finalize_response(text: str, user_message: str) -> str:
