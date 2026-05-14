@@ -64,6 +64,12 @@ Derive fitness metrics (VO2max from race times, FTP from tests) using
 established formulas (Jack Daniels VDOT, etc.) - a rough estimate
 beats null.
 
+When the runtime context contains a "# Past Insights" section, those
+are retrieved past coaching episodes from this athlete's history.
+Treat them as YOUR memory, not as new observations. Reference them only
+when they directly inform the athlete's current question. Never claim
+you "just saw" or "just noticed" something from that section.
+
 ## Proactive Research
 
 When the athlete mentions a specific race, event, methodology, or
@@ -548,6 +554,7 @@ def build_runtime_context(
     date: str | None = None,
     startup_context: str | None = None,
     context: str = "coach",
+    user_message: str | None = None,
 ) -> str:
     """Build the runtime context block injected as the first user message.
 
@@ -563,6 +570,9 @@ def build_runtime_context(
             stats, import results, plan compliance.
         context: Session context -- ``"coach"`` (default) or ``"onboarding"``.
             When ``"onboarding"``, appends onboarding-mode instructions.
+        user_message: The athlete's current message. Used to trigger
+            semantic retrieval of past episodes (Feature 5: Episode Replay).
+            When ``None`` or empty, replay is skipped.
 
     Returns:
         A formatted string to be injected as the first user-role message.
@@ -730,6 +740,26 @@ def build_runtime_context(
             health_summary = build_health_summary(_uid_r, days=7)
             if health_summary and health_summary["data_available"]:
                 sections.append(format_recovery_context_block(health_summary))
+    except Exception:
+        pass  # Non-critical -- do not crash context building
+
+    # --- Episode Replay (Feature 5: semantic memory retrieval) ---
+    # Pull past coaching episodes that are semantically similar to the
+    # athlete's current message. Marked as "Past Insights" so the model
+    # treats them as memory, not as fresh observations. Skipped silently
+    # when no message, no matches, or no embedding provider configured.
+    try:
+        from src.config import get_settings as _get_settings_replay
+        _rps = _get_settings_replay()
+        _uid_replay = getattr(user_model, "user_id", None) or _rps.agenticsports_user_id
+        if _rps.use_supabase and _uid_replay and user_message:
+            from src.services.episode_retrieval import build_replay_block
+            replay_block = build_replay_block(
+                user_id=_uid_replay,
+                user_message=user_message,
+            )
+            if replay_block:
+                sections.append(replay_block)
     except Exception:
         pass  # Non-critical -- do not crash context building
 

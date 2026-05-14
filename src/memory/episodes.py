@@ -123,7 +123,12 @@ def generate_reflection(
 
 
 def store_episode(episode: dict, storage_dir: str | Path | None = None) -> Path:
-    """Store a reflection episode as JSON. Returns the file path."""
+    """Store a reflection episode as JSON. Returns the file path.
+
+    When an embedding provider is configured the episode is augmented with
+    an ``embedding`` field so the file-backed path stays comparable to the
+    Supabase-backed path. Failure is non-fatal.
+    """
     dest = Path(storage_dir) if storage_dir else EPISODES_DIR
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -136,6 +141,26 @@ def store_episode(episode: dict, storage_dir: str | Path | None = None) -> Path:
         ts = datetime.now().strftime("%H%M%S_%f")
         filename = f"{ep_id}_{ts}.json"
         path = dest / filename
+
+    # Best-effort embedding for parity with the DB path. Skipped silently
+    # when no provider is configured.
+    if "embedding" not in episode:
+        try:
+            from src.services.embeddings import embed_text
+
+            text_parts = [str(episode.get("summary", "")).strip()]
+            obs = episode.get("key_observations") or []
+            lessons = episode.get("lessons") or []
+            insights = episode.get("insights") or []
+            for src_list in (obs, lessons, insights):
+                if src_list:
+                    text_parts.extend(str(x) for x in src_list[:5])
+            text = "\n".join(p for p in text_parts if p)
+            vec = embed_text(text) if text else None
+            if vec is not None:
+                episode = {**episode, "embedding": vec}
+        except Exception:
+            pass  # embedding is optional - never block storage
 
     path.write_text(json.dumps(episode, indent=2))
     return path

@@ -87,6 +87,18 @@ class Settings(BaseSettings):
     # -- Data (legacy file-based, kept for gradual migration) -----------------
     data_dir: str = "data"
 
+    # -- Episode Replay (Feature 5: semantic memory retrieval) ----------------
+    # Embedding provider override. Empty = auto-select (Gemini if key, else
+    # OpenAI). Accepts ``gemini/text-embedding-004`` or
+    # ``openai/text-embedding-3-small``.
+    embedding_model: str = ""
+    # Default top-K retrieved episodes injected into runtime context.
+    episode_replay_top_k: int = 3
+    # Minimum cosine similarity to consider an episode a hit.
+    episode_replay_threshold: float = 0.55
+    # Hard cap on tokens contributed by the Past Insights block.
+    episode_replay_token_budget: int = 800
+
     @property
     def fallback_models(self) -> list[str]:
         """Parse comma-separated fallback model string into a list."""

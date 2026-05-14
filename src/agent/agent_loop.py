@@ -569,6 +569,7 @@ class AgentLoop:
             date=None,
             startup_context=self.startup_context,
             context=self.context,
+            user_message=user_message,
         )
 
         # If the last loaded message is "user", insert a synthetic assistant
