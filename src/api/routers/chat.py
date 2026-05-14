@@ -222,6 +222,15 @@ def _make_sse_event(event_type: str, data: dict) -> ServerSentEvent:
             ui_id=data.get("id", ""),
             props=data.get("props") or {},
         )
+    if event_type == "critic_review":
+        # Constitutional critique annotation (Feature 2). Emitted only
+        # when the critic flagged a violation and the regenerated draft
+        # still violated. Frontend should surface in a debug/admin panel,
+        # not in the main chat thread.
+        return ServerSentEvent(
+            event="critic_review",
+            data=json.dumps(data, ensure_ascii=False),
+        )
     return ServerSentEvent(
         event=event_type,
         data=json.dumps(data, ensure_ascii=False),

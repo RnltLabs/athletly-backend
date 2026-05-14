@@ -77,6 +77,20 @@ class Settings(BaseSettings):
     # -- Tool output budget (tokens) ------------------------------------------
     tool_output_budget_default: int = 2000
 
+    # -- Constitutional critique (Feature 2) ----------------------------------
+    # Master switch. When False, the critic LLM call is skipped for ALL users
+    # regardless of tier. Default off until the feature is qualified in prod.
+    critic_enabled: bool = False
+    # Critic model. MUST be Haiku-class for cost; we hard-block Sonnet IDs in
+    # src/agent/critic.py to make the cost guarantee explicit.
+    critic_model: str = "anthropic/claude-haiku-4-5-20251001"
+    # Hard timeout on a single critic API call. Above this we fail-open and
+    # accept the coach response unchanged so the user never waits.
+    critic_timeout_s: float = 1.5
+    # Dev override: when True, the Pro-tier gate is bypassed and the critic
+    # runs for every user. Use CRITIC_FORCE_PRO=1 locally for demos.
+    critic_force_pro: bool = False
+
     # -- Product Recommendations / Affiliate -----------------------------------
     amazon_affiliate_tag: str = ""
     amazon_pa_api_access_key: str = ""
