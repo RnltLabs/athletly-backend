@@ -69,6 +69,11 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # would force a tool_search detour exactly when the agent needs
     # the schema most.
     "get_recovery_alerts",
+    # Sport math: STRICT SPORT MATH DISCIPLINE rule tells the agent
+    # to call this for ANY FTP / NP / VDOT / CSS / Karvonen / pace
+    # calculation. Deferring would force a tool_search round-trip
+    # exactly when the math discipline matters most (Lisa-bug fix).
+    "compute_sport_math",
     # Tool discovery - lets the agent find deferred tools
     # (the tool_search helper itself is added at request build time)
 
@@ -203,6 +208,7 @@ def get_restricted_tools(user_model) -> ToolRegistry:
     from src.agent.tools.data_tools import register_data_tools
     from src.agent.tools.analysis_tools import register_analysis_tools
     from src.agent.tools.calc_tools import register_calc_tools
+    from src.agent.tools.compute_tools import register_compute_tools
     from src.agent.tools.health_tools import register_health_tools
     from src.agent.tools.health_trend_tools import register_health_trend_tools
     from src.agent.tools.health_inventory_tools import register_health_inventory_tools
@@ -220,6 +226,7 @@ def get_restricted_tools(user_model) -> ToolRegistry:
     register_health_inventory_tools(registry)
     register_analysis_tools(registry)
     register_calc_tools(registry, user_model)
+    register_compute_tools(registry, user_model)
 
     return registry
 
@@ -246,6 +253,7 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     from src.agent.tools.meta_tools import register_meta_tools
     from src.agent.tools.config_tools import register_config_tools
     from src.agent.tools.calc_tools import register_calc_tools
+    from src.agent.tools.compute_tools import register_compute_tools
 
     from src.agent.tools.health_tools import register_health_tools
     from src.agent.tools.health_trend_tools import register_health_trend_tools
@@ -282,6 +290,7 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_meta_tools(registry, user_model)
     register_config_tools(registry, user_model)
     register_calc_tools(registry, user_model)
+    register_compute_tools(registry, user_model)
     register_checkpoint_tools(registry, user_model)
     register_product_tools(registry, user_model)
     register_garmin_tools(registry, user_model)
