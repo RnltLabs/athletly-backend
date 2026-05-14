@@ -108,6 +108,17 @@ class Settings(BaseSettings):
     # not rely on this LLM call, so it is safe to use a wider budget here.
     critic_timeout_s: float = 4.0
 
+    # -- Deterministic response gates (Sprint D) ------------------------------
+    # Master switch for the entire gate layer. When False the gates are
+    # skipped entirely (zero overhead). Per-gate flags below let us roll
+    # back individual gates without a deploy.
+    response_gates_enabled: bool = True
+    response_gate_temporal_freshness: bool = True
+    response_gate_injury_persistence: bool = True
+    response_gate_stats_grounding: bool = True
+    response_gate_holistic_alert: bool = True
+    response_gate_language_mirror: bool = True
+
     # -- Product Recommendations / Affiliate -----------------------------------
     amazon_affiliate_tag: str = ""
     amazon_pa_api_access_key: str = ""
