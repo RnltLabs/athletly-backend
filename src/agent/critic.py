@@ -50,8 +50,9 @@ _RULE_DESCRIPTIONS: dict[str, str] = {
         "no_markdown: response_text MUST NOT contain Markdown formatting. "
         "No **bold**, no __bold__, no *italic*, no # heading at line start.",
     "umlauts":
-        "umlauts: if response_text is German, real umlauts MUST be used "
-        "(ae oe ue ss). ASCII transliteration (ae oe ue ss) is forbidden.",
+        "umlauts: if response_text is German, real umlaut characters MUST "
+        "be used (ä ö ü ß). ASCII transliteration (ae oe ue ss) is "
+        "forbidden.",
     "no_fabricated_stats":
         "no_fabricated_stats: numeric stats (pace, distance, HR, power, "
         "VO2max) for a specific activity are allowed ONLY if tools_called "
