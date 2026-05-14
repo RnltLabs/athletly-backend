@@ -46,8 +46,11 @@ async def critic_stats() -> dict:
 
     Returns:
         Dict with action rates (accept / regenerate / regenerate_failed /
-        critic_error), per-rule violation counts over the last ~500
-        critic calls, and the average critic latency in milliseconds.
+        critic_error / budget_skipped), per-rule violation counts over
+        the last ~500 critic calls, and the average critic latency in
+        milliseconds. ``budget_skipped`` is the count of chains that
+        exceeded ``critic_total_budget_s`` before the second-pass LLM
+        call and shipped the rewrite annotated as degraded.
     """
     return get_critic_metrics().summary()
 

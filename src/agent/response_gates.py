@@ -606,40 +606,56 @@ def needs_tool_forcing(failures: tuple[GateResult, ...]) -> bool:
 
 
 _FORCE_PREAMBLE = (
-    "SYSTEM REMINDER: Your previous answer failed deterministic policy "
-    "gates that require tool calls before responding. Do not apologise. "
-    "Gather the missing data with the tools listed, then re-answer the "
-    "athlete using only real results."
+    "SYSTEM REMINDER: Your previous answer to the athlete was helpful "
+    "in substance, but it skipped a required tool call. Keep the "
+    "helpful coaching content of your previous draft. Use the tools "
+    "listed below to GROUND that answer in real data, then re-deliver "
+    "the same advice with the real numbers (or with a one-line caveat "
+    "if the tool returns nothing usable). Do NOT replace your draft "
+    "with a deflection like \"ich brauche zuerst Garmin-Daten\", "
+    "\"please log in\", or \"ich habe keine Daten\": the athlete "
+    "already received concrete advice and is waiting for the grounded "
+    "version of it, not a request for access."
 )
 
 _FORCE_FRAGMENTS: dict[str, str] = {
     "temporal_freshness": (
         "The athlete just told you about a completed activity. "
         "REQUIRED: call sync_garmin_data, then get_provider_status, "
-        "then get_activities, before re-answering. Quote only metrics "
-        "that come back from get_activities."
+        "then get_activities, so you can ground your answer in the "
+        "actual session. Keep the coaching takeaways from your "
+        "previous draft; only swap any guessed metrics for the real "
+        "ones from get_activities. If the activity is not yet "
+        "available, acknowledge that in one sentence and still deliver "
+        "your coaching advice."
     ),
     "injury_persistence": (
         "The athlete reported a body issue (Schmerz, Zwicken, Knie, "
         "Wadenheber, oder ähnlich). REQUIRED: call annotate_activity "
         "on the latest run AND append_to_journal(section=\"Open "
-        "Threads\", ...) so the next session remembers. Then re-answer "
-        "with empathy and a concrete adjustment."
+        "Threads\", ...) so the next session remembers. Then re-deliver "
+        "the coaching advice from your previous draft (the empathy, "
+        "the concrete adjustment, the pause / Reduktion / leichter-"
+        "Tipp). Do not withhold the advice behind \"ich brauche "
+        "Daten\": the athlete needs the help now."
     ),
     "stats_grounding": (
         "Your previous answer quoted specific numbers (HR, pace, "
         "distance, duration, recovery) with no read-tool to ground "
         "them. REQUIRED: call get_activities (or get_activity_details "
-        "or get_health_summary if the question is about health) before "
-        "answering. Quote only numbers that come back from the tool. "
-        "If the tool returns nothing relevant, say so plainly instead "
-        "of inventing data."
+        "or get_health_summary if the question is about health) so "
+        "the numbers in your answer are real. Keep the surrounding "
+        "coaching content. If the tool returns nothing relevant, say "
+        "so in one sentence and drop the unverified numbers, but keep "
+        "the qualitative advice."
     ),
 }
 
 _FORCE_CLOSER = (
-    "Call the tools now. The athlete is waiting. Do not skip tools. "
-    "Do not invent stats."
+    "Call the tools now, then re-answer. Preserve your earlier "
+    "coaching content. Do not invent stats. Do not deflect with "
+    "\"ich brauche zuerst ...\" or \"please log in\" if your previous "
+    "draft already gave the athlete a substantive answer."
 )
 
 
