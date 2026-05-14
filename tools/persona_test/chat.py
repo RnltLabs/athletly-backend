@@ -323,9 +323,11 @@ def _render_event(
         args_short = _short_args(args)
         sys.stdout.write(f"[tool] {name}({args_short})\n")
         sys.stdout.flush()
-        if trace is not None and event_type == "tool_call":
-            # Only count actual tool calls in the evidence trace, not hints
-            # (hints are speculative pre-call markers).
+        if trace is not None and event_type == "tool_hint":
+            # The real SSE protocol only emits ``tool_hint`` over the wire
+            # (see ``src/api/sse.py``). ``tool_call`` is an internal trace
+            # event in ``src/agent/agent_loop.py`` and never reaches us, so
+            # we populate the evidence trace from ``tool_hint`` instead.
             trace.tools_called.append((name, args if isinstance(args, dict) else {}))
         return
 

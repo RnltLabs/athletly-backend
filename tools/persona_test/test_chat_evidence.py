@@ -4,8 +4,10 @@ The EVIDENCE TRACE block is consumed verbatim by other persona-test agents,
 so the shape must stay stable. These tests assert:
 
 1. session_id is captured from the ``session_start`` event.
-2. tools_called is a Python-list-like rendering of ordered tool_call events
-   with compact args.
+2. tools_called is a Python-list-like rendering of ordered tool_hint events
+   with compact args. ``tool_hint`` is the actual SSE event emitted by
+   ``src/api/sse.py``; the agent-internal ``tool_call`` trace event never
+   reaches the wire.
 3. response_text_verbatim matches the joined message event texts exactly
    (no truncation, multi-line preserved).
 4. The usage line is present with the documented keys.
@@ -35,13 +37,15 @@ def _build_trace_from_events(events: list[tuple[str, dict]]) -> EvidenceTrace:
     """Replay a fake SSE event sequence into an EvidenceTrace.
 
     Pure dataclass population: no httpx, no I/O. Mirrors what ``_render_event``
-    does for the trace, so we can test the renderer in isolation.
+    does for the trace, so we can test the renderer in isolation. ``tool_hint``
+    is the wire event emitted by ``src/api/sse.py`` and is the only event we
+    count toward ``tools_called``.
     """
     trace = EvidenceTrace()
     for event_type, payload in events:
         if event_type == "session_start":
             trace.session_id = payload.get("session_id")
-        elif event_type == "tool_call":
+        elif event_type == "tool_hint":
             trace.tools_called.append(
                 (payload.get("name", "?"), payload.get("args") or {})
             )
@@ -61,8 +65,8 @@ def test_evidence_block_basic_shape() -> None:
     trace = _build_trace_from_events(
         [
             ("session_start", {"session_id": "4e701f74-6790-4ac0-8aea-fd3f87875d96"}),
-            ("tool_call", {"name": "get_activities", "args": {"limit": 10}}),
-            ("tool_call", {"name": "sync_garmin_data", "args": {"mode": "auto"}}),
+            ("tool_hint", {"name": "get_activities", "args": {"limit": 10}}),
+            ("tool_hint", {"name": "sync_garmin_data", "args": {"mode": "auto"}}),
             (
                 "message",
                 {"text": "Sehe deinen 10er von heute frueh, 10.02 km in 50:14."},
@@ -105,13 +109,13 @@ def test_evidence_block_basic_shape() -> None:
 
 
 def test_evidence_block_tools_called_preserves_order() -> None:
-    """tools_called is the ordered tool_call list, not a set."""
+    """tools_called is the ordered tool_hint list, not a set."""
     trace = _build_trace_from_events(
         [
             ("session_start", {"session_id": "sid"}),
-            ("tool_call", {"name": "A", "args": {}}),
-            ("tool_call", {"name": "B", "args": {}}),
-            ("tool_call", {"name": "A", "args": {}}),
+            ("tool_hint", {"name": "A", "args": {}}),
+            ("tool_hint", {"name": "B", "args": {}}),
+            ("tool_hint", {"name": "A", "args": {}}),
             ("message", {"text": "ok"}),
             ("usage", {"input_tokens": 1, "output_tokens": 1, "model": "m"}),
         ]
@@ -187,7 +191,7 @@ def test_evidence_block_no_markdown_formatting() -> None:
     trace = _build_trace_from_events(
         [
             ("session_start", {"session_id": "sid"}),
-            ("tool_call", {"name": "foo", "args": {}}),
+            ("tool_hint", {"name": "foo", "args": {}}),
             ("message", {"text": "Antwort."}),
             ("usage", {"input_tokens": 1, "output_tokens": 1, "model": "m"}),
         ]
@@ -290,10 +294,10 @@ def test_iter_sse_plus_render_event_populates_trace(monkeypatch) -> None:
         "event: session_start\n"
         'data: {"session_id": "sid-abc"}\n'
         "\n"
-        "event: tool_call\n"
+        "event: tool_hint\n"
         'data: {"name": "get_activities", "args": {"limit": 5}}\n'
         "\n"
-        "event: tool_call\n"
+        "event: tool_hint\n"
         'data: {"name": "sync_garmin_data", "args": {"mode": "auto"}}\n'
         "\n"
         "event: message\n"
@@ -354,3 +358,83 @@ def test_iter_sse_plus_render_event_populates_trace(monkeypatch) -> None:
         line for line in out.splitlines() if line.startswith("tools_called:")
     )
     assert tools_line.index("get_activities") < tools_line.index("sync_garmin_data")
+
+
+def test_real_sse_tool_hint_payload_populates_tools_called(monkeypatch) -> None:
+    """Regression: real-shape ``tool_hint`` SSE frames must populate tools_called.
+
+    Production was shipping ``tools_called: []`` because the trace populator
+    listened on ``tool_call`` (an internal-only agent trace event) instead of
+    ``tool_hint`` (the actual wire event from ``src/api/sse.py``). This test
+    feeds a stream built from real ``SSEEmitter.tool_hint`` frames (with their
+    ``display_label`` + ``group_id`` extras) and asserts the trace populates.
+    """
+    from src.api.sse import SSEEmitter
+
+    monkeypatch.setattr(
+        "tools.persona_test.chat.write_session_id", lambda slug, sid: None
+    )
+
+    # Build a real SSE byte stream using the production emitter.
+    frames = [
+        SSEEmitter.format_event("session_start", {"session_id": "sid-real"}),
+        SSEEmitter.tool_hint(
+            name="sync_garmin_data",
+            args={"mode": "auto"},
+            display_label="Garmin syncen",
+            group_id="grp-1",
+        ),
+        SSEEmitter.tool_hint(
+            name="get_activities",
+            args={"limit": 10},
+            display_label="Aktivitaeten laden",
+            group_id="grp-1",
+        ),
+        SSEEmitter.format_event("message", {"text": "Lauf gesehen."}),
+        SSEEmitter.format_event(
+            "usage",
+            {"input_tokens": 100, "output_tokens": 20, "model": "m"},
+        ),
+        SSEEmitter.format_event("done", {}),
+    ]
+
+    # ``ServerSentEvent`` and the raw string from ``format_event`` differ in
+    # type. Coerce both to the wire-string form ``_iter_sse`` expects.
+    sse_text_parts: list[str] = []
+    for frame in frames:
+        if isinstance(frame, str):
+            sse_text_parts.append(frame)
+        else:
+            # ServerSentEvent: rebuild the wire frame from its public attrs.
+            sse_text_parts.append(
+                f"event: {frame.event}\ndata: {frame.data}\n\n"
+            )
+    sse_text = "".join(sse_text_parts)
+
+    trace = EvidenceTrace()
+    response = _FakeStreamResponse(sse_text)
+    for event_type, payload in _iter_sse(response):
+        if event_type == "done":
+            break
+        _render_event(
+            event_type,
+            payload,
+            slug="_test_real_tool_hint",
+            show_thinking=False,
+            trace=trace,
+        )
+
+    # The whole point of the regression test: tools_called must not be empty.
+    assert trace.tools_called, "tool_hint frames did not populate tools_called"
+    assert [name for name, _ in trace.tools_called] == [
+        "sync_garmin_data",
+        "get_activities",
+    ]
+
+    out = _render_evidence_block(trace)
+    tools_line = next(
+        line for line in out.splitlines() if line.startswith("tools_called:")
+    )
+    assert tools_line != "tools_called: []"
+    assert "sync_garmin_data" in tools_line
+    assert "get_activities" in tools_line
