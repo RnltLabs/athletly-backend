@@ -34,6 +34,22 @@ class Settings(BaseSettings):
     compression_model: str = "gemini/gemini-2.5-flash"
     agent_temperature: float = 0.7
 
+    # -- Hybrid model router (Feature 1) -------------------------------------
+    # Model identifiers used by src.agent.model_router. Override via env var
+    # if Anthropic publishes a new pinned snapshot.
+    haiku_model: str = "anthropic/claude-haiku-4-5-20251001"
+    sonnet_model: str = "anthropic/claude-sonnet-4-6"
+    # Extended thinking budget (in tokens) for Sonnet "complex" calls. Set
+    # to 0 to disable thinking. Haiku routine calls do not enable thinking.
+    sonnet_thinking_budget: int = 2048
+    # Default tier when user_id is absent (e.g. CLI mode). "free" is the
+    # cost-safe default; flip to "pro" for local Pro-tier dogfooding.
+    default_user_tier: str = "free"
+    # TTL (seconds) for the in-process user-tier lookup cache. 60s avoids a
+    # DB round-trip on every chat turn while still picking up tier changes
+    # within a minute.
+    user_tier_cache_ttl_seconds: int = 60
+
     # -- Supabase -------------------------------------------------------------
     supabase_url: str = ""
     supabase_anon_key: str = ""

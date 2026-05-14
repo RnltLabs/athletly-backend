@@ -161,6 +161,9 @@ def chat_completion(
     temperature: float = 0.7,
     model: str | None = None,
     runtime_context: str | None = None,
+    *,
+    tier: str = "routine",
+    user_id: str | None = None,
 ) -> litellm.ModelResponse:
     """Perform a synchronous chat completion via LiteLLM.
 
@@ -173,18 +176,57 @@ def chat_completion(
         system_prompt: If provided, prepended as a system message.
         tools: OpenAI-format tool definitions (list of dicts).
         temperature: Sampling temperature.
-        model: Model to use (defaults to MODULE-level MODEL).
+        model: If set, forces this exact model and bypasses the hybrid
+            router. Used by compression and other leaf callers that have
+            their own model strategy. When ``None`` the router decides.
         runtime_context: Optional per-turn context (date, athlete profile,
             plan summary, recovery status). For Anthropic models this is
             placed in a SECOND system block AFTER the static system prompt
             and gets its own ephemeral cache_control, so a single user turn
             can hit the cache on every follow-up tool round. For non-
             Anthropic models it is prepended to the first user message.
+        tier: Declared call tier for the hybrid router. One of
+            ``"routine"`` (default), ``"complex"``, ``"compression"``,
+            ``"subagent"``. See :mod:`src.agent.model_router`.
+        user_id: Optional Supabase user id. Combined with ``tier`` to
+            decide whether the call may use Sonnet. ``None`` -> treated
+            as the cost-safe default tier ("free" unless overridden).
 
     Returns:
         litellm.ModelResponse (OpenAI-compatible response object).
     """
-    resolved_model = model or MODEL
+    # Router decision: explicit ``model=`` always wins (backward compat).
+    # Otherwise the router picks Haiku-or-Sonnet from tier + user_tier.
+    thinking_budget = 0
+    is_premium = False
+    if model:
+        resolved_model = model
+    else:
+        # Imported lazily so test code that monkeypatches ``litellm.completion``
+        # does not need to also stub out the router/db path.
+        from src.agent.model_router import log_choice, resolve_model
+
+        choice = resolve_model(tier=tier, user_id=user_id)
+        resolved_model = choice.model
+        thinking_budget = choice.thinking_budget
+        is_premium = choice.is_premium
+        log_choice(choice, user_id)
+
+        # Anthropic-key safety net: if the router picked an anthropic model
+        # but no API key is configured (e.g. local dev without Anthropic
+        # access), fall back to the module-level MODEL so the call does
+        # not fail with a 401.
+        if (
+            ("anthropic" in resolved_model or "claude" in resolved_model)
+            and not os.environ.get("ANTHROPIC_API_KEY")
+        ):
+            logger.warning(
+                "model_router: no ANTHROPIC_API_KEY; falling back to %s", MODEL,
+            )
+            resolved_model = MODEL
+            thinking_budget = 0
+            is_premium = False
+
     is_anthropic = "anthropic" in resolved_model or "claude" in resolved_model
 
     # Build final message list. For Anthropic, wrap the system prompt in a
@@ -309,8 +351,21 @@ def chat_completion(
     if "gemini-2.5" in resolved_model:
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
 
+    # Anthropic Extended Thinking (Sonnet 4.6 + Haiku 4.5 support this).
+    # Thinking tokens bill as output tokens at the model's standard rate.
+    # Only enable when the router decided thinking_budget > 0 (which today
+    # means: Pro user + tier=="complex" -> Sonnet with budget from
+    # settings.sonnet_thinking_budget). Cache prefix is invalidated by
+    # changes to the thinking parameter, so the budget MUST stay stable
+    # across the rounds of a single user turn.
+    if is_anthropic and thinking_budget > 0:
+        kwargs["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": thinking_budget,
+        }
+
     response = _completion_with_rate_limit_retry(kwargs)
-    _log_cache_usage(response, resolved_model)
+    _log_cache_usage(response, resolved_model, is_premium=is_premium)
     return response
 
 
@@ -367,13 +422,20 @@ def _extract_retry_after(exc: Exception) -> float | None:
         return None
 
 
-def _log_cache_usage(response: litellm.ModelResponse, model: str) -> None:
+def _log_cache_usage(
+    response: litellm.ModelResponse,
+    model: str,
+    is_premium: bool = False,
+) -> None:
     """Emit per-call token counters so cache effectiveness is observable.
 
     Always logs, even when the provider returns zero/None for the cache
     fields. That way absent cache reads show up explicitly as
     cache_hit_pct=0 instead of silently disappearing, which is exactly
     the failure mode that hid the original caching bug.
+
+    ``is_premium`` is set when the call used Sonnet for a Pro user. It
+    is forwarded to telemetry so we can attribute Sonnet spend per day.
     """
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -394,7 +456,7 @@ def _log_cache_usage(response: litellm.ModelResponse, model: str) -> None:
 
     logger.info(
         "LLM call model=%s input=%s cache_create=%s cache_read=%s "
-        "output=%s total_input=%s cache_hit_pct=%s",
+        "output=%s total_input=%s cache_hit_pct=%s premium=%s",
         model,
         input_tokens,
         cache_writes,
@@ -402,7 +464,18 @@ def _log_cache_usage(response: litellm.ModelResponse, model: str) -> None:
         output_tokens,
         total_input,
         cache_hit_pct,
+        is_premium,
     )
+
+    # Premium-call separate log line so cost dashboards can SUM by
+    # this single grep target. Only emitted on Sonnet (Pro-tier complex)
+    # calls so log volume stays sane.
+    if is_premium:
+        logger.info(
+            "premium_call model=%s input=%s output=%s cache_read=%s "
+            "cache_create=%s",
+            model, input_tokens, output_tokens, cache_reads, cache_writes,
+        )
 
     # Record into the in-memory telemetry buffer for /admin/cache-stats.
     # Wrapped so observability failures never bubble into the agent loop.
