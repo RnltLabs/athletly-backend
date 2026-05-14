@@ -975,6 +975,20 @@ class AgentLoop:
             "duration_ms": result.total_duration_ms,
         })
 
+        # Prompt rule-violation telemetry (Feature 6, fire-and-forget).
+        # Scans the final response for STRICT rule violations from
+        # system_prompt.py (em-dashes, Markdown, ASCII transliteration in
+        # German). Pure regex, zero LLM cost. Never blocks the agent loop.
+        try:
+            from src.services.prompt_metrics import scan_and_record
+            scan_and_record(
+                text=result.response_text or "",
+                model=MODEL,
+                user_id=self._user_id,
+            )
+        except Exception:
+            pass  # Non-critical, never block agent loop
+
         # Post-turn safety nets (Gap 3b, Gap 4b)
         self._post_turn_extraction_check(result.response_text)
         result.onboarding_just_completed = self._check_onboarding_complete()

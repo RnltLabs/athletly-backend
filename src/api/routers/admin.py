@@ -6,9 +6,10 @@ no auth: a reverse proxy on Hetzner restricts access at the network layer.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from src.services.cache_telemetry import get_telemetry
+from src.services.prompt_metrics import get_prompt_metrics
 
 router = APIRouter(tags=["admin"])
 
@@ -17,3 +18,20 @@ router = APIRouter(tags=["admin"])
 async def cache_stats() -> dict:
     """Cache hit rate, ITPM, per-model breakdown over the last ~50 LLM calls."""
     return get_telemetry().summary()
+
+
+@router.get("/prompt-metrics")
+async def prompt_metrics(
+    window_minutes: int = Query(60, ge=1, le=1440),
+) -> dict:
+    """STRICT rule violation telemetry over a rolling time window.
+
+    Args:
+        window_minutes: How far back to aggregate. 1 to 1440 minutes
+            (24h). Defaults to 60.
+
+    Returns counts per rule, per model, per prompt variant, plus the
+    rolling violation rate and a small sample of recent violations
+    (with snippets) for inspection. See DESIGN.md for the JSON shape.
+    """
+    return get_prompt_metrics().summary(window_seconds=window_minutes * 60)
