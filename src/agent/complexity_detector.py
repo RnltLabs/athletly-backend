@@ -92,9 +92,12 @@ _GROUP_C_RE = _kw_regex(_GROUP_C_KEYWORDS)
 _GROUP_D_KEYWORDS: list[str] = [
     "periodisierung", "periodization",
     "marathon plan", "marathonplan", "marathon-plan",
+    "marathon-aufbau", "marathonaufbau", "marathon aufbau",
+    "marathon-aufbauplan", "marathonaufbauplan",
     "ironman plan", "ironmanplan",
     "aufbauplan", "aufbau-plan",
     "trainingsblock", "trainings-block",
+    "trainingsplan", "trainings-plan",
     "mesozyklus", "makrozyklus", "mikrozyklus",
     "build phase", "build-phase", "buildphase",
     "peak phase", "peak-phase",
@@ -102,11 +105,75 @@ _GROUP_D_KEYWORDS: list[str] = [
 ]
 _GROUP_D_RE = _kw_regex(_GROUP_D_KEYWORDS)
 
-# Weeks-count regex: "8 weeks", "12 wks", "16-woechige".
-# A planning horizon of 8 plus weeks consistently exceeds what Haiku
-# can plan without dropping or duplicating sessions across phases.
+# Weeks-count regex: "8 weeks", "12 wks", "16-woechige", "16 Wochen".
+# German nouns are capitalized so we explicitly match both cases via the
+# IGNORECASE flag. A planning horizon of 8 plus weeks consistently
+# exceeds what Haiku can plan without dropping or duplicating sessions
+# across phases. Shorter horizons (4 to 7 weeks) escalate only when
+# combined with a plan-related word; see _SHORT_HORIZON_WEEKS_MIN below.
 _GROUP_D_WEEKS_RE = re.compile(
     r"\b(\d{1,2})\s*-?\s*(woch|wks?|weeks?|woechig|wöchig)\w*",
+    re.IGNORECASE,
+)
+
+# Threshold for "long horizon alone is enough" - 8 weeks plus escalates
+# even without explicit plan keywords ("plane mir die naechsten 12 Wochen").
+_LONG_HORIZON_WEEKS_MIN = 8
+
+# Threshold for "short horizon combined with plan keyword escalates"
+# ("Plan fuer die naechsten 4 Wochen Marathon-Aufbau"). 4 weeks is the
+# shortest meaningful mesocycle; anything below is a single week's
+# adjustment and stays routine.
+_SHORT_HORIZON_WEEKS_MIN = 4
+
+# Plan-intent words: presence of any of these PLUS a >=4 week horizon
+# escalates. Kept separate from Group D keyword list so the keyword
+# audit trail still distinguishes "explicit plan term matched" from
+# "horizon + plan intent matched".
+_PLAN_INTENT_RE = re.compile(
+    r"(?<!\w)("
+    r"plan|plane|planen|planung|"
+    r"aufbau|aufbauen|"
+    r"build|building|"
+    r"phase|phasen|"
+    r"block|bloecke|bloeke|bloecke|"
+    r"trainingsplan|trainings-plan|"
+    r"vorbereitung|vorbereiten|"
+    r"strukturieren?|strukturiert"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+
+# Marathon / Ironman event names commonly used in German running scene.
+# Bare event mention (e.g. "Koeln Marathon", "Berlin Marathon") is a
+# strong long-horizon hint even without an explicit plan keyword - a
+# user dropping the event name almost always wants planning help.
+_EVENT_NAME_RE = re.compile(
+    r"(?<!\w)("
+    # Generic distance terms that imply long-horizon planning when paired
+    # with a plan intent. "marathon" alone is too noisy (could be a
+    # marathon recap), but "Koeln Marathon" or "Berlin Marathon" or any
+    # city + Marathon pattern is a clear race target.
+    r"berlin\s+marathon|koeln\s+marathon|k(?:o|oe|ö)ln\s+marathon|"
+    r"hamburg\s+marathon|muenchen\s+marathon|m(?:u|ue|ü)nchen\s+marathon|"
+    r"frankfurt\s+marathon|wien\s+marathon|"
+    r"boston\s+marathon|new\s+york\s+marathon|nyc\s+marathon|"
+    r"london\s+marathon|chicago\s+marathon|tokyo\s+marathon|"
+    r"ironman\s+\w+|"
+    r"roth(?:\s+langdistanz)?|"
+    r"challenge\s+\w+"
+    r")(?!\w)",
+    re.IGNORECASE,
+)
+
+# Marathon proximity rule: "Marathon" (bare) plus "Plan" (bare) within
+# this many characters of each other implies a long-horizon plan
+# request even when the user does not use a compound noun. Catches
+# Elena's "trainiere auf den Marathon ... Plan bitte" phrasing.
+_MARATHON_PROXIMITY_CHARS = 80
+_MARATHON_RE = re.compile(r"(?<!\w)marathon(?!\w)", re.IGNORECASE)
+_PLAN_BARE_RE = re.compile(
+    r"(?<!\w)(plan|plane|planen|aufbau|aufbauplan)(?!\w)",
     re.IGNORECASE,
 )
 
@@ -180,7 +247,17 @@ def needs_complex_reasoning(
     matched_c = _find_all(_GROUP_C_RE, text)
     matched_d = _find_all(_GROUP_D_RE, text)
 
-    # Group D also fires on "8+ weeks" plan horizon detected via regex.
+    # Plan-intent words. Used both for the short-horizon-plus-plan combo
+    # below and for the Marathon-proximity rule further down. Stored as
+    # a flag rather than appended to matched_d so the audit trail only
+    # gains entries when the keyword ACTUALLY drove the escalation.
+    has_plan_intent = bool(_PLAN_INTENT_RE.search(text))
+
+    # Group D also fires on a numeric week horizon detected via regex.
+    # Long horizon alone (>=8 weeks) escalates immediately. Shorter
+    # horizons (4 to 7 weeks) escalate only when combined with a plan
+    # intent word so "4 Wochen verletzt" stays routine but
+    # "Plan fuer die naechsten 4 Wochen Aufbau" escalates.
     weeks_hits = _GROUP_D_WEEKS_RE.findall(text)
     long_horizon_weeks = False
     for hit in weeks_hits:
@@ -188,10 +265,43 @@ def needs_complex_reasoning(
             n = int(hit[0])
         except (TypeError, ValueError):
             continue
-        if n >= 8:
+        if n >= _LONG_HORIZON_WEEKS_MIN:
             long_horizon_weeks = True
             matched_d.append(f"{n}-week plan")
             break
+        if n >= _SHORT_HORIZON_WEEKS_MIN and has_plan_intent:
+            long_horizon_weeks = True
+            matched_d.append(f"{n}-week plan + plan_intent")
+            break
+
+    # Event-name allow-list: "Koeln Marathon", "Berlin Marathon",
+    # "Ironman Frankfurt", "Roth Langdistanz", ... All strong
+    # long-horizon hints when paired with a plan intent. Bare event
+    # mentions without any plan word stay routine to avoid escalating
+    # casual race chatter ("war beim Berlin Marathon dabei").
+    event_matches = _find_all(_EVENT_NAME_RE, text)
+    if event_matches and has_plan_intent:
+        for ev in event_matches:
+            token = f"event:{ev}"
+            if token not in matched_d:
+                matched_d.append(token)
+        long_horizon_weeks = True  # treat as Group D long-horizon hit
+
+    # Marathon-proximity rule: "Marathon" and "Plan/Aufbau" within
+    # _MARATHON_PROXIMITY_CHARS chars of each other. Catches Elena's
+    # exact phrasing "trainiere auf den Marathon am 4. Oktober, Plan
+    # bitte fuer die naechsten 16 Wochen" - the keyword list would
+    # require literal "marathon plan" (two consecutive words) which
+    # never appears in natural German.
+    m_match = _MARATHON_RE.search(text)
+    p_match = _PLAN_BARE_RE.search(text)
+    if m_match and p_match:
+        distance = abs(m_match.start() - p_match.start())
+        if distance <= _MARATHON_PROXIMITY_CHARS:
+            token = "marathon+plan_proximity"
+            if token not in matched_d:
+                matched_d.append(token)
+            long_horizon_weeks = True
 
     # Group E: numeric / phrase hints.
     matched_e: list[str] = []

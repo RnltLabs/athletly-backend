@@ -224,6 +224,73 @@ def test_decimal_pace_leak_case_insensitive():
 
 
 # ---------------------------------------------------------------------------
+# Decimal-pace leak (Sprint K): German comma decimal coverage
+# ---------------------------------------------------------------------------
+#
+# Sprint K extension. Before this change the detector was period-only and
+# silently missed the German notation `4,50/km`. Each English-period test
+# above has a matching German-comma test below so we cannot regress by
+# making the detector too strict on either notation.
+
+
+def test_decimal_pace_leak_detects_german_comma_basic():
+    # Direct German analogue of Elena's failure: "4,50/km".
+    text = "Deine Schwellen-Pace liegt bei 4,50/km."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_detects_german_comma_with_min_qualifier():
+    text = "Threshold ist 4,50 min/km."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_detects_german_comma_no_space():
+    text = "4,50min/km wirkt schnell."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_detects_german_comma_one_decimal_digit():
+    text = "Heute war 4,5/km."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_does_not_fire_on_german_distance():
+    # "4,5km" is a distance, not a pace. The /km without a pace qualifier
+    # and without a decimal pace context is a distance.
+    text = "Ich bin heute 4,5km gelaufen."
+    vios = scan_response(text)
+    rule_ids = {v.rule_id for v in vios}
+    assert "decimal_pace_leak" not in rule_ids
+
+
+def test_decimal_pace_leak_does_not_fire_on_german_mmss_pace():
+    # Canonical mm:ss must not trigger even in German context.
+    text = "Schwellen-Pace bei 4:30/km."
+    vios = scan_response(text)
+    rule_ids = {v.rule_id for v in vios}
+    assert "decimal_pace_leak" not in rule_ids
+
+
+def test_decimal_pace_leak_german_comma_double_digit_minute():
+    # Marathon-shuffle pace like 10,50/km should also trigger.
+    text = "Er ist im Schnitt 10,50/km bergab gelaufen."
+    vios = scan_response(text)
+    assert any(v.rule_id == "decimal_pace_leak" for v in vios)
+
+
+def test_decimal_pace_leak_german_comma_severity_is_strict():
+    text = "4,50/km ist falsch."
+    vios = scan_response(text)
+    leaks = [v for v in vios if v.rule_id == "decimal_pace_leak"]
+    assert leaks
+    assert leaks[0].severity == "strict"
+
+
+# ---------------------------------------------------------------------------
 # Empty / boundary inputs
 # ---------------------------------------------------------------------------
 

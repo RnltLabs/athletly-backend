@@ -7,6 +7,33 @@ Used by Claude Code (the orchestrating persona test driver) to score every coach
 - 25-29 = good.
 - 30 = excellent.
 
+## MANDATORY: every score must cite observable evidence
+
+Each dimension score 1-5 MUST be supported by one of the following. A score
+written without an `evidence:` line is invalid and the turn is unscored
+until repaired. See `FAILURE_MODE.md` for the canonical example of what
+happens when this rule is skipped.
+
+Acceptable evidence types:
+
+- **Verbatim response substring**: a quoted line from the
+  `response_text_verbatim` field in the `=== EVIDENCE TRACE ===` block
+  emitted by `chat.py --print-evidence`. Paraphrases are not evidence.
+- **SSE tool event**: a tool name from the `tools_called` list in the
+  evidence trace block. Expectations of which tools should have fired do
+  not count.
+- **Telemetry counter**: a specific counter from the fact pack emitted by
+  `verify_telemetry.py` (e.g.,
+  `critic_stats.by_rule.no_fabricated_stats = 2`).
+- **Critic review event**: the JSON of a `critic_review` event from the
+  evidence trace block. Used only when actually emitted.
+
+Cross-check rule: when scoring claims like "the response contained
+em-dashes / fabricated stats / ASCII umlauts", the verbatim substring AND
+the relevant telemetry counter must agree. If they disagree, the report
+headlines the discrepancy and stops scoring until investigated; never
+invent a count.
+
 ## Dimensions
 
 ### 1. Accuracy (1-5)
@@ -18,6 +45,12 @@ Did the coach use real data fetched via tools, or did it hallucinate numbers / e
 - 3: one number rounded or approximated where exactness was reasonable to skip.
 - 2: at least one specific number or event that does not appear in tool output (suspected hallucination).
 - 1: multiple hallucinated specifics OR coach made up a plan / pace / date.
+
+Required evidence: a quoted substring from `response_text_verbatim`
+containing the fact in question, plus the SSE `tool_result` payload (or its
+preview in the evidence trace) that supports or contradicts it. For a score
+below 5, also cite `critic_stats.by_rule.no_fabricated_stats` from the fact
+pack.
 
 ### 2. Completeness (1-5)
 

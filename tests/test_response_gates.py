@@ -276,6 +276,133 @@ def test_stats_grounding_does_not_trigger_on_dates():
 
 
 # ---------------------------------------------------------------------------
+# Gate 3 Sprint K: German comma decimal coverage
+# ---------------------------------------------------------------------------
+#
+# These tests cover the Elena Iter 2 Turn 4 failure mode: a German-formatted
+# coach response uses comma decimals ("HRV 56,5 ms") and the gate must
+# still trigger. Each test exists in both German-comma and English-period
+# forms so the detector cannot regress by being made too strict on one
+# notation. See AUDIT.md for the full failure inventory.
+
+
+def test_stats_grounding_german_hrv_comma_decimal_triggers():
+    # The exact bug case from Elena Iter 2 Turn 4.
+    ctx = _ctx(response_text="HRV 56,5 ms, RHR 50 bpm, Body Battery 74")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_german_hrv_alone_triggers():
+    ctx = _ctx(response_text="HRV 56,5 ms")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_english_hrv_period_decimal_triggers():
+    ctx = _ctx(response_text="HRV 56.5 ms")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_german_vo2max_comma_decimal_triggers():
+    ctx = _ctx(response_text="VO2max 56,5 ist solide.")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_english_vo2max_period_decimal_triggers():
+    ctx = _ctx(response_text="VO2max 56.5 looks solid.")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_german_ftp_comma_decimal_triggers():
+    ctx = _ctx(response_text="FTP 250,5 Watt fuer heute.")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_german_recovery_comma_decimal_triggers():
+    ctx = _ctx(response_text="Recovery score 78,5 sieht gut aus.")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_german_pace_comma_as_colon_triggers():
+    # German user might type comma where the canonical pace format uses
+    # a colon: "4,30/km". This is a stat reference and must trigger.
+    ctx = _ctx(response_text="Schwellenpace 4,30/km")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_canonical_pace_colon_still_triggers():
+    # Regression guard for the canonical mm:ss with colon.
+    ctx = _ctx(response_text="Schwellenpace 4:30/km")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_german_pace_decimal_min_per_km_triggers():
+    # "4,5 min/km" is a German decimal pace; treat as a stat reference.
+    # See AUDIT.md Phase 3 for the rationale (canonical form is mm:ss
+    # and either notation is a stat that must be grounded).
+    ctx = _ctx(response_text="Pace heute 4,5 min/km war ok.")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_body_battery_integer_still_triggers():
+    # Sanity: integer-only Body Battery still trips the detector. The
+    # original Elena response combined this with the comma-decimal HRV,
+    # so we keep an explicit integer-only assertion to prevent regressions.
+    ctx = _ctx(response_text="Body Battery 74 ist top.")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_distance_period_decimal_still_triggers():
+    ctx = _ctx(response_text="Du bist heute 21.1 km gelaufen.")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_distance_comma_decimal_still_triggers():
+    ctx = _ctx(response_text="Du bist heute 21,1 km gelaufen.")
+    r = _gate_stats_grounding(ctx)
+    assert not r.passed
+
+
+def test_stats_grounding_passes_with_recent_read_for_german_decimal():
+    # The bug case: grounded by a recent tool call, so the gate must pass.
+    ctx = _ctx(
+        response_text="HRV 56,5 ms, Body Battery 74",
+        tools_recent=("get_health_summary",),
+    )
+    r = _gate_stats_grounding(ctx)
+    assert r.passed
+
+
+def test_parse_number_accepts_both_separators():
+    from src.agent.response_gates import _parse_number
+    assert _parse_number("56,5") == 56.5
+    assert _parse_number("56.5") == 56.5
+    assert _parse_number("250") == 250.0
+
+
+def test_numeric_re_matches_full_german_decimal_token():
+    # Sanity: the helper captures the FULL number, not just the integer
+    # part. This is the semantic correctness check that distinguishes
+    # the fix from the prior accident (where ``\b`` happened to land on
+    # the comma and the gate matched only the integer prefix).
+    from src.agent.response_gates import _NUMERIC_RE
+    m = _NUMERIC_RE.search("HRV 56,5 ms")
+    assert m is not None
+    assert m.group(0) == "56,5"
+
+
+# ---------------------------------------------------------------------------
 # Gate 4: holistic_alert
 # ---------------------------------------------------------------------------
 

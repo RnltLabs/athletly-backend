@@ -137,31 +137,68 @@ _INJURY_RE = re.compile(
 
 
 # Gate 3: stats_grounding ---------------------------------------------------
+#
+# Sprint K (Iter 3): every stats detector must handle German comma decimals
+# (``56,5``) alongside period decimals (``56.5``). We had a bug where the
+# coach fabricated ``HRV 56,5 ms, RHR 50 bpm, Body Battery 74`` and the
+# gate captured only the leading integer ``HRV 56`` because the comma is
+# not a word character. The fix is to match the full ``\d+(?:[.,]\d+)?``
+# token everywhere a stat value can appear, and to extend the mm:ss
+# patterns to also accept ``,`` as the minutes/seconds separator (German
+# users sometimes type a comma where a colon belongs, e.g. ``4,30/km``).
+#
+# Bounded quantifiers keep these regexes safe from catastrophic
+# backtracking: every variable-length component has an explicit upper
+# bound and they are anchored with word boundaries.
+
+# Shared helper: any non-negative number, optionally with a decimal part
+# using either ``.`` or ``,`` as the separator. Bounded to keep the
+# regex linear-time (no nested unbounded quantifiers).
+_NUMERIC_RE: re.Pattern[str] = re.compile(r"\b\d{1,5}(?:[.,]\d{1,3})?\b")
+
+
+def _parse_number(token: str) -> float:
+    """German-aware number parse. Both ``56.5`` and ``56,5`` yield 56.5.
+
+    Pure function. Raises ``ValueError`` on garbage input so the caller
+    can decide whether to treat that as a pass or a fail. Used by
+    comparison logic that today operates on the regex-captured token.
+    """
+    return float(token.replace(",", "."))
+
+
+# Reusable atom for a number with optional comma/period decimal. Kept as
+# a string fragment (not a compiled pattern) so it composes into the
+# stats detectors below.
+_NUM_ATOM = r"\d{1,4}(?:[.,]\d{1,2})?"
 
 _STATS_PATTERNS: tuple[re.Pattern[str], ...] = (
     # HR / HRV
-    re.compile(r"\bHR\s*\d{2,3}\b", re.IGNORECASE),
-    re.compile(r"\bHerzfrequenz[: ]\s*\d{2,3}\b", re.IGNORECASE),
-    re.compile(r"\bHRV\s*\d{1,3}\s*(ms)?\b", re.IGNORECASE),
-    re.compile(r"\b\d{2,3}\s*bpm\b", re.IGNORECASE),
-    # Pace: "4:30/km" or "4:30 /km"
-    re.compile(r"\b\d:\d{2}\s*/\s*km\b"),
-    re.compile(r"\b\d:\d{2}\s*/\s*mi\b"),
-    re.compile(r"\b\d[.,]\d{1,2}\s*min/km\b", re.IGNORECASE),
-    # Distance: "10km", "21,1km", "5 km"
-    re.compile(r"\b\d{1,3}(?:[\.,]\d{1,2})?\s*km\b", re.IGNORECASE),
+    re.compile(rf"\bHR\s*{_NUM_ATOM}\b", re.IGNORECASE),
+    re.compile(rf"\bHerzfrequenz[: ]\s*{_NUM_ATOM}\b", re.IGNORECASE),
+    re.compile(rf"\bHRV\s*{_NUM_ATOM}\s*(?:ms)?\b", re.IGNORECASE),
+    re.compile(rf"\b{_NUM_ATOM}\s*bpm\b", re.IGNORECASE),
+    # Pace mm:ss. Accept ``:`` (canonical) AND ``,`` (German user typed
+    # the comma where a colon belongs, e.g. ``4,30/km``). Both forms are
+    # stat references that must be grounded by a tool call.
+    re.compile(r"\b\d{1,2}[:,]\d{2}\s*/\s*km\b"),
+    re.compile(r"\b\d{1,2}[:,]\d{2}\s*/\s*mi\b"),
+    # Decimal-form pace ``4.5 min/km`` or ``4,5 min/km``.
+    re.compile(rf"\b{_NUM_ATOM}\s*min/km\b", re.IGNORECASE),
+    # Distance: "10km", "21,1km", "21.1km", "5 km"
+    re.compile(rf"\b{_NUM_ATOM}\s*km\b", re.IGNORECASE),
     # Duration in athlete context: "1h 45min", "45 min"
     re.compile(r"\b\d{1,2}h\s*\d{1,2}\s*min\b", re.IGNORECASE),
     # Recovery score / body battery
-    re.compile(r"\brecovery\s*(score)?\s*\d{1,3}\b", re.IGNORECASE),
-    re.compile(r"\bbody\s*battery\s*(score)?\s*\d{1,3}\b", re.IGNORECASE),
+    re.compile(rf"\brecovery\s*(?:score)?\s*{_NUM_ATOM}\b", re.IGNORECASE),
+    re.compile(rf"\bbody\s*battery\s*(?:score)?\s*{_NUM_ATOM}\b", re.IGNORECASE),
     # TRIMP
-    re.compile(r"\btrimp\s*\d{1,4}\b", re.IGNORECASE),
+    re.compile(rf"\btrimp\s*{_NUM_ATOM}\b", re.IGNORECASE),
     # VO2max / FTP
-    re.compile(r"\bVO2[mM]?ax?\s*\d{2,3}\b"),
-    re.compile(r"\bFTP\s*\d{2,4}\b"),
-    # Pace alternative "1:45 std", "1h45"
-    re.compile(r"\b\d:\d{2}\s*std\b", re.IGNORECASE),
+    re.compile(rf"\bVO2[mM]?ax?\s*{_NUM_ATOM}\b"),
+    re.compile(rf"\bFTP\s*{_NUM_ATOM}\b"),
+    # Pace alternative "1:45 std", "1,45 std"
+    re.compile(r"\b\d{1,2}[:,]\d{2}\s*std\b", re.IGNORECASE),
 )
 
 _READ_TOOLS_FOR_STATS = frozenset(

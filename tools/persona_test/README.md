@@ -6,6 +6,44 @@ This is NOT a pytest-style automated harness. The LLM-in-the-loop is intentional
 
 ---
 
+## MANDATORY: ground every finding in production telemetry
+
+This rule was added 2026-05-14 after a re-test agent reported "26 em-dashes
+shipped across 6 turns" when production telemetry said `no_em_dash: 0`. See
+[`FAILURE_MODE.md`](./FAILURE_MODE.md) for the full forensic.
+
+Every persona-test agent MUST:
+
+1. **Before claiming a violation count, query the three admin endpoints**
+   (`/admin/critic-stats`, `/admin/gates-stats`, `/admin/prompt-metrics`) and
+   compare the claim to the measured number. If they conflict, the agent
+   reports the discrepancy, not its imagined count. The helper
+   `tools/persona_test/verify_telemetry.py` pulls all three in one call and
+   prints a "fact pack" that goes verbatim into the report's evidence section.
+2. **Quote VERBATIM lines from the actual coach response** (no paraphrasing
+   for evidence). The verbatim text must come from the
+   `=== EVIDENCE TRACE ===` block emitted by `chat.py --print-evidence`.
+3. **Tool calls reported must come from the SSE event stream** printed by
+   `chat.py`, not from the agent's expectation of which tools should have
+   fired.
+4. **Eval scores 1-5 per dimension MUST cite the specific observable
+   evidence**: a tool event from the SSE stream, a substring from the
+   coach response (quoted with surrounding context), or a telemetry counter
+   from the fact pack. No evidence, no score.
+
+Operationally:
+
+- Run `chat.py <persona> "<msg>" --print-evidence` for every turn. Do not
+  pipe to `head` / `tail` / `grep` while the conversation is in progress;
+  truncated output is how invented findings creep in.
+- After the conversation ends, run `verify_telemetry.py` and paste the fact
+  pack into the report.
+- Per-turn evaluation block must reference the evidence trace block (e.g.,
+  "response substring at line N of evidence trace" or "tool event
+  `sync_garmin_data` in evidence trace turn 3").
+
+---
+
 ## TL;DR for Claude Code
 
 When Roman says "test the coach as Elena", do this:
@@ -122,24 +160,98 @@ Flags:
 - `--new` start a fresh chat session
 - `--api-url URL` point at a different backend
 - `--show-thinking` also render `thinking` events
+- `--print-evidence` emit a structured `=== EVIDENCE TRACE ===` block at the
+  end with the verbatim coach response, tool-call list, and usage line.
+  MANDATORY when running a persona-test conversation; the report's evidence
+  must quote from this block.
 - `-v` verbose logging
+
+### Evidence trace block
+
+`chat.py --print-evidence` prints a block of the following shape after the
+normal SSE rendering. Copy this verbatim into the per-turn evidence section
+of the report:
+
+```
+=== EVIDENCE TRACE ===
+session_id: 4e701f74-6790-4ac0-8aea-fd3f87875d96
+tools_called: [get_activities, sync_garmin_data, get_provider_status]
+response_text_verbatim: <full text, exactly as the SSE message event delivered it>
+tokens: input=850 cache_read=0 output=180 model=anthropic/claude-haiku-4-5
+critic_review_event: null
+=== END EVIDENCE ===
+```
+
+If `critic_review_event` is not `null`, paste the full event JSON into the
+report. That is the only acceptable source for claims like "critic flagged
+no_fabricated_stats" or "critic flagged no_em_dash".
+
+---
+
+## Step 2b: Pull production telemetry fact pack
+
+Before writing scores, run:
+
+```bash
+uv run python tools/persona_test/verify_telemetry.py
+```
+
+This pulls `/admin/critic-stats`, `/admin/gates-stats`,
+`/admin/prompt-metrics?window_minutes=60` and prints a compact fact pack:
+
+```
+=== TELEMETRY FACT PACK (pulled 2026-05-14T14:35:30Z) ===
+critic_stats.window_calls: 12
+critic_stats.accept_rate: 0.92
+critic_stats.regenerate_rate: 0.08
+critic_stats.by_rule.no_em_dash: 0
+critic_stats.by_rule.no_fabricated_stats: 1
+critic_stats.by_rule.umlauts: 0
+...
+gates_stats.window_records: 14
+gates_stats.totals.fails: 2
+gates_stats.totals.regenerate_success: 1
+...
+prompt_metrics.window_minutes: 60.0
+prompt_metrics.total_responses_scanned: 12
+prompt_metrics.total_violations: 1
+prompt_metrics.violation_rate_pct: 8.33
+...
+=== END TELEMETRY FACT PACK ===
+```
+
+Paste the fact pack verbatim into the report's evidence section. Then for
+every claim in the report, write `claim X = telemetry Y` next to it. If
+they disagree, the report MUST headline the discrepancy.
+
+Flags:
+- `--api-url URL` point at a different backend (default uses
+  `ATHLETLY_API_URL` env or the production URL)
+- `--window-minutes N` window for `/admin/prompt-metrics` (default 60)
+- `--json` print the raw merged JSON instead of the flat fact pack
 
 ---
 
 ## Step 3: Evaluate
 
-After each `< Coach: ...` line, score the response against `EVAL_RUBRIC.md`. Write a small block in your transcript:
+After each `< Coach: ...` line, score the response against `EVAL_RUBRIC.md`. Every dimension score MUST cite specific observable evidence (tool event from the SSE stream, quoted substring from the evidence trace, or counter from the telemetry fact pack). Write a small block in your transcript:
 
 ```
 EVAL turn 1:
-  accuracy:        5  - all numbers grounded in get_activity_details
-  completeness:   4  - addressed the activity, missed the implicit "is this good for marathon?"
-  tool_usage:    5  - sync_garmin_data -> get_activities -> get_activity_details matches STRICT
-  tone:          4  - respectful and clear; could have asked a follow-up question
-  hallucinations: 5  - none
-  holistic:      4  - did not pull today's HRV / sleep; reasonable to skip but worth noting
+  accuracy:       5  evidence: response_text_verbatim contains "10.02 km in 50:14, avg HR 142" which matches get_activity_details tool result
+  completeness:   4  evidence: persona asked "is this good for marathon?" implicitly; response did not mention marathon pace target. quoted: "Sehe deinen 10er von heute frueh"
+  tool_usage:     5  evidence: tools_called = [sync_garmin_data, get_activities, get_activity_details], matches STRICT proactive-sync pattern
+  tone:           4  evidence: quoted "Sehe deinen 10er ..." mirrors Elena's "war eben laufen" register. Missed asking back, persona expects a "why" question.
+  hallucinations: 5  evidence: no fabricated numbers; verify_telemetry shows critic_stats.by_rule.no_fabricated_stats = 0 for the window
+  holistic:       4  evidence: response_text_verbatim does not mention HRV / sleep; no get_health_metrics call in tools_called
   total: 27
 ```
+
+A score without an `evidence:` clause is invalid. A claim like "9 em-dashes
+in the response" without a quoted substring containing U+2014 is invalid;
+cross-reference `critic_stats.by_rule.no_em_dash` from the fact pack before
+making the claim. See [`FAILURE_MODE.md`](./FAILURE_MODE.md) for the
+canonical example of a confabulated finding.
 
 Then write the next persona-voiced message that pushes the coach in a direction. The persona's `## Open Threads` section gives you ideas: pending questions Elena would naturally raise.
 
@@ -288,7 +400,8 @@ Save this in `.planning/persona_tests/<slug>_<YYYY-MM-DD>.md` (create the direct
 | `personas/*.md`   | Persona definitions (frontmatter + identity / goal / voice sections)   |
 | `seed.py`         | End-to-end idempotent seeder                                           |
 | `reset.py`        | Per-persona data wipe (safe-by-default, requires is_test marker)       |
-| `chat.py`         | One-shot chat CLI with SSE parsing                                     |
+| `chat.py`         | One-shot chat CLI with SSE parsing + `--print-evidence` block          |
+| `verify_telemetry.py` | Pulls `/admin/critic-stats`, `/admin/gates-stats`, `/admin/prompt-metrics` into one fact pack |
 | `fake_garmin.py`  | Synthetic activity generator (deterministic, importable)               |
 | `fake_metrics.py` | Synthetic health_daily_metrics generator                               |
 | `_persona.py`     | Markdown + frontmatter parser                                          |
@@ -296,6 +409,7 @@ Save this in `.planning/persona_tests/<slug>_<YYYY-MM-DD>.md` (create the direct
 | `RESEARCH.md`     | Q2 2026 SOTA on persona-driven eval (with citations)                   |
 | `DESIGN.md`       | Architecture and design choices                                        |
 | `EVAL_RUBRIC.md`  | Scoring rubric used by the orchestrating Claude Code                   |
+| `FAILURE_MODE.md` | Forensic of the imagined-findings failure mode + mandate rationale     |
 | `README.md`       | This file                                                              |
 
 ---

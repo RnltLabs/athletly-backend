@@ -111,16 +111,20 @@ _MD_HEADER_RE = re.compile(r"^#{1,6}\s", re.MULTILINE)
 _MD_BOLD_RE = re.compile(r"\*\*[^*\n]+\*\*")
 _MD_ITALIC_RE = re.compile(r"(?<![*\\])\*[^*\n]+\*(?!\*)")
 
-# Decimal-pace leak detector (Sprint C). Catches the exact failure mode
-# from the Elena bug: a coach response that emits a decimal-minutes pace
-# like "4.50/km" or "4.50 min/km" instead of the correct mm:ss form
-# "4:30/km". The /km qualifier makes the context unambiguous regardless
-# of the minute digit, so we accept any single- or double-digit whole
-# minute. The decimal must have exactly TWO digits to keep the pattern
-# specific to pace notation (vs. "4.5km" the distance, which we tolerate
-# but only as plain km, not "min/km" pace).
+# Decimal-pace leak detector (Sprint C, extended Sprint K). Catches the
+# exact failure mode from the Elena bug: a coach response that emits a
+# decimal-minutes pace like "4.50/km" or "4.50 min/km" instead of the
+# correct mm:ss form "4:30/km". The /km qualifier makes the context
+# unambiguous regardless of the minute digit, so we accept any single-
+# or double-digit whole minute. The decimal must have exactly ONE or TWO
+# digits to keep the pattern specific to pace notation (vs. "4.5km" the
+# distance, which we tolerate but only as plain km, not "min/km" pace).
+#
+# Sprint K: accept BOTH period and comma as the decimal separator so the
+# German notation "4,50/km" is also caught. Without this, the gate was
+# blind to the most likely failure mode for a DE coach response.
 _DECIMAL_PACE_RE = re.compile(
-    r"\b\d{1,2}\.\d{1,2}\s*(?:min\s*)?/\s*km\b",
+    r"\b\d{1,2}[.,]\d{1,2}\s*(?:min\s*)?/\s*km\b",
     re.IGNORECASE,
 )
 
