@@ -42,7 +42,7 @@ from tools.persona_test._supabase import (
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_API_URL = os.environ.get("ATHLETLY_API_URL", "http://localhost:8000")
+DEFAULT_API_URL = os.environ.get("ATHLETLY_API_URL", "https://athletly.rnltlabs.de")
 # Generous timeout: the agent can take 60+ seconds on complex turns.
 _HTTP_TIMEOUT_S = 180.0
 

@@ -10,17 +10,23 @@ This is NOT a pytest-style automated harness. The LLM-in-the-loop is intentional
 
 When Roman says "test the coach as Elena", do this:
 
-1. Seed: `python tools/persona_test/seed.py elena`
+1. Seed: `uv run python tools/persona_test/seed.py elena`
 2. For each turn:
    - Compose a message in Elena's voice (see `personas/elena.md` `## Personality`)
-   - Send: `python tools/persona_test/chat.py elena "<message>"`
+   - Send: `uv run python tools/persona_test/chat.py elena "<message>"`
    - Read the coach response in your terminal output
    - Score it against `EVAL_RUBRIC.md` (six dimensions, 1-5 each, total 30)
    - Decide the next turn based on what the coach did (or missed)
 3. At session end: produce an aggregated report (avg score, lowest turn, regressions).
-4. To restart cleanly: `python tools/persona_test/reset.py elena` then re-seed.
+4. To restart cleanly: `uv run python tools/persona_test/reset.py elena` then re-seed.
 
-Default API URL is `http://localhost:8000`. Override with `ATHLETLY_API_URL` env or `--api-url`.
+CRITICAL: every command MUST be prefixed with `uv run` so the project's
+venv (with `httpx`, `supabase`, etc.) is used. Plain `python` or `python3`
+without the venv will fail with `ModuleNotFoundError: No module named 'httpx'`.
+
+Default API URL is `https://athletly.rnltlabs.de` (production Hetzner).
+Override with `ATHLETLY_API_URL` env or `--api-url http://localhost:8000`
+for local testing.
 
 ---
 
