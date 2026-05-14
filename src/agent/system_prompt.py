@@ -733,6 +733,48 @@ def build_runtime_context(
     except Exception:
         pass  # Non-critical -- do not crash context building
 
+    # --- Reflexion Lessons (Feature 3) ---
+    # Inject up to 5 most-relevant lessons distilled by the reflection
+    # loop from prior sessions. Pure read, fire-and-forget reinforcement
+    # update. Failures are silent so the runtime context still builds.
+    try:
+        from src.services.lesson_retrieval import (
+            build_query_text_from_runtime,
+            fetch_relevant_lessons,
+            format_lessons_block,
+            update_reinforcement,
+        )
+
+        _uid_lessons = getattr(user_model, "user_id", None)
+        if _uid_lessons:
+            _query_text = build_query_text_from_runtime(
+                athlete_name=athlete_name if athlete_name != "Unknown" else None,
+                sports=sports or None,
+                goal_event=goal_event,
+                recent_summary=startup_context,
+            )
+            _lessons = fetch_relevant_lessons(_uid_lessons, _query_text, top_k=5)
+            _block = format_lessons_block(_lessons)
+            if _block:
+                sections.append(_block)
+                # Best-effort reinforcement update. Synchronous Supabase
+                # call wrapped in a thread so we never stall context
+                # building. asyncio.create_task would require an event
+                # loop, which is not guaranteed here.
+                try:
+                    import threading
+                    _ids = [l["id"] for l in _lessons if l.get("id")]
+                    if _ids:
+                        threading.Thread(
+                            target=update_reinforcement,
+                            args=(_ids,),
+                            daemon=True,
+                        ).start()
+                except Exception:
+                    pass
+    except Exception:
+        pass  # Non-critical -- never break context build
+
     # --- Onboarding State ---
     onboarding_missing = _onboarding_missing(profile)
     if onboarding_missing:

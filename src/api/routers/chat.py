@@ -276,14 +276,42 @@ async def _chat_event_generator(
         # Summarize the PREVIOUS session asynchronously (non-blocking).
         if session_id is None:
             # New session → summarize the last one in the background.
+            prev_session_id: str | None = None
             try:
                 from src.services.session_summarizer import summarize_previous_session
+                from src.db.session_store_db import get_recent_sessions
+
+                # Capture the previous session id BEFORE the new one is
+                # written, so Reflexion runs against the conversation that
+                # just ended. get_recent_sessions returns most-recent-first;
+                # the new session row may already exist depending on
+                # create_session timing, so we walk the list and pick the
+                # first id that is NOT the freshly resolved one.
+                _recent = await asyncio.to_thread(get_recent_sessions, user_id, 5)
+                for _s in _recent:
+                    _sid = _s.get("id")
+                    if _sid and _sid != resolved_session_id:
+                        prev_session_id = _sid
+                        break
+
                 asyncio.create_task(
                     summarize_previous_session(user_id),
                     name=f"summarize_{user_id}",
                 )
             except Exception:
                 logger.debug("Session summarization skipped", exc_info=True)
+
+            # Reflexion loop: tier-aware self-reflection on the previous
+            # session. Fire-and-forget; never blocks the SSE stream and
+            # never surfaces failures to the user.
+            try:
+                from src.services.reflexion import maybe_run_reflexion
+                asyncio.create_task(
+                    maybe_run_reflexion(user_id, prev_session_id),
+                    name=f"reflexion_{user_id}",
+                )
+            except Exception:
+                logger.debug("Reflexion task scheduling skipped", exc_info=True)
 
             # Config GC: clean up stale configs in the background.
             try:
