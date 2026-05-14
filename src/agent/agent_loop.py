@@ -27,7 +27,8 @@ import os
 import queue
 import time
 import uuid
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -254,6 +255,18 @@ class AgentLoop:
         self._session_id: str | None = None
         self._session_file: Path | None = None  # file-based mode only
         self._turns_this_session: int = 0
+
+        # Sprint D: deterministic response gates.
+        # ``_recent_tools_window`` holds the set of tool names called in
+        # each of the last 3 user turns. Used by Gate 3 (stats_grounding)
+        # which lets a recent read-tool carry over multiple turns.
+        # ``_active_alert_ids`` is set per-turn from the runtime context
+        # builder; used by Gate 4 (holistic_alert).
+        # ``_gates_regenerated_this_turn`` bounds regenerate to once per
+        # turn even if the rewrite still fails gates.
+        self._recent_tools_window: deque[frozenset[str]] = deque(maxlen=3)
+        self._active_alert_ids: tuple[str, ...] = ()
+        self._gates_regenerated_this_turn: bool = False
 
     # -- JSONL Trace File (athctl trace) -----------------------------------
 
@@ -553,6 +566,15 @@ class AgentLoop:
         # System prompt is STATIC -- identical for all users/requests.
         # LLM providers cache this automatically when it never changes.
         system_prompt = STATIC_SYSTEM_PROMPT
+
+        # Sprint D: reset the per-turn regenerate guard. Each user turn
+        # gets at most ONE regenerate from the response-gate layer.
+        self._gates_regenerated_this_turn = False
+
+        # Sprint D: snapshot any active critical/warn alerts so Gate 4
+        # (holistic_alert_acknowledged) can check the draft response.
+        # Best-effort; failure produces an empty tuple and the gate is a no-op.
+        self._active_alert_ids = _detect_active_alert_ids_safe(self.user_model)
 
         # Compress history before adding new message (Gap 2)
         self._compress_history()
@@ -969,6 +991,14 @@ class AgentLoop:
         result.total_duration_ms = int((time.time() - start_time) * 1000)
         self._turns_this_session += 1
 
+        # Sprint D: push this turn's tool names into the rolling window so
+        # Gate 3 (stats_grounding) sees the last 3 user-turns of tools.
+        turn_tools = frozenset(
+            t.tool_name for t in result.turns
+            if t.tool_name
+        )
+        self._recent_tools_window.append(turn_tools)
+
         # Persist agent response (Gap 1)
         self._save_turn("model", result.response_text, {
             "tool_calls": result.tool_calls_made,
@@ -1248,17 +1278,36 @@ class AsyncAgentLoop(AgentLoop):
                 logger.warning("emit_fn raised on tool_group_end (exception)", exc_info=True)
             raise outcome
 
+        final_text = outcome.response_text or ""
+        unique_tools = _unique_tool_names(outcome)
+
+        # -- Sprint D: deterministic response-gate layer ----------------
+        # Runs BEFORE the Sprint A constitutional critic. Cheap (regex),
+        # catches the tool-discipline failure modes that the LLM cannot
+        # judge reliably. On gate fail, regenerates ONCE; if the rewrite
+        # still fails, annotates with a ``critic_review`` SSE event.
+        if final_text and _gates_layer_enabled_safe():
+            try:
+                final_text = await self._run_gates_pass(
+                    response_text=final_text,
+                    user_message=user_message,
+                    tool_names=unique_tools,
+                    emit_fn=emit_fn,
+                )
+                outcome.response_text = final_text
+            except Exception:
+                logger.warning("Gates pass raised, accepting original", exc_info=True)
+
         # -- Constitutional critique (Feature 2) -------------------------
         # Pro-tier only, master-switch gated. Fails open on any error so
         # the user never sees a critic-induced failure. See critic.py for
         # the rule list and decision logic.
-        final_text = outcome.response_text or ""
         if final_text and _should_run_critic_safe(self.user_model):
             try:
                 final_text = await self._run_critique_pass(
                     response_text=final_text,
                     user_message=user_message,
-                    tool_names=_unique_tool_names(outcome),
+                    tool_names=unique_tools,
                     emit_fn=emit_fn,
                 )
                 # Mirror any rewrite back into the AgentResult so callers
@@ -1360,8 +1409,228 @@ class AsyncAgentLoop(AgentLoop):
             logger.warning("emit_fn raised on critic_review", exc_info=True)
         return rewritten
 
+    # -- Sprint D: deterministic gate regenerate ---------------------------
+
+    def regenerate_after_gates(
+        self,
+        original_response: str,
+        gate_action: str,
+    ) -> str:
+        """Rewrite *original_response* with a gate-driven instruction.
+
+        Different from :meth:`regenerate_after_critique` in two ways:
+
+        1. The instruction comes from a deterministic gate (regex), so
+           it may explicitly REQUIRE tool calls (e.g. sync_garmin_data,
+           annotate_activity). We therefore allow the LLM to call tools
+           in this retry, unlike the critic retry which forbids them.
+        2. We use the same conversation history but inject the gate
+           instruction as a single user message before the retry.
+
+        Tool calls during regenerate are NOT executed here. The caller
+        only takes the text answer; if the model wants to call tools,
+        we instruct it to do so on the NEXT turn (the regenerate ask
+        is text only). This keeps the regenerate cost bounded to one
+        completion call.
+
+        Returns the rewritten text, or *original_response* on any
+        failure.
+        """
+        retry_prompt = (
+            "SYSTEM CHECK: your previous response failed deterministic "
+            "policy gates:\n\n"
+            f"{gate_action}\n\n"
+            "Rewrite your previous response so it fixes ALL listed "
+            "issues. Mirror the athlete's language exactly. Use real "
+            "German umlauts (ä ö ü ß) if the athlete wrote German. "
+            "Output ONLY the rewritten response text, no preamble, no "
+            "apology, no meta-commentary. Do not call tools in this "
+            "rewrite step; if the gate requires fresh data, say so "
+            "transparently in the response and the next turn will "
+            "gather it."
+        )
+        retry_messages = list(self._messages) + [
+            {"role": "user", "content": retry_prompt}
+        ]
+        runtime_ctx = build_runtime_context(
+            user_model=self.user_model,
+            date=None,
+            startup_context=self.startup_context,
+            context=self.context,
+        )
+        try:
+            response = chat_completion(
+                messages=retry_messages,
+                system_prompt=STATIC_SYSTEM_PROMPT,
+                temperature=AGENT_TEMPERATURE,
+                runtime_context=runtime_ctx,
+            )
+        except Exception:
+            logger.warning(
+                "Gate-driven regenerate raised, keeping original",
+                exc_info=True,
+            )
+            return original_response
+
+        if not response.choices:
+            return original_response
+        msg = response.choices[0].message
+        new_text = (getattr(msg, "content", None) or "").strip()
+        if not new_text:
+            return original_response
+
+        # Splice the corrected response into the persisted history so
+        # downstream summarisation / replay sees the user-facing answer,
+        # not the rejected draft.
+        self._messages.append({"role": "assistant", "content": new_text})
+        return new_text
+
+    # -- Sprint D: deterministic gate pass ---------------------------------
+
+    async def _run_gates_pass(
+        self,
+        response_text: str,
+        user_message: str,
+        tool_names: list[str],
+        emit_fn: Callable,
+    ) -> str:
+        """Run the deterministic response gates over *response_text*.
+
+        Decision logic:
+        - All gates pass -> return original.
+        - One or more gates fail AND no regenerate yet this turn ->
+          rewrite once with the combined instruction, re-check gates.
+          If the rewrite still fails, emit ``critic_review`` SSE event
+          for observability but ship the rewrite.
+        - Two-pass cap. We never regenerate twice in one turn.
+
+        Fail-open: any exception bubbles up to the caller's try/except.
+        Inside this method we catch defensively and treat as accept.
+        """
+        from src.agent.response_gates import (
+            GateContext,
+            record_regenerate_outcome,
+            run_gates,
+        )
+
+        if self._gates_regenerated_this_turn:
+            # Already regenerated this turn (defensive). Do not enter a
+            # loop; ship what we have.
+            return response_text
+
+        context = GateContext(
+            user_message=user_message or "",
+            response_text=response_text or "",
+            tools_called_this_turn=tuple(tool_names),
+            tools_called_recent=_flatten_recent_tools(self._recent_tools_window, tool_names),
+            runtime_context_alerts=tuple(self._active_alert_ids),
+        )
+
+        try:
+            batch = run_gates(context)
+        except Exception:
+            logger.warning("run_gates raised, failing open", exc_info=True)
+            return response_text
+
+        if batch.passed:
+            return response_text
+
+        # One or more gates failed. Regenerate once with the combined
+        # instruction text from the failing gates.
+        self._gates_regenerated_this_turn = True
+        action_text = batch.combined_action or "Fix the policy violations."
+
+        try:
+            rewritten = await asyncio.to_thread(
+                self.regenerate_after_gates,
+                response_text,
+                action_text,
+            )
+        except Exception:
+            logger.warning(
+                "Gate-driven regenerate raised, keeping original",
+                exc_info=True,
+            )
+            record_regenerate_outcome(batch.failure_ids(), success=False)
+            return response_text
+
+        # Re-check gates over the rewritten text. If still failing,
+        # annotate via SSE but ship the rewrite (one-regenerate cap).
+        try:
+            second = run_gates(replace(context, response_text=rewritten))
+        except Exception:
+            logger.warning("Second-pass run_gates raised, accepting rewrite", exc_info=True)
+            record_regenerate_outcome(batch.failure_ids(), success=True)
+            return rewritten
+
+        if second.passed:
+            record_regenerate_outcome(batch.failure_ids(), success=True)
+            return rewritten
+
+        record_regenerate_outcome(batch.failure_ids(), success=False)
+        try:
+            await emit_fn("critic_review", second.to_event_payload())
+        except Exception:
+            logger.warning(
+                "emit_fn raised on critic_review (gates)", exc_info=True
+            )
+        return rewritten
+
 
 # -- Helpers ------------------------------------------------------------------
+
+
+def _gates_layer_enabled_safe() -> bool:
+    """Fail-safe wrapper around the gate-layer master switch."""
+    try:
+        from src.agent.response_gates import is_gates_layer_enabled
+        return is_gates_layer_enabled()
+    except Exception:
+        logger.warning("is_gates_layer_enabled raised, skipping gates", exc_info=True)
+        return False
+
+
+def _detect_active_alert_ids_safe(user_model) -> tuple[str, ...]:
+    """Best-effort lookup of active critical/warn alert ids for this user.
+
+    Used by ``AgentLoop`` to populate ``GateContext.runtime_context_alerts``
+    for Gate 4 (holistic_alert_acknowledged). Returns an empty tuple on
+    any error so a missing recovery_alerts table never breaks the loop.
+    """
+    try:
+        from src.config import get_settings as _gs
+        settings = _gs()
+        if not settings.use_supabase:
+            return ()
+        user_id = getattr(user_model, "user_id", None) or settings.agenticsports_user_id
+        if not user_id:
+            return ()
+        from src.services.recovery_alerts import detect_alerts
+
+        alerts = detect_alerts(user_id)
+        # Encode as "<severity>:<pattern>" so Gate 4 can filter info-only.
+        return tuple(f"{a.severity}:{a.pattern}" for a in alerts)
+    except Exception:
+        logger.debug("_detect_active_alert_ids_safe failed", exc_info=True)
+        return ()
+
+
+def _flatten_recent_tools(
+    window: "deque[frozenset[str]]",
+    current_turn_tools: list[str],
+) -> tuple[str, ...]:
+    """Union the last-3 user-turns plus the current turn's tools.
+
+    The deque ``window`` is populated AT END of each ``process_message``
+    call, so during ``_run_gates_pass`` (which runs after the LLM but
+    before the deque is updated) the current turn's tools live in
+    ``current_turn_tools``. We union both so Gate 3 sees the freshly
+    called tools as well.
+    """
+    seen: set[str] = set(current_turn_tools)
+    for turn_set in window:
+        seen.update(turn_set)
+    return tuple(sorted(seen))
 
 
 def _should_run_critic_safe(user_model) -> bool:

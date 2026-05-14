@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query
 
 from src.services.cache_telemetry import get_telemetry
 from src.services.critic_metrics import get_metrics as get_critic_metrics
+from src.services.gates_metrics import get_gates_metrics
 from src.services.prompt_metrics import get_prompt_metrics
 
 router = APIRouter(tags=["admin"])
@@ -49,3 +50,16 @@ async def critic_stats() -> dict:
         critic calls, and the average critic latency in milliseconds.
     """
     return get_critic_metrics().summary()
+
+
+@router.get("/gates-stats")
+async def gates_stats() -> dict:
+    """Per-gate counters for the deterministic response-gate layer (Sprint D).
+
+    Returns:
+        Dict with per-gate outcome counts (pass / fail / gate_error /
+        regenerate_success / regenerate_failed), derived per-gate fail
+        rates, and aggregate regenerate counters over the last ~1000
+        gate runs. See ``src/services/gates_metrics.py``.
+    """
+    return get_gates_metrics().summary()
