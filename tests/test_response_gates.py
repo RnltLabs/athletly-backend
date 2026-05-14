@@ -595,3 +595,112 @@ def test_persona_war_heute_laufen_blocked():
     batch = run_gates(ctx)
     assert not batch.passed
     assert "temporal_freshness" in batch.failure_ids()
+
+
+# ---------------------------------------------------------------------------
+# Sprint J: holistic_alert end-to-end with Marco's persona seed
+# ---------------------------------------------------------------------------
+
+
+def _marco_alert_ids() -> tuple[str, ...]:
+    """Drive Marco's persona through the recovery_alerts detector
+    and encode the result the way agent_loop._detect_active_alert_ids_safe
+    does. Returns a non-empty tuple by construction (Sprint J fix).
+    """
+    from src.services.recovery_alerts import detect_alerts_from_metrics
+    from tools.persona_test._persona import load_persona
+    from tools.persona_test.fake_metrics import generate
+
+    persona = load_persona("marco")
+    rows = generate(persona, user_id="marco-gates-test", days=30)
+    metrics = [
+        {
+            "date": r.date,
+            "sleep_minutes": r.sleep_duration_minutes,
+            "hrv": r.hrv_avg,
+            "resting_hr": r.resting_heart_rate,
+            "stress": r.stress_avg,
+            "body_battery_high": r.body_battery_high,
+            "recovery_score": r.recovery_score,
+        }
+        for r in rows
+    ]
+    alerts = detect_alerts_from_metrics(metrics)
+    return tuple(f"{a.severity}:{a.pattern}" for a in alerts)
+
+
+def test_marco_persona_produces_alert_ids_for_gate():
+    """Marco's seed must hand at least one actionable id to the gate."""
+    ids = _marco_alert_ids()
+    actionable = [i for i in ids if not i.startswith("info:")]
+    assert actionable, (
+        f"Sprint J regression: Marco's persona must produce actionable "
+        f"alert ids, got {ids}"
+    )
+
+
+def test_holistic_alert_fires_for_marco_when_response_ignores_recovery():
+    """End-to-end Sprint J check: given Marco's alert payload, an ignorant
+    response must fail the holistic_alert gate.
+    """
+    ids = _marco_alert_ids()
+    ctx = _ctx(
+        user_message="kurz frage: mach ich heute den 10k oder den 5k?",
+        response_text=(
+            "Mach den 10k, dein Plan sieht das so vor."
+        ),
+        alerts=ids,
+    )
+    result = _gate_holistic_alert(ctx)
+    assert not result.passed, (
+        f"Gate should fail when Marco has alerts {ids} but the response "
+        f"ignores recovery."
+    )
+    assert "Schlaf" in (result.required_action or "") or "Recovery" in (
+        result.required_action or ""
+    )
+
+
+def test_holistic_alert_passes_for_marco_when_response_addresses_sleep():
+    """Acknowledging the recovery domain in German must pass the gate."""
+    ids = _marco_alert_ids()
+    ctx = _ctx(
+        user_message="kurz frage: mach ich heute den 10k oder den 5k?",
+        response_text=(
+            "Dein Schlaf ist seit Tagen knapp und HRV liegt unter dem "
+            "Baseline. Heute lieber den 5k locker."
+        ),
+        alerts=ids,
+    )
+    result = _gate_holistic_alert(ctx)
+    assert result.passed
+
+
+def test_run_gates_records_holistic_alert_fail_for_marco():
+    """Verify the metrics layer records a fail when Marco's alerts go
+    unacknowledged. This is what the /admin/gates-stats endpoint reports.
+    """
+    ids = _marco_alert_ids()
+    ctx = _ctx(
+        user_message="hi",
+        response_text="alles top, mach einfach weiter so.",
+        alerts=ids,
+        # Ground the stats gate so only holistic_alert fails.
+        tools_recent=("get_activities",),
+    )
+    batch = run_gates(ctx)
+    assert not batch.passed
+    assert "holistic_alert" in batch.failure_ids()
+
+    metrics = get_gates_metrics()
+    summary = metrics.summary()
+    holistic = summary["per_gate"]["holistic_alert"]
+    assert holistic.get("fail", 0) >= 1, (
+        f"Expected holistic_alert.fail to record >= 1 after Marco run, "
+        f"got summary {summary}"
+    )
+    rates = summary["rates"]["holistic_alert"]
+    assert rates["fail_rate"] > 0.0, (
+        f"Sprint J expectation: holistic_alert fail_rate must be > 0 "
+        f"after a Marco-style run; got {rates}"
+    )

@@ -9,6 +9,14 @@ Columns covered:
     sleep_awake_minutes, stress_avg, body_battery_high, body_battery_low,
     recovery_score, steps, active_calories, total_calories, vo2max,
     spo2_avg, respiration_avg, intensity_minutes, floors_climbed
+
+Recovery profile:
+    Persona.recovery_profile in {"normal", "low", "high"} drives the
+    most-recent-window shape. "low" deterministically produces sub-baseline
+    values for the recent 7 days so the recovery_alerts patterns
+    (sleep_low_3d, hrv_drop, rhr_elevation, body_battery_chronic,
+    stress_chronic, recovery_score_low) fire reliably. "high" keeps
+    everything green. "normal" is the legacy noise-around-baseline path.
 """
 
 from __future__ import annotations
@@ -18,6 +26,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from tools.persona_test._persona import Persona
+
+
+# Number of most-recent days that the "low" recovery profile forces into
+# alert-triggering territory. Must be >= 7 so HRV recent-7 average is
+# fully below baseline and >= 5 so stress_chronic fires (5 of 7 days).
+_LOW_RECOVERY_RECENT_DAYS: int = 7
 
 
 @dataclass(frozen=True)
@@ -83,15 +97,32 @@ def generate(
     today: date | None = None,
     days: int = 30,
 ) -> list[SyntheticDailyMetric]:
-    """Generate *days* worth of health metrics ending on *today* (inclusive)."""
+    """Generate *days* worth of health metrics ending on *today* (inclusive).
+
+    Persona `recovery_profile` drives the most-recent-day shape:
+    - "normal" (default): historic centered-around-baseline noise.
+    - "low": the recent window is forced into deterministic
+      alert-triggering territory (sub-baseline sleep, depressed HRV,
+      elevated RHR, low body battery, elevated stress). The 30-day
+      baseline window is preserved so the recovery_alerts pattern
+      checks have valid history to compare against.
+    - "high": noise stays in the green band, no alerts ever fire.
+    """
     if today is None:
         today = datetime.now(timezone.utc).date()
+
+    profile = getattr(persona, "recovery_profile", "normal") or "normal"
 
     out: list[SyntheticDailyMetric] = []
     for offset in range(days):
         d = today - timedelta(days=offset)
         rng = random.Random(hash((persona.slug, d.isoformat(), "metric")) & 0xFFFFFFFF)
-        out.append(_one_day(persona, user_id, d, rng))
+        if profile == "low" and offset < _LOW_RECOVERY_RECENT_DAYS:
+            out.append(_one_day_low_recovery(persona, user_id, d, rng, offset))
+        elif profile == "high":
+            out.append(_one_day_high_recovery(persona, user_id, d, rng))
+        else:
+            out.append(_one_day(persona, user_id, d, rng))
     return out
 
 
@@ -178,4 +209,162 @@ def _one_day(
         spo2_avg=spo2,
         respiration_avg=resp,
         vo2max=vo2,
+    )
+
+
+def _one_day_low_recovery(
+    persona: Persona,
+    user_id: str,
+    d: date,
+    rng: random.Random,
+    offset: int,
+) -> SyntheticDailyMetric:
+    """Deterministically build a single recent day in the low-recovery band.
+
+    Designed to make the recovery_alerts module light up:
+    - sleep_minutes ~ 300 (5h) for offset < 3 -> sleep_low_3d
+    - hrv ~ baseline * 0.7 across all 7 recent days -> hrv_drop
+    - resting_hr ~ baseline + 8 for offset < 3 -> rhr_elevation
+    - body_battery_high ~ 22 for offset < 3 -> body_battery_chronic
+    - stress ~ 72 for offset < 5 -> stress_chronic
+    - recovery_score ~ 22 for offset < 2 -> recovery_score_low
+
+    Older days (offset >= _LOW_RECOVERY_RECENT_DAYS) use the normal path so
+    the 30-day baseline windows for HRV / RHR drop checks have realistic
+    history to anchor against.
+    """
+    # Sleep: alert fires when sleep_minutes < 360 (6h) for 3 consecutive
+    # days. We sit the first 3 days at ~290-320 min (4.8-5.3h).
+    if offset < 3:
+        sleep_h = 5.0 + rng.uniform(-0.2, 0.3)  # 4.8h to 5.3h
+    else:
+        sleep_h = 5.6 + rng.uniform(-0.2, 0.3)  # 5.4h to 5.9h, still < 6h baseline
+    sleep_dur_min = round(sleep_h * 60, 1)
+    sleep_deep = round(sleep_dur_min * rng.uniform(0.10, 0.16), 1)
+    sleep_rem = round(sleep_dur_min * rng.uniform(0.16, 0.22), 1)
+    sleep_awake = round(sleep_dur_min * rng.uniform(0.05, 0.10), 1)
+    sleep_light = round(sleep_dur_min - sleep_deep - sleep_rem - sleep_awake, 1)
+    sleep_score = max(20, min(100, int(58 + rng.uniform(-8, 8))))
+
+    # HRV: ~70% of baseline -> 18%+ drop vs the 30-day average that the
+    # older "normal" days establish. Hard floor 15ms to stay realistic.
+    hrv_base = persona.hrv_baseline_ms
+    hrv = round(max(15.0, hrv_base * 0.70 + rng.uniform(-2.0, 2.0)), 1)
+
+    # RHR: elevated > baseline + 5 for the first 3 consecutive days.
+    # The detector's 14-day baseline window includes the recent days, so
+    # the threshold drifts up if the elevation is mild. We need a clean
+    # separation: latest 3 days far above the (still-recent-contaminated)
+    # 14-day average to reliably cross the +5 bpm threshold.
+    if offset < 3:
+        rhr = int(persona.rhr_baseline_bpm + 13 + rng.uniform(-1, 2))
+    elif offset < 7:
+        rhr = int(persona.rhr_baseline_bpm + 2 + rng.uniform(-1, 2))
+    else:
+        rhr = int(persona.rhr_baseline_bpm + 1 + rng.uniform(-1, 2))
+    rhr = max(35, min(85, rhr))
+
+    # Stress: > 60 for at least 5 of the 7 recent days.
+    if offset < 5:
+        stress = max(15, min(85, int(72 + rng.uniform(-4, 4))))
+    else:
+        stress = max(15, min(85, int(55 + rng.uniform(-5, 5))))
+
+    # Body battery high: < 30 for 3 consecutive days.
+    if offset < 3:
+        body_battery_high = max(20, min(100, int(22 + rng.uniform(-2, 3))))
+    else:
+        body_battery_high = max(20, min(100, int(45 + rng.uniform(-5, 5))))
+    body_battery_low = max(5, min(40, int(8 + rng.uniform(-2, 2))))
+
+    # Recovery score: < 30 for the most recent 2 days, never below
+    # RECOVERY_CRITICAL_THRESHOLD (20) so we surface a warn alert and not
+    # a critical one. Marco's seed should look like "chronic underrecovery"
+    # not "rush him to the ER".
+    if offset < 2:
+        recovery = max(20, min(100, int(25 + rng.uniform(-2, 3))))
+    else:
+        recovery = max(15, min(100, int(45 + rng.uniform(-6, 6))))
+
+    steps = int(rng.uniform(4500, 9500))
+    active_cal = int(rng.uniform(250, 700))
+    total_cal = int(active_cal + rng.uniform(1500, 1900))
+    floors = int(rng.uniform(2, 14))
+    intensity_min = int(rng.uniform(10, 60))
+    spo2 = round(96 + rng.uniform(-0.8, 0.6), 1)
+    resp = round(15.0 + rng.uniform(-0.8, 1.0), 1)
+    vo2 = round(persona.estimated_vo2max + rng.uniform(-0.5, 0.5), 1)
+
+    return SyntheticDailyMetric(
+        user_id=user_id,
+        date=d.isoformat(),
+        resting_heart_rate=rhr,
+        hrv_avg=hrv,
+        sleep_score=sleep_score,
+        sleep_duration_minutes=sleep_dur_min,
+        sleep_deep_minutes=sleep_deep,
+        sleep_light_minutes=sleep_light,
+        sleep_rem_minutes=sleep_rem,
+        sleep_awake_minutes=sleep_awake,
+        stress_avg=stress,
+        body_battery_high=body_battery_high,
+        body_battery_low=body_battery_low,
+        recovery_score=recovery,
+        steps=steps,
+        active_calories=active_cal,
+        total_calories=total_cal,
+        floors_climbed=floors,
+        intensity_minutes=intensity_min,
+        spo2_avg=spo2,
+        respiration_avg=resp,
+        vo2max=vo2,
+    )
+
+
+def _one_day_high_recovery(
+    persona: Persona,
+    user_id: str,
+    d: date,
+    rng: random.Random,
+) -> SyntheticDailyMetric:
+    """All-green day. Used by personas with `recovery_profile: high`."""
+    # Sleep always >= 8h.
+    sleep_h = 8.0 + rng.uniform(-0.3, 0.5)
+    sleep_dur_min = round(sleep_h * 60, 1)
+    sleep_deep = round(sleep_dur_min * rng.uniform(0.15, 0.20), 1)
+    sleep_rem = round(sleep_dur_min * rng.uniform(0.20, 0.25), 1)
+    sleep_awake = round(sleep_dur_min * rng.uniform(0.02, 0.05), 1)
+    sleep_light = round(sleep_dur_min - sleep_deep - sleep_rem - sleep_awake, 1)
+    sleep_score = max(70, min(100, int(88 + rng.uniform(-4, 6))))
+
+    hrv = round(max(20.0, persona.hrv_baseline_ms + rng.uniform(-2, 4)), 1)
+    rhr = max(35, min(85, int(persona.rhr_baseline_bpm - 1 + rng.uniform(-1, 1))))
+    stress = max(15, min(85, int(25 + rng.uniform(-5, 5))))
+    body_battery_high = max(60, min(100, int(85 + rng.uniform(-5, 5))))
+    body_battery_low = max(15, min(40, int(30 + rng.uniform(-3, 3))))
+    recovery = max(60, min(100, int(82 + rng.uniform(-5, 5))))
+
+    return SyntheticDailyMetric(
+        user_id=user_id,
+        date=d.isoformat(),
+        resting_heart_rate=rhr,
+        hrv_avg=hrv,
+        sleep_score=sleep_score,
+        sleep_duration_minutes=sleep_dur_min,
+        sleep_deep_minutes=sleep_deep,
+        sleep_light_minutes=sleep_light,
+        sleep_rem_minutes=sleep_rem,
+        sleep_awake_minutes=sleep_awake,
+        stress_avg=stress,
+        body_battery_high=body_battery_high,
+        body_battery_low=body_battery_low,
+        recovery_score=recovery,
+        steps=int(rng.uniform(8000, 14000)),
+        active_calories=int(rng.uniform(400, 900)),
+        total_calories=int(rng.uniform(2000, 2700)),
+        floors_climbed=int(rng.uniform(4, 20)),
+        intensity_minutes=int(rng.uniform(30, 90)),
+        spo2_avg=round(97 + rng.uniform(-0.4, 0.8), 1),
+        respiration_avg=round(14.0 + rng.uniform(-0.8, 0.8), 1),
+        vo2max=round(persona.estimated_vo2max + rng.uniform(-0.3, 0.5), 1),
     )

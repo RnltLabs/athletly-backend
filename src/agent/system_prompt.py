@@ -14,7 +14,10 @@ evaluation criteria) at runtime via Agent Config Store tools. The system prompt
 is a blank slate -- a generalist coach that learns everything via tools.
 """
 
+import logging
 from datetime import date as _date_cls
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -856,10 +859,25 @@ def build_runtime_context(
             )
             alerts = detect_alerts(_uid_a)
             block = format_alerts_block(alerts)
+            # Observability: log every build so we can correlate
+            # gate fail-rate with the alert detection upstream. INFO
+            # because this is a per-turn signal we want in production
+            # traces during Sprint J holistic_alert investigation.
+            logger.info(
+                "runtime_context.alerts user_id=%s count=%d ids=%s block_chars=%d",
+                _uid_a,
+                len(alerts),
+                [f"{a.severity}:{a.pattern}" for a in alerts],
+                len(block),
+            )
             if block:
                 sections.append(block)
     except Exception:
-        pass  # Non-critical -- never break context build
+        # Defensive: never break context build, but log so the gate
+        # fail-rate regression in Sprint J is debuggable.
+        logger.warning(
+            "runtime_context.alerts injection failed", exc_info=True,
+        )
 
     # --- Reflexion Lessons (Feature 3) ---
     # Inject up to 5 most-relevant lessons distilled by the reflection

@@ -1764,6 +1764,12 @@ def _detect_active_alert_ids_safe(user_model) -> tuple[str, ...]:
     Used by ``AgentLoop`` to populate ``GateContext.runtime_context_alerts``
     for Gate 4 (holistic_alert_acknowledged). Returns an empty tuple on
     any error so a missing recovery_alerts table never breaks the loop.
+
+    Logs the detected alert ids at INFO so production traces show the
+    gate is receiving fresh data each turn. Helps diagnose 0% fail-rate
+    regressions (Sprint J): if this list is consistently empty, either
+    the user has no health data or the recovery_alerts thresholds need
+    tuning for the persona seed shape.
     """
     try:
         from src.config import get_settings as _gs
@@ -1777,9 +1783,21 @@ def _detect_active_alert_ids_safe(user_model) -> tuple[str, ...]:
 
         alerts = detect_alerts(user_id)
         # Encode as "<severity>:<pattern>" so Gate 4 can filter info-only.
-        return tuple(f"{a.severity}:{a.pattern}" for a in alerts)
+        ids = tuple(f"{a.severity}:{a.pattern}" for a in alerts)
+        # Observability: every turn logs the detected alert set so the
+        # holistic_alert gate fail-rate is auditable from logs alone.
+        logger.info(
+            "recovery_alerts.detected user_id=%s count=%d ids=%s",
+            user_id,
+            len(ids),
+            list(ids),
+        )
+        return ids
     except Exception:
-        logger.debug("_detect_active_alert_ids_safe failed", exc_info=True)
+        logger.warning(
+            "_detect_active_alert_ids_safe failed; gate sees empty alerts",
+            exc_info=True,
+        )
         return ()
 
 
