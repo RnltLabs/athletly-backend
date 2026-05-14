@@ -265,6 +265,53 @@ async def get_identity(
     )
 
 
+# ---------------------------------------------------------------------------
+# GET /profile/identity/widgets - LLM-driven GenUI widget list
+# ---------------------------------------------------------------------------
+#
+# Converts the athlete journal markdown into a list of typed UI widgets via
+# Claude Haiku 4.5. The frontend renders each widget with a dedicated
+# component, so ANY content the agent writes into the journal becomes
+# properly visualized without per-section frontend logic.
+#
+# All failures degrade gracefully: missing data, LLM error, parsing error,
+# Redis outage. The endpoint always returns 200 with at least a minimal
+# fallback widget list built from the structured profile.
+
+
+@router.get("/identity/widgets")
+async def get_identity_widgets_endpoint(
+    user_id: Annotated[str, Depends(get_user_id)],
+) -> dict[str, Any]:
+    """Return the LLM-generated widget list for the identity screen.
+
+    Cache strategy: Redis with TTL 7 days, keyed by user_id + content hash
+    of the journal + structured profile. Any edit to the source data
+    automatically busts the cache.
+    """
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Unauthenticated")
+
+    from src.services.identity_widgets import get_identity_widgets
+
+    try:
+        response = await get_identity_widgets(user_id)
+        return response.model_dump()
+    except Exception:
+        # Last-resort safety net: the service already handles every known
+        # failure mode internally, but if something truly unexpected leaks
+        # through we still owe the frontend a 200 response.
+        logger.exception(
+            "identity/widgets: unexpected failure for user=%s", user_id,
+        )
+        return {
+            "widgets": [],
+            "generated_at": "",
+            "cache_hit": False,
+            "edit_hint_per_widget": {},
+        }
+
+
 # Tables keyed by user_id that get wiped during reset.
 # Order is from leaf to root (dependents first) where there are FKs.
 # Deliberately excludes ``provider_tokens`` - see module docstring.
