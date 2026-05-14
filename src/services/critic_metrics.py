@@ -59,19 +59,12 @@ class CriticMetrics:
 
         Args:
             action: one of "accept", "regenerate", "regenerate_failed",
-                "critic_error", "budget_skipped". Anything else is
-                rejected (typo guard).
+                "critic_error". Anything else is rejected (typo guard).
             violations: tuple of rule ids that fired (empty for accept
                 and critic_error).
             latency_ms: wall-clock duration of the critic LLM call.
         """
-        if action not in {
-            "accept",
-            "regenerate",
-            "regenerate_failed",
-            "critic_error",
-            "budget_skipped",
-        }:
+        if action not in {"accept", "regenerate", "regenerate_failed", "critic_error"}:
             # Defensive: never let metrics corruption break the agent.
             return
         rec = CritiqueRecord(
@@ -96,20 +89,12 @@ class CriticMetrics:
                 "regenerate_rate": 0.0,
                 "regenerate_failed_rate": 0.0,
                 "critic_error_rate": 0.0,
-                "budget_skipped_rate": 0.0,
-                "budget_skipped_count": 0,
                 "by_rule": {rid: 0 for rid in RULE_IDS},
                 "avg_critic_latency_ms": 0,
             }
 
         # Per-action counters.
-        counts = {
-            "accept": 0,
-            "regenerate": 0,
-            "regenerate_failed": 0,
-            "critic_error": 0,
-            "budget_skipped": 0,
-        }
+        counts = {"accept": 0, "regenerate": 0, "regenerate_failed": 0, "critic_error": 0}
         by_rule: dict[str, int] = {rid: 0 for rid in RULE_IDS}
         total_latency = 0
 
@@ -126,8 +111,6 @@ class CriticMetrics:
             "regenerate_rate": round(counts["regenerate"] / n, 4),
             "regenerate_failed_rate": round(counts["regenerate_failed"] / n, 4),
             "critic_error_rate": round(counts["critic_error"] / n, 4),
-            "budget_skipped_rate": round(counts["budget_skipped"] / n, 4),
-            "budget_skipped_count": counts["budget_skipped"],
             "by_rule": by_rule,
             "avg_critic_latency_ms": total_latency // n,
         }

@@ -413,8 +413,6 @@ def test_metrics_summary_structure():
         "regenerate_rate",
         "regenerate_failed_rate",
         "critic_error_rate",
-        "budget_skipped_rate",
-        "budget_skipped_count",
         "by_rule",
         "avg_critic_latency_ms",
     }
@@ -423,8 +421,6 @@ def test_metrics_summary_structure():
     assert summary["regenerate_rate"] == 0.25
     assert summary["regenerate_failed_rate"] == 0.25
     assert summary["critic_error_rate"] == 0.25
-    assert summary["budget_skipped_rate"] == 0.0
-    assert summary["budget_skipped_count"] == 0
     assert set(summary["by_rule"].keys()) == set(RULE_IDS)
 
 

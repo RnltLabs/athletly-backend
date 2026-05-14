@@ -1441,11 +1441,6 @@ class AsyncAgentLoop(AgentLoop):
 
         critic = get_critic()
         metrics = get_metrics()
-        chain_start = time.perf_counter()
-        try:
-            total_budget_s = float(get_settings().critic_total_budget_s)
-        except Exception:
-            total_budget_s = 6.0
 
         # -- Stage 1: hard inspector ---------------------------------------
         hard_violations = hard_inspect(response_text, user_message)
@@ -1510,37 +1505,6 @@ class AsyncAgentLoop(AgentLoop):
                     [v.rule for v in still_hard],
                 )
             rewritten = sanitized
-
-        # Chain budget cap: if the elapsed wall-clock for the chain has
-        # already exceeded ``critic_total_budget_s`` we skip the
-        # second-pass LLM call and ship the rewrite annotated as
-        # degraded. This bounds the worst-case tail (first + regen + 2nd)
-        # to roughly the budget; without this the chain could compound
-        # three serial timeouts.
-        elapsed_s = time.perf_counter() - chain_start
-        if elapsed_s >= total_budget_s:
-            metrics.record(
-                action="budget_skipped",
-                violations=first.violation_ids(),
-                latency_ms=int(elapsed_s * 1000),
-            )
-            payload = {
-                "violations": [
-                    {"rule": v.rule, "reason": v.reason}
-                    for v in first.violations
-                ],
-                "annotated": True,
-                "degraded": True,
-                "source": "critic_total_budget",
-            }
-            try:
-                await emit_fn("critic_review", payload)
-            except Exception:
-                logger.warning(
-                    "emit_fn raised on critic_review (budget skip)",
-                    exc_info=True,
-                )
-            return rewritten
 
         # Second soft pass on the (now hard-clean) rewrite.
         second = await asyncio.to_thread(

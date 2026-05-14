@@ -107,13 +107,6 @@ class Settings(BaseSettings):
     # Hard rules are now checked deterministically (see hard_inspect) and do
     # not rely on this LLM call, so it is safe to use a wider budget here.
     critic_timeout_s: float = 4.0
-    # Total wall-clock budget for the entire critic chain (first pass +
-    # regenerate + second pass). When the chain exceeds this many seconds
-    # before the second-pass LLM call, the second pass is skipped and the
-    # regenerate text ships annotated as degraded. Bounds the worst-case
-    # tail latency observed in prod (avg_critic_latency_ms 8683 ms with a
-    # 4.0 s per-call timeout = three serial calls compounding).
-    critic_total_budget_s: float = 6.0
 
     # -- Deterministic response gates (Sprint D) ------------------------------
     # Master switch for the entire gate layer. When False the gates are
