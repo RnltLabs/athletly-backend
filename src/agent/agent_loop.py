@@ -1292,24 +1292,51 @@ class AsyncAgentLoop(AgentLoop):
     ) -> str:
         """Score *response_text* against the constitution and act.
 
-        Decision logic (DESIGN.md section 3):
-        - accept -> return original
-        - regenerate (first time) -> rewrite the response, score AGAIN,
-          and return the rewrite (regardless of the second verdict)
-        - if the rewrite still violates, emit a ``critic_review`` SSE
-          event so the frontend can log it; do NOT block the message.
+        Two-tier decision logic (DESIGN.md, Two-Tier Constitutional Critic):
 
-        Fail-open: any exception from the critic is treated as accept.
+        Stage 1 - Hard inspector (deterministic, always-block).
+            Sub-millisecond regex checks for em-dash, markdown, ASCII
+            umlauts. If any hard rule fires we MUST block: regenerate
+            once, re-inspect, and as last resort sanitize the rewrite
+            to guarantee zero hard violations on the shipped text.
+
+        Stage 2 - Soft critic (LLM, fail-open allowed).
+            For the five judgment-based rules (fabricated_stats,
+            premature_trends, language_mirror, details_before_metrics,
+            sync_then_status). A timeout / parse error here records
+            ``critic_error`` and ships the original; the soft rules are
+            advisory and we keep latency bounded.
+
         Metrics are recorded for every decision so /admin/critic-stats
         stays accurate even when the critic fails.
         """
-        from src.agent.critic import get_critic  # local import: avoids cycle
+        from src.agent.critic import (
+            get_critic,
+            hard_inspect,
+            sanitize_hard,
+        )
         from src.services.critic_metrics import get_metrics
 
         critic = get_critic()
         metrics = get_metrics()
 
-        # First pass.
+        # -- Stage 1: hard inspector ---------------------------------------
+        hard_violations = hard_inspect(response_text, user_message)
+        if hard_violations:
+            response_text = await self._handle_hard_violations(
+                response_text=response_text,
+                user_message=user_message,
+                hard_violations=hard_violations,
+                metrics=metrics,
+                emit_fn=emit_fn,
+                sanitize=sanitize_hard,
+                hard_inspect_fn=hard_inspect,
+            )
+            # The handler returns text that is guaranteed clean on hard
+            # rules. We still run the soft critic on it below so the
+            # soft-rule policy is enforced too.
+
+        # -- Stage 2: soft critic -----------------------------------------
         first = await asyncio.to_thread(
             critic.review,
             response_text,
@@ -1317,22 +1344,47 @@ class AsyncAgentLoop(AgentLoop):
             tool_names,
         )
 
-        if first.error or first.action == "accept":
+        if first.error:
             metrics.record(
-                action="critic_error" if first.error else "accept",
-                violations=first.violation_ids(),
+                action="critic_error",
+                violations=(),
+                latency_ms=first.latency_ms,
+            )
+            return response_text
+        if first.action == "accept":
+            metrics.record(
+                action="accept",
+                violations=(),
                 latency_ms=first.latency_ms,
             )
             return response_text
 
-        # action == "regenerate" -> one retry.
+        # Soft violation: one regenerate attempt.
         rewritten = await asyncio.to_thread(
             self.regenerate_after_critique,
             response_text,
             [{"rule": v.rule, "reason": v.reason} for v in first.violations],
         )
-        # Second critic pass on the rewrite. If it still violates, we
-        # annotate via SSE but do NOT regenerate again (cost cap).
+
+        # Re-inspect hard rules on the rewrite. If the regenerate
+        # introduced new hard violations (em-dash, markdown, ascii
+        # umlauts) we sanitize before going further. This protects the
+        # invariant: NO hard violation ever ships.
+        rewrite_hard = hard_inspect(rewritten, user_message)
+        if rewrite_hard:
+            sanitized = sanitize_hard(rewritten, user_message)
+            # Defence in depth: if even the sanitizer somehow left a
+            # hard violation, log loudly and ship the sanitized version
+            # anyway - it cannot be worse than the input.
+            still_hard = hard_inspect(sanitized, user_message)
+            if still_hard:
+                logger.error(
+                    "sanitize_hard left residual hard violations: %s",
+                    [v.rule for v in still_hard],
+                )
+            rewritten = sanitized
+
+        # Second soft pass on the (now hard-clean) rewrite.
         second = await asyncio.to_thread(
             critic.review,
             rewritten,
@@ -1347,18 +1399,77 @@ class AsyncAgentLoop(AgentLoop):
             )
             return rewritten
 
-        # Still violating after retry. Send the rewritten response (best
-        # we have) and emit a critic_review event for observability.
+        # Still flagged on soft rules after regenerate. Soft rules are
+        # LLM-judgment so we ship the rewrite but mark it with a
+        # critic_review event carrying ``degraded=True`` so the frontend
+        # can surface a "this answer may contain inaccuracies" notice
+        # rather than silently shipping potentially fabricated content.
         metrics.record(
             action="regenerate_failed",
             violations=second.violation_ids(),
             latency_ms=first.latency_ms + second.latency_ms,
         )
+        payload = second.to_event_payload()
+        payload["degraded"] = True
         try:
-            await emit_fn("critic_review", second.to_event_payload())
+            await emit_fn("critic_review", payload)
         except Exception:
             logger.warning("emit_fn raised on critic_review", exc_info=True)
         return rewritten
+
+    async def _handle_hard_violations(
+        self,
+        *,
+        response_text: str,
+        user_message: str,
+        hard_violations: tuple,
+        metrics,
+        emit_fn: Callable,
+        sanitize: Callable,
+        hard_inspect_fn: Callable,
+    ) -> str:
+        """Block-and-regenerate path for deterministic hard violations.
+
+        Contract: returns text with ZERO hard-rule violations. Never
+        fails open. Uses one LLM regenerate, then a deterministic
+        sanitizer as last resort.
+        """
+        rewritten = await asyncio.to_thread(
+            self.regenerate_after_critique,
+            response_text,
+            [{"rule": v.rule, "reason": v.reason} for v in hard_violations],
+        )
+        rewrite_hard = hard_inspect_fn(rewritten, user_message)
+        if not rewrite_hard:
+            # Regenerate produced clean text. Record as a successful
+            # regenerate against the original hard rules.
+            metrics.record(
+                action="regenerate",
+                violations=tuple(v.rule for v in hard_violations),
+                latency_ms=0,
+            )
+            return rewritten
+
+        # Regenerate still has hard violations. Sanitize and mark
+        # degraded so the frontend can warn the user.
+        sanitized = sanitize(rewritten, user_message)
+        metrics.record(
+            action="regenerate_failed",
+            violations=tuple(v.rule for v in rewrite_hard),
+            latency_ms=0,
+        )
+        payload = {
+            "violations": [
+                {"rule": v.rule, "reason": v.reason} for v in rewrite_hard
+            ],
+            "annotated": True,
+            "degraded": True,
+        }
+        try:
+            await emit_fn("critic_review", payload)
+        except Exception:
+            logger.warning("emit_fn raised on critic_review", exc_info=True)
+        return sanitized
 
 
 # -- Helpers ------------------------------------------------------------------
