@@ -55,7 +55,14 @@ _SAVE_PLAN_DESCRIPTION = (
     "}\n"
     "Use this whenever you decide to set or replace the athlete's plan. "
     "For adjustments (move a session, swap intensity, etc.) call "
-    "get_active_plan first, mutate, then save_plan with the new dict."
+    "get_active_plan first, mutate, then save_plan with the new dict.\n\n"
+    "Long horizons (Pro tier, multi-week builds): you may pass a SKINNY "
+    "request with just `duration_weeks`, `start_date`, `goal_event`, "
+    "`goal_date`, and optional `focus`. When `duration_weeks * "
+    "training_days_per_week >= 14` and the athlete is on Pro, save_plan "
+    "internally runs a Plan-and-Execute pipeline (Sonnet planner + Haiku "
+    "executor) that fills in the sessions for you. The pipeline is "
+    "transparent: the saved plan has the same shape either way."
 )
 
 
@@ -160,10 +167,55 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
             or _settings.agenticsports_user_id
         )
 
+    def _resolve_tier() -> str:
+        """Read the athlete's subscription tier with a safe default.
+
+        Tier infrastructure is owned outside this feature. We read from
+        the project profile and fall back to 'free' so existing users
+        keep the current behaviour until tiering ships.
+        """
+        try:
+            profile = user_model.project_profile()
+        except Exception:
+            return "free"
+        tier = profile.get("tier") or profile.get("subscription_tier")
+        return (tier or "free").lower()
+
     def save_plan(plan: dict) -> dict:
         """Persist a training plan and emit an inline plan_preview card."""
         if not isinstance(plan, dict) or not plan:
             return {"error": "plan must be a non-empty dict matching the documented schema"}
+
+        # Plan-and-Execute pre-processing. The agent's tool surface is
+        # unchanged; we transparently expand a skinny multi-week request
+        # into a full plan via the planner pipeline.
+        try:
+            from src.agent.planner import (
+                clamp_for_free_tier,
+                generate_training_plan,
+                should_use_plan_and_execute,
+            )
+            profile = user_model.project_profile()
+            tier = _resolve_tier()
+
+            if tier != "pro":
+                plan = clamp_for_free_tier(plan)
+
+            if should_use_plan_and_execute(plan, profile, tier):
+                logger.info(
+                    "save_plan: invoking Plan-and-Execute (tier=%s, weeks=%s)",
+                    tier, plan.get("duration_weeks"),
+                )
+                result = generate_training_plan(request=plan, profile=profile)
+                if result.mode == "plan_and_execute":
+                    plan = result.plan
+                else:
+                    logger.warning(
+                        "Plan-and-Execute fell back to inline: %s",
+                        result.meta.get("fallback_reason"),
+                    )
+        except Exception as exc:  # pragma: no cover - never block save
+            logger.warning("Plan-and-Execute path skipped: %s", exc)
 
         # Build a new dict instead of mutating the caller's plan.
         saved_plan = {**plan, "_saved_at": datetime.now().isoformat()}
