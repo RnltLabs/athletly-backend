@@ -31,17 +31,37 @@ _MAX_INLINE_PREVIEW_SESSIONS = 30
 
 
 _SAVE_PLAN_DESCRIPTION = (
-    "Persist a weekly training plan you composed AND render an inline "
-    "preview card in the chat. Saving emits a plan_preview UI component "
-    "the frontend renders immediately, so do NOT also describe the plan "
-    "in prose. The frontend reads plan_data.sessions to render the plan "
-    "view. Required shape:\n"
+    "Persist a training plan AND render an inline preview card in the "
+    "chat. Saving emits a plan_preview UI component the frontend renders "
+    "immediately, so do NOT also describe the plan in prose.\n\n"
+    "## When the athlete asks for a multi-week build (>= 3 weeks): "
+    "SKINNY REQUEST (REQUIRED)\n"
+    "DO NOT inline sessions for plans of more than 2 weeks - the per-week "
+    "reasoning is delegated to a dedicated planner pipeline (Sonnet "
+    "planner + Haiku per-week executor). Inlining beyond 2 weeks loses "
+    "coherence and produces a truncated plan. Pass a SKINNY request:\n"
+    "{\n"
+    '  "duration_weeks": 16,                  // REQUIRED for >= 3 weeks\n'
+    '  "start_date": "YYYY-MM-DD (Monday)",   // REQUIRED\n'
+    '  "goal_event": "Marathon Berlin 2026",  // strongly recommended\n'
+    '  "goal_date": "YYYY-MM-DD",             // strongly recommended\n'
+    '  "focus": "16-week marathon build"      // optional label\n'
+    "}\n"
+    "The pipeline expands this into a fully formed plan with per-week "
+    "sessions and saves it. The saved plan has the same on-disk shape as "
+    "the inline shape below, so the UI is identical. If the pipeline "
+    "fails, save_plan returns {\"error\": ..., \"mode\": "
+    "\"planner_failed\"} and you MUST tell the athlete (do not retry "
+    "blindly).\n\n"
+    "## For adjustments and short (<= 2 week) plans: INLINE SHAPE\n"
+    "Use the full inline schema when the athlete wants to move a "
+    "session, swap intensity, or replace a single week:\n"
     "{\n"
     '  "start_date": "YYYY-MM-DD (Monday)",\n'
     '  "focus": "short free-text label",\n'
     '  "sessions": [\n'
     "    {\n"
-    '      "day": "monday|tuesday|... or German equivalent",\n'
+    '      "day": "monday|tuesday|...",\n'
     '      "date": "YYYY-MM-DD",\n'
     '      "sport": "running|cycling|swimming|strength|...",\n'
     '      "name": "session title",\n'
@@ -53,16 +73,12 @@ _SAVE_PLAN_DESCRIPTION = (
     "    }\n"
     "  ]\n"
     "}\n"
-    "Use this whenever you decide to set or replace the athlete's plan. "
-    "For adjustments (move a session, swap intensity, etc.) call "
-    "get_active_plan first, mutate, then save_plan with the new dict.\n\n"
-    "Long horizons (Pro tier, multi-week builds): you may pass a SKINNY "
-    "request with just `duration_weeks`, `start_date`, `goal_event`, "
-    "`goal_date`, and optional `focus`. When `duration_weeks * "
-    "training_days_per_week >= 14` and the athlete is on Pro, save_plan "
-    "internally runs a Plan-and-Execute pipeline (Sonnet planner + Haiku "
-    "executor) that fills in the sessions for you. The pipeline is "
-    "transparent: the saved plan has the same shape either way."
+    "For adjustments: call get_active_plan first, mutate, then save_plan "
+    "with the new dict.\n\n"
+    "Decision rule: if the athlete asks for anything described as a "
+    "'build', a multi-week prep for a race (marathon, half marathon, "
+    "Ironman, 70.3, triathlon, Roth, Kona), or explicitly mentions a "
+    "horizon of 3+ weeks: use the SKINNY shape. Otherwise inline."
 )
 
 
@@ -174,30 +190,67 @@ def register_planning_tools(registry: ToolRegistry, user_model) -> None:
 
         # Plan-and-Execute pre-processing. The agent's tool surface is
         # unchanged; we transparently expand a skinny multi-week request
-        # into a full plan via the planner pipeline when the request is
-        # complex enough (>= 14 session slots).
+        # into a full plan via the planner pipeline when the heuristic
+        # decides the request is long-horizon. On planner failure we
+        # surface the error to the agent rather than silently persisting
+        # the (incomplete) skinny request - silent downgrades destroy
+        # the premium contract.
         try:
             from src.agent.planner import (
                 generate_training_plan,
                 should_use_plan_and_execute,
             )
             profile = user_model.project_profile()
+            planner_should_run = should_use_plan_and_execute(plan, profile)
+        except Exception as exc:
+            # Import or profile failure: log and fall through to the
+            # inline path. The plan dict is still persisted.
+            logger.warning("Plan-and-Execute pre-check skipped: %s", exc)
+            planner_should_run = False
 
-            if should_use_plan_and_execute(plan, profile):
-                logger.info(
-                    "save_plan: invoking Plan-and-Execute (weeks=%s)",
-                    plan.get("duration_weeks"),
-                )
+        if planner_should_run:
+            logger.info(
+                "save_plan: invoking Plan-and-Execute (weeks=%s, focus=%r)",
+                plan.get("duration_weeks") or plan.get("weeks"),
+                plan.get("focus"),
+            )
+            try:
                 result = generate_training_plan(request=plan, profile=profile)
-                if result.mode == "plan_and_execute":
-                    plan = result.plan
-                else:
-                    logger.warning(
-                        "Plan-and-Execute fell back to inline: %s",
-                        result.meta.get("fallback_reason"),
-                    )
-        except Exception as exc:  # pragma: no cover - never block save
-            logger.warning("Plan-and-Execute path skipped: %s", exc)
+            except Exception as exc:
+                logger.error(
+                    "Plan-and-Execute pipeline raised: %s", exc, exc_info=True,
+                )
+                return {
+                    "error": (
+                        "Long-horizon plan generation crashed. Tell the "
+                        "athlete you couldn't build the multi-week plan "
+                        "right now and offer either a shorter 1-2 week "
+                        "block or a retry."
+                    ),
+                    "mode": "planner_failed",
+                    "fallback_reason": f"exception: {exc!r}",
+                }
+            if result.mode == "plan_and_execute":
+                plan = result.plan
+            else:
+                # Planner produced an inline_fallback - DO NOT persist
+                # the (skinny) request silently. The agent's system
+                # prompt rule is: report save_plan errors to the user.
+                logger.warning(
+                    "Plan-and-Execute failed: %s",
+                    result.meta.get("fallback_reason"),
+                )
+                return {
+                    "error": (
+                        "Long-horizon plan generation failed: "
+                        f"{result.meta.get('fallback_reason', 'unknown')}. "
+                        "Tell the athlete you couldn't build the "
+                        "multi-week plan right now and offer either a "
+                        "shorter 1-2 week block or a retry."
+                    ),
+                    "mode": "planner_failed",
+                    "fallback_reason": result.meta.get("fallback_reason"),
+                }
 
         # Build a new dict instead of mutating the caller's plan.
         saved_plan = {**plan, "_saved_at": datetime.now().isoformat()}

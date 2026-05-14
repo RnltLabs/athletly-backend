@@ -49,6 +49,39 @@ logger = logging.getLogger(__name__)
 # coherence and Plan-and-Execute pays off (see RESEARCH.md section 4).
 _COMPLEXITY_SESSION_THRESHOLD = 14
 
+# Explicit-intent threshold: when the agent declares a horizon of at
+# least this many weeks the planner ALWAYS fires, regardless of
+# training-days math. Matches the "DO NOT inline beyond 2 weeks" rule
+# enforced in the save_plan tool description; we set this slightly
+# above 2 to leave room for short adjustments without escalating.
+_LONG_HORIZON_WEEKS_THRESHOLD = 4
+
+# Keyword patterns that indicate a long-horizon (multi-week build)
+# plan even when the agent forgot to set duration_weeks. Used as a
+# defensive backstop. German + English. Lowercased before match.
+_LONG_HORIZON_KEYWORDS: frozenset[str] = frozenset({
+    "marathon",
+    "ironman",
+    "70.3",
+    "triathlon",
+    "half marathon",
+    "halbmarathon",
+    "roth",
+    "kona",
+    "build phase",
+    "race build",
+    "rennaufbau",
+    "trainingsblock",
+    "build block",
+})
+
+# Numeric horizon pattern: matches "8 weeks", "16-week", "12 Wochen",
+# "8 Woche" (sloppy singular). Used by the keyword backstop.
+_LONG_HORIZON_NUMERIC_RE = re.compile(
+    r"\b(\d{1,2})\s*[-\s]?\s*(weeks?|wochen?)\b",
+    re.IGNORECASE,
+)
+
 # Default models. Env overrides:
 #   ATHLETLY_PLANNER_MODEL, ATHLETLY_EXECUTOR_MODEL
 _DEFAULT_PLANNER_MODEL = "anthropic/claude-sonnet-4-5-20250929"
@@ -102,17 +135,40 @@ def should_use_plan_and_execute(
 ) -> bool:
     """Return True when the Plan-and-Execute pipeline should run.
 
-    Pure complexity gate: triggers when the requested plan would produce
-    at least ``_COMPLEXITY_SESSION_THRESHOLD`` session slots
-    (duration_weeks * training_days_per_week). Smaller plans stay
-    inline because the planner overhead does not pay off below the
-    coherence cliff.
+    Three independent gates, in order. The first matching gate wins:
 
-    `duration_weeks` is read from `plan_request['duration_weeks']`
-    first, else inferred from the supplied `sessions` list length
-    divided by training days, else from a `weeks` key. Returns False
-    on any missing/unparseable input.
+    1. Explicit intent gate. If the agent set ``duration_weeks`` or
+       ``weeks`` to >= ``_LONG_HORIZON_WEEKS_THRESHOLD`` (4) the
+       pipeline runs regardless of session math. This is the canonical
+       trigger: the agent declares the horizon, the runtime obliges.
+
+    2. Keyword backstop. If ``focus``, ``goal_event``, or any other
+       free-text field matches a long-horizon keyword (marathon,
+       ironman, "8 Wochen", etc.) the pipeline runs. Defensive layer
+       for the agent's failure mode of writing a build-phase label
+       without setting duration_weeks.
+
+    3. Legacy session-count gate. If the plan dict already carries
+       enough inlined sessions to clear ``_COMPLEXITY_SESSION_THRESHOLD``
+       (duration_weeks * training_days_per_week >= 14), escalate. Kept
+       for backward compat; the agent should never reach this branch
+       after the prompt updates.
+
+    Returns False on missing/unparseable input.
     """
+    if not isinstance(plan_request, dict):
+        return False
+
+    # Gate 1: explicit intent.
+    explicit_weeks = _parse_explicit_weeks(plan_request)
+    if explicit_weeks is not None and explicit_weeks >= _LONG_HORIZON_WEEKS_THRESHOLD:
+        return True
+
+    # Gate 2: keyword backstop.
+    if _looks_like_long_horizon(plan_request):
+        return True
+
+    # Gate 3: legacy session-count.
     weeks = _infer_duration_weeks(plan_request)
     if not weeks:
         return False
@@ -125,6 +181,73 @@ def should_use_plan_and_execute(
         days = 5
 
     return weeks * days >= _COMPLEXITY_SESSION_THRESHOLD
+
+
+def _parse_explicit_weeks(plan_request: dict) -> int | None:
+    """Return the agent's declared horizon in weeks, or None.
+
+    Only reads ``duration_weeks`` and ``weeks`` directly; does NOT
+    fall through to session-list inference. The point of this helper
+    is to detect AGENT INTENT, not to infer from an artifact.
+    """
+    raw = plan_request.get("duration_weeks")
+    if raw is None:
+        raw = plan_request.get("weeks")
+    if isinstance(raw, bool):
+        # bool is an int subclass; treat True/False as missing.
+        return None
+    if isinstance(raw, int) and raw > 0:
+        return min(raw, _MAX_PLAN_WEEKS)
+    if isinstance(raw, str):
+        try:
+            n = int(raw.strip())
+            if n > 0:
+                return min(n, _MAX_PLAN_WEEKS)
+        except ValueError:
+            pass
+    return None
+
+
+def _looks_like_long_horizon(plan_request: dict) -> bool:
+    """Return True if any free-text field signals a multi-week build.
+
+    Scans ``focus``, ``goal_event``, ``goal_date``, and ``meta`` for
+    a long-horizon keyword OR a numeric "N week(s) / N Wochen" pattern
+    with N >= ``_LONG_HORIZON_WEEKS_THRESHOLD``.
+    """
+    haystack_parts: list[str] = []
+    for key in ("focus", "goal_event", "name"):
+        val = plan_request.get(key)
+        if isinstance(val, str):
+            haystack_parts.append(val)
+    # Some agent shapes nest a `goal` dict (project_profile style).
+    goal = plan_request.get("goal")
+    if isinstance(goal, dict):
+        for k in ("event", "target_event"):
+            v = goal.get(k)
+            if isinstance(v, str):
+                haystack_parts.append(v)
+    if not haystack_parts:
+        return False
+
+    haystack = " ".join(haystack_parts).lower()
+
+    # Keyword match: any keyword as substring (lowercased haystack).
+    for kw in _LONG_HORIZON_KEYWORDS:
+        if kw in haystack:
+            return True
+
+    # Numeric horizon pattern.
+    match = _LONG_HORIZON_NUMERIC_RE.search(haystack)
+    if match:
+        try:
+            n = int(match.group(1))
+            if n >= _LONG_HORIZON_WEEKS_THRESHOLD:
+                return True
+        except ValueError:
+            pass
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +401,12 @@ def _run_planner(
     """Invoke the planner LLM and return a validated outline."""
     system_prompt = _load_prompt("planner_system.md")
     user_message = _build_planner_user_message(request, profile)
+
+    # Audit log: this call burns Sonnet (or whatever planner model the
+    # operator configured). Emit a structured line so premium spend is
+    # visible in container logs even though `chat_completion(model=...)`
+    # bypasses the model_router's own log line.
+    _log_planner_invocation(stage="planner", model=model, request=request)
 
     last_error: str | None = None
     for attempt in range(1, _PLANNER_MAX_ATTEMPTS + 1):
@@ -469,6 +598,13 @@ def _run_executor_for_week(
     system_prompt = _load_prompt("executor_system.md")
     week_slot = _build_week_slot(outline, week_index, profile)
     user_message = _build_executor_user_message(week_slot, language)
+
+    # Audit log: typically Haiku (cheap) but operators may override.
+    _log_planner_invocation(
+        stage=f"executor_week_{week_index}",
+        model=model,
+        request={"week": week_index, "phase": week_slot.get("phase")},
+    )
 
     last_error: str | None = None
     for attempt in range(1, _EXECUTOR_MAX_ATTEMPTS + 1):
@@ -874,3 +1010,23 @@ def _emit_progress(
     except Exception:
         # Progress callback must never break the pipeline.
         logger.debug("Progress callback raised; ignoring.", exc_info=True)
+
+
+def _log_planner_invocation(stage: str, model: str, request: dict) -> None:
+    """Emit a structured audit line for a planner/executor LLM call.
+
+    Mirrors the format of ``model_router.log_choice`` so premium spend
+    can be greppable from a single log query: a router call shows up
+    as ``model_router decision tier=complex model=... premium=True``;
+    a planner call shows up as ``planner_invocation stage=... model=...
+    premium=...``. The premium flag is computed locally because the
+    planner sets ``model=`` directly and bypasses the router.
+    """
+    model_lower = (model or "").lower()
+    is_premium = "sonnet" in model_lower or "opus" in model_lower
+    logger.info(
+        "planner_invocation stage=%s model=%s premium=%s reason=long_horizon_plan",
+        stage,
+        model,
+        is_premium,
+    )
