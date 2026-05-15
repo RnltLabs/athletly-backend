@@ -1011,3 +1011,37 @@ def test_record_tool_forced_outcome_ignores_unknown_gate():
     record_tool_forced_outcome(("does_not_exist",), success=True)
     summary = get_gates_metrics().summary()
     assert summary["totals"]["tool_forced_regenerate_success"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 14-day window: stats grounding allowlist additions
+# ---------------------------------------------------------------------------
+#
+# When the coach proposes future sessions or reads the window, paces and
+# durations in the reply are grounded by those tool calls. The
+# stats_grounding gate must therefore accept ``propose_sessions`` and
+# ``get_session_window`` as read-tools.
+
+
+def test_stats_grounding_passes_with_propose_sessions_call():
+    ctx = _ctx(
+        response_text="Morgen 60 min easy, Z2 bei 5:30/km.",
+        tools_recent=("propose_sessions",),
+    )
+    r = _gate_stats_grounding(ctx)
+    assert r.passed
+
+
+def test_stats_grounding_passes_with_get_session_window_call():
+    ctx = _ctx(
+        response_text="Diese Woche stehen 4 Einheiten an, gesamt 5h.",
+        tools_recent=("get_session_window",),
+    )
+    r = _gate_stats_grounding(ctx)
+    assert r.passed
+
+
+def test_stats_grounding_allowlist_contains_new_window_tools():
+    from src.agent.response_gates import _READ_TOOLS_FOR_STATS
+    assert "propose_sessions" in _READ_TOOLS_FOR_STATS
+    assert "get_session_window" in _READ_TOOLS_FOR_STATS

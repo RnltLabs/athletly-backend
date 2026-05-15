@@ -345,6 +345,77 @@ class UserModel:
             "updated_at": self.meta.get("updated_at", now),
         }
 
+    # ── Active Plan Summary (14-day rolling window) ──────────────
+
+    def get_active_plan_summary(self) -> str | None:
+        """Return a short prose summary of the rolling 14-day window.
+
+        Reads recent + upcoming rows from the ``training_sessions``
+        table introduced in migration ``20260515000000``. Returns
+        ``None`` when no rows are visible (no Supabase, no user_id, no
+        sessions). The string is plain text suitable for injection
+        into ``# Active Training Plan`` in the runtime context.
+        """
+        from src.config import get_settings as _gs
+        uid = getattr(self, "user_id", None) or _gs().agenticsports_user_id
+        if not uid:
+            return None
+        if not _gs().use_supabase:
+            return None
+        try:
+            from src.db.client import get_supabase
+            from datetime import date as _d, timedelta as _td
+
+            today = _d.today()
+            start = (today - _td(days=7)).isoformat()
+            end = (today + _td(days=14)).isoformat()
+            rows = (
+                get_supabase()
+                .table("training_sessions")
+                .select("date, modality, status, payload, notes")
+                .eq("user_id", uid)
+                .gte("date", start)
+                .lte("date", end)
+                .order("date", desc=False)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            return None
+
+        if not rows:
+            return None
+
+        planned = sum(1 for r in rows if r.get("status") == "planned")
+        completed = sum(1 for r in rows if r.get("status") == "completed")
+        skipped = sum(1 for r in rows if r.get("status") == "skipped")
+        modulated = sum(1 for r in rows if r.get("status") == "modulated")
+        modalities = sorted({
+            r.get("modality") for r in rows
+            if isinstance(r.get("modality"), str) and r.get("modality")
+        })
+
+        lines = [
+            f"14-day window: {planned} planned, {completed} completed, "
+            f"{skipped} skipped, {modulated} modulated.",
+            f"Modalities in window: {', '.join(modalities) if modalities else 'none'}.",
+        ]
+        # First 5 upcoming planned sessions, chronologically.
+        upcoming = [
+            r for r in rows
+            if r.get("status") == "planned"
+            and isinstance(r.get("date"), str)
+            and r["date"] >= today.isoformat()
+        ][:5]
+        for r in upcoming:
+            modality = r.get("modality") or "session"
+            notes = (r.get("notes") or "").strip()
+            note_part = f" - {notes}" if notes else ""
+            lines.append(f"  {r.get('date')}: {modality}{note_part}")
+
+        return "\n".join(lines)
+
     # ── Structured Core Updates ──────────────────────────────────
 
     def update_structured_core(self, field_path: str, value) -> None:

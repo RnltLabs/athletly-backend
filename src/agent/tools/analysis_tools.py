@@ -67,9 +67,15 @@ def register_analysis_tools(registry: ToolRegistry):
     ))
 
     def compare_plan_vs_actual() -> dict:
-        """Compare planned vs actual training this week across all data sources."""
+        """Compare planned vs actual training this week across all data sources.
+
+        Reads planned sessions from the new ``training_sessions`` table
+        (14-day rolling window) instead of the legacy ``plans`` JSONB
+        blob. Sessions from the last 7 days are taken as the comparison
+        baseline.
+        """
         from src.config import get_settings
-        from src.db.plans_db import get_active_plan
+        from src.db.client import get_supabase
         from src.db.activity_store_db import list_activities
         from src.db.health_data_db import list_health_activities
         from datetime import datetime, timedelta, timezone
@@ -79,18 +85,42 @@ def register_analysis_tools(registry: ToolRegistry):
         if not user_id:
             return {"status": "error", "message": "No user_id configured."}
 
-        plan_row = get_active_plan(user_id)
-        if not plan_row:
-            return {"status": "no_plan", "message": "No active plan to compare against."}
+        week_start_dt = datetime.now(timezone.utc) - timedelta(days=7)
+        week_start_iso = week_start_dt.isoformat()
+        week_start_date = week_start_dt.date().isoformat()
 
-        plan_data = plan_row.get("plan_data", {})
-        sessions = plan_data.get("sessions") or plan_data.get("weekly_sessions") or []
+        try:
+            db = get_supabase()
+            session_rows = (
+                db.table("training_sessions")
+                .select("date, modality, status, payload")
+                .eq("user_id", user_id)
+                .gte("date", week_start_date)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            return {"status": "error", "message": f"read failed: {exc}"}
+
+        # The "planned" baseline for comparison is every session row that
+        # falls inside the window, regardless of current status: a
+        # completed session was once planned, a modulated one still is.
+        # The old shape inflated session dicts with `sport`; the new
+        # shape uses `modality`. We surface BOTH keys for downstream
+        # consumers (the legacy frontend reads `sport`).
+        sessions = [
+            {"sport": r.get("modality"), "modality": r.get("modality"), **r}
+            for r in session_rows
+        ]
         if not sessions:
-            return {"status": "no_plan", "message": "Active plan has no sessions."}
+            return {
+                "status": "no_plan",
+                "message": "No training sessions in the current window.",
+            }
 
-        week_start = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        agent_acts = list_activities(user_id, limit=100, after=week_start)
-        health_acts = list_health_activities(user_id, limit=100, after=week_start)
+        agent_acts = list_activities(user_id, limit=100, after=week_start_iso)
+        health_acts = list_health_activities(user_id, limit=100, after=week_start_iso)
 
         from src.agent.tools.format_helpers import minutes_to_hms
 

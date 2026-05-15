@@ -112,7 +112,10 @@ def test_core_tool_names_is_frozenset() -> None:
     [
         # Tools referenced in STRICT rules. Any of these going non-core
         # is a regression that breaks the corresponding STRICT rule.
-        "save_plan",
+        "propose_sessions",
+        "modify_session",
+        "complete_session",
+        "get_session_window",
         "update_profile",
         "update_goal",
         "get_activities",

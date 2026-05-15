@@ -73,7 +73,14 @@ def _execute_training_load(summary: dict, period_days: int = 28) -> dict:
 
 
 def _make_plan_row(sessions: list[dict] | None = None) -> dict:
-    """Return a fake plan DB row with the given sessions list."""
+    """Compatibility helper that wraps a list of sessions.
+
+    The new compare_plan_vs_actual reads directly from the
+    ``training_sessions`` table, so what the tests really need is the
+    list of session rows. This helper still exists so the older
+    parametrized tests keep working; ``_execute_compare`` extracts
+    ``plan_data.sessions`` and treats it as the prescribed window.
+    """
     return {
         "id": "plan-abc-123",
         "user_id": USER_ID,
@@ -86,6 +93,39 @@ def _make_plan_row(sessions: list[dict] | None = None) -> dict:
             ]
         },
     }
+
+
+def _session_rows_from_plan(plan_row: dict | None) -> list[dict]:
+    """Adapt a legacy plan_row into ``training_sessions`` rows.
+
+    The legacy shape used ``{sport: "running", day: "Monday"}`` (or
+    ``type`` as an alias, or ``weekly_sessions`` instead of
+    ``sessions``). The new shape uses ``{modality, date, status,
+    payload}``. We map every legacy session to a fake row that the new
+    compare_plan_vs_actual can read directly.
+    """
+    if not plan_row:
+        return []
+    plan_data = plan_row.get("plan_data") or {}
+    sessions = (
+        plan_data.get("sessions")
+        or plan_data.get("weekly_sessions")
+        or []
+    )
+    rows: list[dict] = []
+    for i, s in enumerate(sessions):
+        modality = s.get("sport") or s.get("type") or "unknown"
+        rows.append({
+            "id": f"row-{i}",
+            "user_id": USER_ID,
+            # Use a recent date so the inside-window filter trivially
+            # passes; the gate logic does not care about the exact day.
+            "date": "2026-03-01",
+            "modality": modality,
+            "status": s.get("status") or "planned",
+            "payload": s.get("payload") or {},
+        })
+    return rows
 
 
 def _make_agent_activity(sport: str = "running", start_time: str = "2026-03-03T07:00:00") -> dict:
@@ -109,15 +149,49 @@ def _make_health_activity(
     }
 
 
+def _make_fake_supabase(session_rows: list[dict]) -> MagicMock:
+    """Build a MagicMock that mimics the Supabase fluent query chain.
+
+    The new compare_plan_vs_actual calls
+    ``db.table('training_sessions').select(...).eq(...).gte(...).execute()``
+    and reads ``.data`` off the result. The mock returns ``session_rows``
+    regardless of filters; the test asserts on the aggregated output.
+    """
+    db = MagicMock()
+    table = MagicMock()
+    db.table.return_value = table
+
+    def chain(*args, **kwargs):
+        return table
+
+    table.select.side_effect = chain
+    table.eq.side_effect = chain
+    table.gte.side_effect = chain
+    table.lte.side_effect = chain
+    table.order.side_effect = chain
+    execute_result = MagicMock()
+    execute_result.data = session_rows
+    table.execute.return_value = execute_result
+    return db
+
+
 def _execute_compare(
     plan_row: dict | None,
     agent_acts: list[dict],
     health_acts: list[dict],
 ) -> dict:
+    """Run compare_plan_vs_actual with the legacy plan_row helper.
+
+    Adapts plan_row to ``training_sessions`` rows on the fly so the
+    test fixtures stay unchanged. ``plan_row=None`` mocks an empty
+    window which now resolves to ``no_plan``.
+    """
     registry = _register_analysis_tools()
+    session_rows = _session_rows_from_plan(plan_row)
+    fake_db = _make_fake_supabase(session_rows)
     with (
         patch("src.config.get_settings", return_value=_make_settings()),
-        patch("src.db.plans_db.get_active_plan", return_value=plan_row),
+        patch("src.db.client.get_supabase", return_value=fake_db),
         patch("src.db.activity_store_db.list_activities", return_value=agent_acts),
         patch("src.db.health_data_db.list_health_activities", return_value=health_acts),
     ):
@@ -469,9 +543,10 @@ class TestComparePlanVsActualSportBreakdowns:
     def test_missing_user_id_returns_error(self) -> None:
         settings = _make_settings(user_id="")
         registry = _register_analysis_tools()
+        fake_db = _make_fake_supabase(_session_rows_from_plan(_make_plan_row()))
         with (
             patch("src.config.get_settings", return_value=settings),
-            patch("src.db.plans_db.get_active_plan", return_value=_make_plan_row()),
+            patch("src.db.client.get_supabase", return_value=fake_db),
             patch("src.db.activity_store_db.list_activities", return_value=[]),
             patch("src.db.health_data_db.list_health_activities", return_value=[]),
         ):

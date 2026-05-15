@@ -120,6 +120,20 @@ def test_pace_comparison_directional_rule_description_loaded():
     assert "compare_paces" in _CRITIC_SYSTEM_PROMPT
 
 
+def test_no_fabricated_stats_rule_mentions_window_tools():
+    """The grounding rule must list propose_sessions and get_session_window.
+
+    The 14-day window: a future-session prescription with paces or
+    durations is grounded when the coach called these tools. The rule
+    description must say so explicitly so the LLM judge does not flag
+    them as fabricated.
+    """
+    from src.agent.critic import _CRITIC_SYSTEM_PROMPT
+
+    assert "propose_sessions" in _CRITIC_SYSTEM_PROMPT
+    assert "get_session_window" in _CRITIC_SYSTEM_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # JSON parsing
 # ---------------------------------------------------------------------------

@@ -207,6 +207,10 @@ _READ_TOOLS_FOR_STATS = frozenset(
         "get_activity_details",
         "get_health_summary",
         "get_recovery_alerts",
+        # 14-day window: prescriptions and reads ground future-session
+        # stats (durations, target paces, distances in upcoming rows).
+        "propose_sessions",
+        "get_session_window",
     }
 )
 

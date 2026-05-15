@@ -13,12 +13,10 @@ These tests cover each gate plus the save_plan failure-surfacing path.
 from __future__ import annotations
 
 import logging
-from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.agent.planner import (
-    PlannerResult,
     _LONG_HORIZON_WEEKS_THRESHOLD,
     _looks_like_long_horizon,
     _parse_explicit_weeks,
@@ -247,201 +245,13 @@ def test_looks_like_long_horizon_singular_woche_match() -> None:
 
 
 # ---------------------------------------------------------------------------
-# save_plan integration: routing + error surfacing
+# save_plan integration tests removed: the 24-week save_plan flow was
+# replaced by the 14-day rolling window in session_tools. The planner
+# heuristic (should_use_plan_and_execute) is still tested above because
+# it remains useful for the long-horizon intent layer registered by the
+# typed-tables agent, but it is no longer wired into the coach loop.
+# See tests/test_session_tools.py for the new lifecycle coverage.
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def fake_user_model(lisa_profile: dict) -> MagicMock:
-    """Stand-in for UserModel: only exposes project_profile + user_id."""
-    um = MagicMock()
-    um.user_id = "test-user"
-    um.project_profile.return_value = lisa_profile
-    return um
-
-
-def _build_save_plan(fake_user_model: MagicMock):
-    """Register planning tools against a tmp registry and return save_plan."""
-    from src.agent.tools.registry import ToolRegistry
-    from src.agent.tools.planning_tools import register_planning_tools
-
-    reg = ToolRegistry()
-    register_planning_tools(reg, fake_user_model)
-    return reg._tools["save_plan"].handler
-
-
-def test_save_plan_routes_to_planner_when_skinny_request(
-    fake_user_model: MagicMock,
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Skinny multi-week request: planner pipeline runs, output is saved."""
-    # Use file-backed path (use_supabase=False) to keep the test hermetic.
-    monkeypatch.chdir(tmp_path)
-    # Patch at the call site (planning_tools imports get_settings by
-    # name, not by module attribute, so patching src.config.get_settings
-    # is not enough - we patch the imported reference too).
-    fake_settings = type("S", (), {
-        "use_supabase": False,
-        "agenticsports_user_id": "test-user",
-    })()
-    monkeypatch.setattr(
-        "src.agent.tools.planning_tools.get_settings",
-        lambda: fake_settings,
-    )
-
-    planner_output = {
-        "start_date": "2026-06-01",
-        "focus": "16-week marathon build",
-        "sessions": [{"day": "monday", "date": "2026-06-01", "sport": "running",
-                      "name": "Easy", "description": "", "duration_minutes": 45,
-                      "intensity": "low"}],
-        "outline": {"duration_weeks": 16},
-        "_generation_meta": {"mode": "plan_and_execute"},
-    }
-    fake_result = PlannerResult(
-        plan=planner_output,
-        mode="plan_and_execute",
-        meta={"weeks": 16},
-    )
-
-    with patch("src.agent.planner.generate_training_plan", return_value=fake_result) as m:
-        save_plan = _build_save_plan(fake_user_model)
-        result = save_plan({
-            "duration_weeks": 16,
-            "start_date": "2026-06-01",
-            "goal_event": "Marathon Berlin",
-        })
-
-    assert m.called, "generate_training_plan must be invoked for a skinny long-horizon request"
-    assert result.get("saved") is True
-    # The saved file should be the PLANNER output, not the skinny request.
-    import json
-    saved_path = result["path"]
-    with open(saved_path) as f:
-        on_disk = json.load(f)
-    assert on_disk.get("focus") == "16-week marathon build"
-    assert on_disk.get("_generation_meta", {}).get("mode") == "plan_and_execute"
-
-
-def test_save_plan_returns_error_on_planner_failure(
-    fake_user_model: MagicMock,
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """When planner returns inline_fallback, save_plan must surface an error."""
-    monkeypatch.chdir(tmp_path)
-    # Patch at the call site (planning_tools imports get_settings by
-    # name, not by module attribute, so patching src.config.get_settings
-    # is not enough - we patch the imported reference too).
-    fake_settings = type("S", (), {
-        "use_supabase": False,
-        "agenticsports_user_id": "test-user",
-    })()
-    monkeypatch.setattr(
-        "src.agent.tools.planning_tools.get_settings",
-        lambda: fake_settings,
-    )
-
-    fail_result = PlannerResult(
-        plan={"duration_weeks": 16, "start_date": "2026-06-01"},
-        mode="inline_fallback",
-        meta={"fallback_reason": "planner exhausted retries"},
-    )
-
-    with patch("src.agent.planner.generate_training_plan", return_value=fail_result):
-        save_plan = _build_save_plan(fake_user_model)
-        result = save_plan({
-            "duration_weeks": 16,
-            "start_date": "2026-06-01",
-            "goal_event": "Marathon Berlin",
-        })
-
-    assert "error" in result, f"expected error envelope, got {result!r}"
-    assert result.get("mode") == "planner_failed"
-    # No plan should have been persisted - no `saved=True`.
-    assert "saved" not in result
-
-
-def test_save_plan_returns_error_on_planner_exception(
-    fake_user_model: MagicMock,
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Planner crash: surface an error rather than silently downgrading."""
-    monkeypatch.chdir(tmp_path)
-    # Patch at the call site (planning_tools imports get_settings by
-    # name, not by module attribute, so patching src.config.get_settings
-    # is not enough - we patch the imported reference too).
-    fake_settings = type("S", (), {
-        "use_supabase": False,
-        "agenticsports_user_id": "test-user",
-    })()
-    monkeypatch.setattr(
-        "src.agent.tools.planning_tools.get_settings",
-        lambda: fake_settings,
-    )
-
-    with patch(
-        "src.agent.planner.generate_training_plan",
-        side_effect=RuntimeError("anthropic 500"),
-    ):
-        save_plan = _build_save_plan(fake_user_model)
-        result = save_plan({
-            "duration_weeks": 16,
-            "start_date": "2026-06-01",
-            "goal_event": "Marathon Berlin",
-        })
-
-    assert "error" in result
-    assert result.get("mode") == "planner_failed"
-    assert "anthropic 500" in (result.get("fallback_reason") or "")
-
-
-def test_save_plan_inline_short_plan_still_works(
-    fake_user_model: MagicMock,
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Adjustments: skip the planner entirely, persist the inline dict."""
-    monkeypatch.chdir(tmp_path)
-    # Patch at the call site (planning_tools imports get_settings by
-    # name, not by module attribute, so patching src.config.get_settings
-    # is not enough - we patch the imported reference too).
-    fake_settings = type("S", (), {
-        "use_supabase": False,
-        "agenticsports_user_id": "test-user",
-    })()
-    monkeypatch.setattr(
-        "src.agent.tools.planning_tools.get_settings",
-        lambda: fake_settings,
-    )
-
-    inline = {
-        "start_date": "2026-06-01",
-        "focus": "Recovery week",
-        "sessions": [
-            {"day": "monday", "date": "2026-06-01", "sport": "running",
-             "name": "Easy", "description": "", "duration_minutes": 30,
-             "intensity": "low"},
-        ],
-    }
-
-    # Use a Mock that fails if called, to prove the planner was NOT invoked.
-    with patch(
-        "src.agent.planner.generate_training_plan",
-        side_effect=AssertionError("planner must NOT run for adjustment"),
-    ):
-        # Make the profile have NO triathlon keywords so the backstop also
-        # stays silent.
-        fake_user_model.project_profile.return_value = {
-            "constraints": {"training_days_per_week": 5},
-            "sports": ["running"],
-        }
-        save_plan = _build_save_plan(fake_user_model)
-        result = save_plan(inline)
-
-    assert result.get("saved") is True
 
 
 # ---------------------------------------------------------------------------

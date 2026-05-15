@@ -56,7 +56,10 @@ _RULE_DESCRIPTIONS: dict[str, str] = {
     "no_fabricated_stats":
         "no_fabricated_stats: numeric stats (pace, distance, HR, power, "
         "VO2max) for a specific activity are allowed ONLY if tools_called "
-        "includes get_activities or get_activity_details.",
+        "includes get_activities or get_activity_details. Future-session "
+        "prescriptions (paces, durations, distances in an upcoming "
+        "workout) are grounded by propose_sessions or get_session_window "
+        "and do NOT count as fabrication when those tools were called.",
     "no_premature_trends":
         "no_premature_trends: trend claims (improving, declining, etc.) "
         "need at least 5 data points / sessions of evidence.",

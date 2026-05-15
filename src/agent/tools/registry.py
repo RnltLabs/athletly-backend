@@ -37,11 +37,16 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # Profile write: agent hallucinates value types (string "null" -> int col)
     # without seeing the full param schema, so keep description always loaded.
     "update_profile",
-    # Plan write: shape is non-trivial ("sessions": [...] required, NOT a
-    # weekly_structure dict). Agent without the description guesses wrong
-    # and emits an empty plan_preview card.
-    "save_plan",
-    "get_active_plan",
+    # Session lifecycle: 14-day rolling window. The model needs the full
+    # schema visible to construct propose_sessions correctly (per-session
+    # date / modality / payload shape) and to know which lifecycle tool
+    # to call for the request type (propose vs modify vs complete vs
+    # read the current window vs extend).
+    "propose_sessions",
+    "modify_session",
+    "complete_session",
+    "get_session_window",
+    "extend_window",
     # Read context (cheap, often needed)
     "get_activities",
     "get_athlete_profile",
@@ -244,10 +249,13 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     """
     registry = ToolRegistry()
 
-    # Import and register all tool modules
+    # Import and register all tool modules. The legacy
+    # ``planning_tools`` module is intentionally NOT imported here:
+    # save_plan / get_active_plan / get_plan_history were retired in
+    # favour of the 14-day rolling window in ``session_tools``. The
+    # file stays in the tree (unused) until a future cleanup sprint.
     from src.agent.tools.data_tools import register_data_tools
     from src.agent.tools.analysis_tools import register_analysis_tools
-    from src.agent.tools.planning_tools import register_planning_tools
     from src.agent.tools.memory_tools import register_memory_tools
     from src.agent.tools.research_tools import register_research_tools
     from src.agent.tools.meta_tools import register_meta_tools
@@ -284,7 +292,6 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_health_trend_tools(registry, user_id=_user_id)
     register_health_inventory_tools(registry)
     register_analysis_tools(registry)
-    register_planning_tools(registry, user_model)
     register_memory_tools(registry, user_model)
     register_research_tools(registry)
     register_meta_tools(registry, user_model)
