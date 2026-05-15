@@ -1556,15 +1556,6 @@ class AsyncAgentLoop(AgentLoop):
         fails open. Uses one LLM regenerate, then a deterministic
         sanitizer as last resort.
         """
-        # Record the deterministic per-rule counts separately so the
-        # /admin/critic-stats dashboard keeps visibility into "how often
-        # does the coach try to emit em-dash / markdown / ASCII-umlaut".
-        # These ids are no longer part of the LLM-critic RULE_IDS so
-        # they would not appear in by_rule otherwise.
-        record_hard = getattr(metrics, "record_hard_violations", None)
-        if callable(record_hard):
-            record_hard(tuple(v.rule for v in hard_violations))
-
         rewritten = await asyncio.to_thread(
             self.regenerate_after_critique,
             response_text,
@@ -1579,8 +1570,6 @@ class AsyncAgentLoop(AgentLoop):
             )
             return rewritten
 
-        if callable(record_hard):
-            record_hard(tuple(v.rule for v in rewrite_hard))
         sanitized = sanitize(rewritten, user_message)
         metrics.record(
             action="regenerate_failed",
