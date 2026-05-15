@@ -16,12 +16,15 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
-# The STRICT rule ids the critic checks. Kept in sync with the
+# The STRICT rule ids the LLM-critic checks. Kept in sync with the
 # constitution table in DESIGN.md and src/agent/critic.py.
+#
+# The deterministic rules (no_em_dash, no_markdown, umlauts) are NOT in
+# this list: they are owned exclusively by ``hard_inspect`` and counted
+# under :data:`HARD_RULE_IDS` below. The LLM-critic was hallucinating
+# violations on already-sanitized text (production telemetry, 2026-05-15)
+# so the deterministic rules now live only in the deterministic layer.
 RULE_IDS: tuple[str, ...] = (
-    "no_em_dash",
-    "no_markdown",
-    "umlauts",
     "no_fabricated_stats",
     "no_premature_trends",
     "language_mirror",
@@ -29,6 +32,16 @@ RULE_IDS: tuple[str, ...] = (
     "sync_then_status",
     "pace_format_correct",
     "pace_comparison_directional",
+)
+
+# Deterministic always-block rule ids owned by ``hard_inspect``. Tracked
+# separately from RULE_IDS so per-rule counters survive the LLM-critic
+# slimming (the coach attempting to emit an em-dash is still useful
+# observability even though the deterministic layer always blocks it).
+HARD_RULE_IDS: tuple[str, ...] = (
+    "no_em_dash",
+    "no_markdown",
+    "umlauts",
 )
 
 
@@ -47,6 +60,9 @@ class CriticMetrics:
 
     def __init__(self, max_records: int = 500) -> None:
         self._records: deque[CritiqueRecord] = deque(maxlen=max_records)
+        self._hard_violations_by_rule: dict[str, int] = {
+            rid: 0 for rid in HARD_RULE_IDS
+        }
         self._lock = threading.Lock()
 
     def record(
@@ -76,10 +92,25 @@ class CriticMetrics:
         with self._lock:
             self._records.append(rec)
 
+    def record_hard_violations(self, violations: tuple[str, ...]) -> None:
+        """Increment the per-rule counter for deterministic hard violations.
+
+        Counts how often ``hard_inspect`` blocked a response on each
+        deterministic rule. Unbounded (no ring buffer) because the
+        counter is a simple monotonic total: useful for the admin
+        dashboard to see "how often does the coach try to emit an
+        em-dash" without polluting LLM-critic stats.
+        """
+        with self._lock:
+            for rule_id in violations:
+                if rule_id in self._hard_violations_by_rule:
+                    self._hard_violations_by_rule[rule_id] += 1
+
     def summary(self) -> dict:
         """Return a JSON-serializable summary of the metrics buffer."""
         with self._lock:
             recent = list(self._records)
+            hard_snapshot = dict(self._hard_violations_by_rule)
 
         n = len(recent)
         if n == 0:
@@ -90,6 +121,7 @@ class CriticMetrics:
                 "regenerate_failed_rate": 0.0,
                 "critic_error_rate": 0.0,
                 "by_rule": {rid: 0 for rid in RULE_IDS},
+                "hard_violations_by_rule": hard_snapshot,
                 "avg_critic_latency_ms": 0,
             }
 
@@ -112,6 +144,7 @@ class CriticMetrics:
             "regenerate_failed_rate": round(counts["regenerate_failed"] / n, 4),
             "critic_error_rate": round(counts["critic_error"] / n, 4),
             "by_rule": by_rule,
+            "hard_violations_by_rule": hard_snapshot,
             "avg_critic_latency_ms": total_latency // n,
         }
 
@@ -119,6 +152,9 @@ class CriticMetrics:
         """Drop all records. Used by tests."""
         with self._lock:
             self._records.clear()
+            self._hard_violations_by_rule = {
+                rid: 0 for rid in HARD_RULE_IDS
+            }
 
 
 _singleton: CriticMetrics | None = None

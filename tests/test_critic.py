@@ -35,6 +35,7 @@ from src.agent.critic import (
 )
 from src.api.routers.chat import _make_sse_event
 from src.services.critic_metrics import (
+    HARD_RULE_IDS,
     RULE_IDS,
     CriticMetrics,
     get_metrics,
@@ -76,17 +77,16 @@ def _critic(model: str = "anthropic/claude-haiku-4-5-20251001") -> Critic:
 # ---------------------------------------------------------------------------
 
 
-def test_rule_ids_count_is_ten():
-    # Sprint C added pace_format_correct (8 -> 9). Iter 2 Sprint I
-    # added pace_comparison_directional (9 -> 10).
-    assert len(RULE_IDS) == 10
+def test_rule_ids_count_is_seven():
+    # 2026-05-15: the three deterministic rules (no_em_dash, no_markdown,
+    # umlauts) were removed from the LLM-critic constitution. They live
+    # solely in ``hard_inspect`` now; tracked separately under
+    # ``HARD_RULE_IDS``. The LLM-critic owns only the semantic rules.
+    assert len(RULE_IDS) == 7
 
 
 def test_rule_ids_match_design_spec():
     expected = {
-        "no_em_dash",
-        "no_markdown",
-        "umlauts",
         "no_fabricated_stats",
         "no_premature_trends",
         "language_mirror",
@@ -96,6 +96,32 @@ def test_rule_ids_match_design_spec():
         "pace_comparison_directional",
     }
     assert set(RULE_IDS) == expected
+
+
+def test_hard_rule_ids_cover_deterministic_layer():
+    """The three deterministic rules live under HARD_RULE_IDS now."""
+    assert set(HARD_RULE_IDS) == {"no_em_dash", "no_markdown", "umlauts"}
+
+
+def test_llm_critic_prompt_omits_deterministic_rules():
+    """Regression for production accept_rate=0.0 bug (2026-05-15).
+
+    The LLM-critic was flagging em-dash / markdown / umlauts on text
+    already sanitized by ``hard_inspect`` + ``sanitize_hard``. Those
+    rules MUST NOT appear in the LLM-critic system prompt or it will
+    hallucinate violations on clean inputs.
+    """
+    from src.agent.critic import _CRITIC_SYSTEM_PROMPT, _RULE_DESCRIPTIONS
+
+    assert "no_em_dash" not in _RULE_DESCRIPTIONS
+    assert "no_markdown" not in _RULE_DESCRIPTIONS
+    assert "umlauts" not in _RULE_DESCRIPTIONS
+    # And those rule ids must not be quoted in the prompt body either.
+    assert "no_em_dash" not in _CRITIC_SYSTEM_PROMPT
+    assert "no_markdown" not in _CRITIC_SYSTEM_PROMPT
+    # ``umlauts`` could in principle appear as a noun in another rule's
+    # description; assert on the rule id form (colon-prefixed) instead.
+    assert "umlauts:" not in _CRITIC_SYSTEM_PROMPT
 
 
 def test_pace_format_correct_rule_description_loaded():
@@ -151,16 +177,16 @@ def test_from_llm_json_accept_path():
 def test_from_llm_json_regenerate_path():
     raw = json.dumps({
         "violations": [
-            {"rule": "no_em_dash", "reason": "Em-dash at position 12."},
-            {"rule": "no_markdown", "reason": "**bold** wrapper detected."},
+            {"rule": "no_fabricated_stats", "reason": "HRV 67 without tools."},
+            {"rule": "language_mirror", "reason": "German user, English reply."},
         ],
         "action": "regenerate",
     })
     result = CriticResult.from_llm_json(raw, latency_ms=123)
     assert result.action == "regenerate"
     assert len(result.violations) == 2
-    assert result.violations[0].rule == "no_em_dash"
-    assert result.violation_ids() == ("no_em_dash", "no_markdown")
+    assert result.violations[0].rule == "no_fabricated_stats"
+    assert result.violation_ids() == ("no_fabricated_stats", "language_mirror")
 
 
 def test_from_llm_json_strips_code_fences():
@@ -173,19 +199,22 @@ def test_from_llm_json_filters_unknown_rules():
     raw = json.dumps({
         "violations": [
             {"rule": "unknown_rule", "reason": "x"},
-            {"rule": "no_em_dash", "reason": "real"},
+            # ``no_em_dash`` was removed from RULE_IDS (now owned by
+            # hard_inspect); the parser must drop it as unknown too.
+            {"rule": "no_em_dash", "reason": "ignored"},
+            {"rule": "no_fabricated_stats", "reason": "real"},
         ],
         "action": "regenerate",
     })
     result = CriticResult.from_llm_json(raw, latency_ms=0)
-    # Only the known rule survives.
-    assert result.violation_ids() == ("no_em_dash",)
+    # Only the known semantic rule survives.
+    assert result.violation_ids() == ("no_fabricated_stats",)
 
 
 def test_from_llm_json_coerces_action_to_match_violations():
     # Model says accept but lists violations: trust the violations list.
     raw = json.dumps({
-        "violations": [{"rule": "no_em_dash", "reason": "x"}],
+        "violations": [{"rule": "no_fabricated_stats", "reason": "x"}],
         "action": "accept",
     })
     result = CriticResult.from_llm_json(raw, latency_ms=0)
@@ -318,16 +347,51 @@ def test_review_accept_path():
 def test_review_regenerate_path():
     c = _critic()
     payload = json.dumps({
-        "violations": [{"rule": "no_em_dash", "reason": "em-dash at pos 5"}],
+        "violations": [
+            {"rule": "no_fabricated_stats",
+             "reason": "HRV stat without tool call"},
+        ],
         "action": "regenerate",
     })
     with patch(
         "src.agent.critic.chat_completion",
         return_value=_mock_llm_response(payload),
     ):
-        result = c.review("Bad - response.", "Hello", [])
+        result = c.review("Your HRV is 67.", "How's my recovery?", [])
     assert result.should_regenerate
-    assert result.violation_ids() == ("no_em_dash",)
+    assert result.violation_ids() == ("no_fabricated_stats",)
+
+
+def test_review_ignores_hallucinated_deterministic_rules():
+    """Production regression (2026-05-15, accept_rate=0.0).
+
+    The LLM-critic was flagging em-dash / markdown / umlauts on text
+    already cleaned by ``hard_inspect`` + ``sanitize_hard``. After
+    Sprint Critic-Audit those rule ids are no longer part of the
+    LLM-critic vocabulary. Even if the model still emits them (legacy
+    training, prompt leak), the parser drops them as unknown rules so
+    they never produce a spurious regenerate.
+    """
+    c = _critic()
+    payload = json.dumps({
+        "violations": [
+            {"rule": "no_em_dash", "reason": "hallucinated"},
+            {"rule": "no_markdown", "reason": "hallucinated"},
+            {"rule": "umlauts", "reason": "hallucinated"},
+        ],
+        "action": "regenerate",
+    })
+    clean_text = "Heute ist Easy Run, 60 min bei 5:30/km."
+    with patch(
+        "src.agent.critic.chat_completion",
+        return_value=_mock_llm_response(payload),
+    ):
+        result = c.review(clean_text, "Was ist mein Training heute?", [])
+    # All three flagged rules were dropped as unknown.
+    assert result.violation_ids() == ()
+    # And the action coerces back to accept.
+    assert result.action == "accept"
+    assert result.error is False
 
 
 # ---------------------------------------------------------------------------
@@ -396,14 +460,37 @@ def test_metrics_record_regenerate_increments_rule_counters():
     m = CriticMetrics()
     m.record(
         action="regenerate",
-        violations=("no_em_dash", "no_markdown"),
+        violations=("no_fabricated_stats", "language_mirror"),
         latency_ms=200,
     )
     summary = m.summary()
     assert summary["regenerate_rate"] == 1.0
-    assert summary["by_rule"]["no_em_dash"] == 1
-    assert summary["by_rule"]["no_markdown"] == 1
-    assert summary["by_rule"]["umlauts"] == 0
+    assert summary["by_rule"]["no_fabricated_stats"] == 1
+    assert summary["by_rule"]["language_mirror"] == 1
+    assert summary["by_rule"]["sync_then_status"] == 0
+
+
+def test_metrics_record_hard_violations_increments_hard_counters():
+    """Deterministic rule violations are counted separately, not in by_rule."""
+    m = CriticMetrics()
+    m.record_hard_violations(("no_em_dash", "no_markdown"))
+    m.record_hard_violations(("no_em_dash",))
+    summary = m.summary()
+    assert summary["hard_violations_by_rule"]["no_em_dash"] == 2
+    assert summary["hard_violations_by_rule"]["no_markdown"] == 1
+    assert summary["hard_violations_by_rule"]["umlauts"] == 0
+    # And these never leak into the LLM-critic by_rule view.
+    assert "no_em_dash" not in summary["by_rule"]
+    assert "no_markdown" not in summary["by_rule"]
+    assert "umlauts" not in summary["by_rule"]
+
+
+def test_metrics_record_hard_violations_ignores_unknown_rules():
+    """Unknown rule ids are silently dropped from the hard counter."""
+    m = CriticMetrics()
+    m.record_hard_violations(("not_a_rule",))
+    summary = m.summary()
+    assert all(count == 0 for count in summary["hard_violations_by_rule"].values())
 
 
 def test_metrics_rejects_unknown_actions():
@@ -416,8 +503,10 @@ def test_metrics_rejects_unknown_actions():
 def test_metrics_summary_structure():
     m = CriticMetrics()
     m.record(action="accept", violations=(), latency_ms=10)
-    m.record(action="regenerate", violations=("no_em_dash",), latency_ms=200)
-    m.record(action="regenerate_failed", violations=("no_em_dash",), latency_ms=350)
+    m.record(action="regenerate",
+             violations=("no_fabricated_stats",), latency_ms=200)
+    m.record(action="regenerate_failed",
+             violations=("no_fabricated_stats",), latency_ms=350)
     m.record(action="critic_error", violations=(), latency_ms=5)
 
     summary = m.summary()
@@ -428,6 +517,7 @@ def test_metrics_summary_structure():
         "regenerate_failed_rate",
         "critic_error_rate",
         "by_rule",
+        "hard_violations_by_rule",
         "avg_critic_latency_ms",
     }
     assert summary["window_calls"] == 4
@@ -436,6 +526,7 @@ def test_metrics_summary_structure():
     assert summary["regenerate_failed_rate"] == 0.25
     assert summary["critic_error_rate"] == 0.25
     assert set(summary["by_rule"].keys()) == set(RULE_IDS)
+    assert set(summary["hard_violations_by_rule"].keys()) == set(HARD_RULE_IDS)
 
 
 def test_metrics_empty_buffer_zeros():
@@ -501,14 +592,14 @@ def test_get_critic_returns_same_instance():
 
 def test_sse_critic_review_event_shape():
     payload = {
-        "violations": [{"rule": "no_em_dash", "reason": "x"}],
+        "violations": [{"rule": "no_fabricated_stats", "reason": "x"}],
         "annotated": True,
     }
     evt = _make_sse_event("critic_review", payload)
     assert evt.event == "critic_review"
     body = json.loads(evt.data)
     assert body["annotated"] is True
-    assert body["violations"][0]["rule"] == "no_em_dash"
+    assert body["violations"][0]["rule"] == "no_fabricated_stats"
 
 
 # ---------------------------------------------------------------------------
@@ -531,21 +622,21 @@ def test_critic_result_to_event_payload():
     r = CriticResult(
         action="regenerate",
         violations=(
-            Violation(rule="no_em_dash", reason="r1"),
-            Violation(rule="no_markdown", reason="r2"),
+            Violation(rule="no_fabricated_stats", reason="r1"),
+            Violation(rule="language_mirror", reason="r2"),
         ),
         latency_ms=100,
     )
     payload = r.to_event_payload()
     assert payload["annotated"] is True
     assert len(payload["violations"]) == 2
-    assert payload["violations"][0]["rule"] == "no_em_dash"
+    assert payload["violations"][0]["rule"] == "no_fabricated_stats"
 
 
 def test_critic_result_should_regenerate_excludes_errors():
     err = CriticResult(
         action="regenerate",
-        violations=(Violation(rule="no_em_dash", reason="x"),),
+        violations=(Violation(rule="no_fabricated_stats", reason="x"),),
         error=True,
     )
     # An error result still wears action="regenerate" only in test
