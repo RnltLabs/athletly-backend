@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS public.coach_notes (
     user_id            UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     content            TEXT NOT NULL,
     scope              TEXT,
-    source_session_id  UUID REFERENCES public.sessions(id) ON DELETE SET NULL,
+    source_session_id  UUID REFERENCES public.training_sessions(id) ON DELETE SET NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
