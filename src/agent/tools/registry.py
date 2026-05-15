@@ -279,6 +279,7 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     from src.agent.tools.skill_tools import register_skill_tools
     from src.agent.tools.journal_tools import register_journal_tools
     from src.agent.tools.journal_state_tools import register_journal_state_tools
+    from src.agent.tools.web_search_tool import register_web_search_tool
 
     # Resolve user_id from user_model for tools that need it
     from src.config import get_settings as _get_settings
@@ -311,6 +312,11 @@ def get_default_tools(user_model, context: str = "coach") -> ToolRegistry:
     register_skill_tools(registry, user_model)
     register_journal_tools(registry, user_model)
     register_journal_state_tools(registry, user_model)
+    # Cached web_search (Brave + Postgres 30-day cache). Registered AFTER
+    # register_research_tools so the cached implementation wins. The
+    # legacy Anthropic-server-side variant in research_tools.py is kept
+    # for now but will be removed once all callers migrate.
+    register_web_search_tool(registry)
 
     if context == "onboarding":
         from src.agent.tools.onboarding_tools import register_onboarding_tools

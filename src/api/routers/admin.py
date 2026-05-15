@@ -13,6 +13,10 @@ from src.services.cache_telemetry import get_telemetry
 from src.services.critic_metrics import get_metrics as get_critic_metrics
 from src.services.gates_metrics import get_gates_metrics
 from src.services.prompt_metrics import get_prompt_metrics
+from src.services.web_search_metrics import (
+    get_top_queries,
+    get_web_search_metrics,
+)
 
 router = APIRouter(tags=["admin"])
 
@@ -50,6 +54,27 @@ async def critic_stats() -> dict:
         critic calls, and the average critic latency in milliseconds.
     """
     return get_critic_metrics().summary()
+
+
+@router.get("/web-search-stats")
+async def web_search_stats(
+    window_minutes: int = Query(60, ge=1, le=1440),
+) -> dict:
+    """web_search tool telemetry over a rolling time window.
+
+    Args:
+        window_minutes: How far back to aggregate. 1 to 1440 minutes
+            (24h). Defaults to 60.
+
+    Returns:
+        Dict with total_calls, cache_hit_rate, api_errors, avg_latency
+        from the in-memory ring buffer over the requested window,
+        plus the top 10 most-cached queries by hit_count read from
+        Postgres.
+    """
+    summary = get_web_search_metrics().summary(window_seconds=window_minutes * 60)
+    summary["top_queries"] = get_top_queries(limit=10)
+    return summary
 
 
 @router.get("/gates-stats")
