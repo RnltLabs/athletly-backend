@@ -39,13 +39,40 @@ def build_athlete_md(user_id: str) -> str:
         )
 
         base = read_journal(user_id) or ensure_journal_exists(user_id)
+        chunks: list[str] = [base.strip()]
+
+        state = _build_journal_state_block(user_id)
+        if state:
+            chunks.append(state.strip())
+
         live = _build_live_sections(user_id)
-        if not live:
-            return base.strip() + "\n"
-        return base.strip() + "\n\n" + live.strip() + "\n"
+        if live:
+            chunks.append(live.strip())
+
+        return "\n\n".join(chunks) + "\n"
     except Exception:
         logger.exception("build_athlete_md failed for user %s", user_id)
         return "# Athlete Profile\n\n_(profile context unavailable)_\n"
+
+
+# ---------------------------------------------------------------------------
+# Typed journal state (intents, programs, coach_notes)
+# ---------------------------------------------------------------------------
+
+
+def _build_journal_state_block(user_id: str) -> str:
+    """Render the typed coach state (intents/programs/notes) as markdown.
+
+    The dedicated helper lives in :mod:`src.agent.journal_state_md`; we
+    isolate the import in a try/except so any DB failure simply omits
+    the block instead of breaking the full prompt build.
+    """
+    try:
+        from src.agent.journal_state_md import render_journal_state_md
+        return render_journal_state_md(user_id)
+    except Exception:
+        logger.exception("_build_journal_state_block failed for %s", user_id)
+        return ""
 
 
 # ---------------------------------------------------------------------------
